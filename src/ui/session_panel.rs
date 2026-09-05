@@ -5,7 +5,6 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -208,7 +207,7 @@ fn session_row(
     let fg = cx.theme().foreground;
     let active = active_project && six == this.current_session;
     let element_id = SharedString::from(s.id.clone());
-    // Spinner tracks live PTY output, not the (long-lived) process:
+    // Working state tracks live PTY output, not the (long-lived) process:
     // an agent idling at its prompt must not look busy.
     let working = s.status.is_running()
         && s.is_agent()
@@ -268,10 +267,14 @@ fn session_row(
                 ),
         )
         .when(working, |el| {
+            // Activity pulse: a small accent dot, Zed-style — the spinner
+            // read as perpetual motion for background work.
             el.child(
-                div().flex_shrink_0().child(
-                    Spinner::new().with_size(gpui_kit::component::Size::XSmall),
-                ),
+                div()
+                    .flex_shrink_0()
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(cx.theme().accent),
             )
         })
         .when(

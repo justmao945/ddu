@@ -60,25 +60,11 @@ pub(crate) fn open(window: &mut Window, cx: &mut App) {
                                 ),
                         )
                         .page(
-                            SettingPage::new("Sessions")
+                            SettingPage::new("Terminal")
                                 .header_style(&page_header_style())
                                 .icon(IconName::SquareTerminal)
                                 .group(
                                     SettingGroup::new()
-                                        .title("New session")
-                                        .item(
-                                            SettingItem::new(
-                                                "Default type",
-                                                default_session_field(),
-                                            )
-                                            .description(
-                                                "What the sidebar + button creates.",
-                                            ),
-                                        ),
-                                )
-                                .group(
-                                    SettingGroup::new()
-                                        .title("Terminal")
                                         .item(
                                             SettingItem::new("Shell", shell_program_field())
                                                 .description("Program for Terminal sessions."),
@@ -90,9 +76,26 @@ pub(crate) fn open(window: &mut Window, cx: &mut App) {
                                         .item(
                                             SettingItem::new("Font", terminal_font_field())
                                                 .description(
-                                                    "Family name; empty = system mono.",
+                                                    "Terminal typeface; `System default` uses the \
+                                                     platform mono face.",
                                                 ),
                                         ),
+                                ),
+                        )
+                        .page(
+                            SettingPage::new("Sessions")
+                                .header_style(&page_header_style())
+                                .icon(IconName::SquareTerminal)
+                                .group(
+                                    SettingGroup::new().item(
+                                        SettingItem::new(
+                                            "Default type",
+                                            default_session_field(),
+                                        )
+                                        .description(
+                                            "What the sidebar + button creates.",
+                                        ),
+                                    ),
                                 )
                                 .group(builtin_agent_groups(cx))
                                 .group(custom_agents_group(cx)),
@@ -172,26 +175,121 @@ fn shell_args_field() -> SettingField<SharedString> {
     )
 }
 
-/// Terminal font family input; empty means the system default mono face.
+/// Terminal font picker backed by the platform's installed faces.
+///
+/// A dropdown (not a text input) per the system-component convention: the
+/// option list is the text system's font registry, headed by an explicit
+/// `System default` entry that maps to the empty config value.
 fn terminal_font_field() -> SettingField<SharedString> {
-    SettingField::<SharedString>::input(
-        |cx| {
-            cx.global::<crate::config::Config>()
-                .terminal_font
-                .clone()
-                .unwrap_or_default()
-                .into()
-        },
-        |value, cx| {
-            let v = value.trim().to_string();
-            update_config(
-                move |c, _| {
-                    c.terminal_font = (!v.is_empty()).then_some(v.clone());
-                },
-                cx,
-            );
-        },
-    )
+    const SYSTEM_DEFAULT: &str = "__system_default__";
+    SettingField::<SharedString>::render(move |options, window, cx| {
+        let configured = cx.global::<crate::config::Config>()
+            .terminal_font
+            .clone()
+            .unwrap_or_default();
+        let mut families: Vec<String> = window.text_system().all_font_names();
+        families.retain(|f| is_mono_family(f));
+        families.sort();
+        families.dedup();
+        let current: SharedString = if configured.is_empty() {
+            SYSTEM_DEFAULT.into()
+        } else {
+            configured.clone().into()
+        };
+        let label = if configured.is_empty() {
+            "System default".to_string()
+        } else {
+            configured
+        };
+        Button::new("terminal-font-select")
+            .label(label)
+            .dropdown_caret(true)
+            .outline()
+            .disabled(options.is_disabled())
+            .with_size(options.size())
+            .w(px(220.))
+            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                let mut m = menu
+                    .max_h(px(420.))
+                    .scrollable(true)
+                    .item(
+                        PopupMenuItem::new("System default")
+                            .checked(current == SYSTEM_DEFAULT)
+                            .on_click(|_, _, cx| {
+                                update_config(|c, _| c.terminal_font = None, cx);
+                            }),
+                    );
+                for family in &families {
+                    let checked = current == family.as_str();
+                    let family = family.clone();
+                    m = m.item(
+                        PopupMenuItem::new(family.clone())
+                            .checked(checked)
+                            .on_click(move |_, _, cx| {
+                                let family = family.clone();
+                                update_config(
+                                    move |c, _| c.terminal_font = Some(family.clone()),
+                                    cx,
+                                );
+                            }),
+                    );
+                }
+                m
+            })
+    })
+}
+
+/// Monospace detection. gpui's text system exposes no `is_monospace`
+/// flag, so gate the picker on the known mono families a terminal would
+/// care about, intersected with what the platform actually has
+/// installed (the caller retains over `all_font_names()`).
+fn is_mono_family(family: &str) -> bool {
+    const MONO_FAMILIES: &[&str] = &[
+        "Menlo",
+        "Monaco",
+        "SF Mono",
+        "SFMono-Regular",
+        "Courier",
+        "Courier New",
+        "Courier Prime",
+        "Andale Mono",
+        "PT Mono",
+        "Ubuntu Mono",
+        "Ubuntu Sans Mono",
+        "DejaVu Sans Mono",
+        "Liberation Mono",
+        "Noto Sans Mono",
+        "JetBrains Mono",
+        "Fira Code",
+        "Fira Mono",
+        "Source Code Pro",
+        "IBM Plex Mono",
+        "Space Mono",
+        "Roboto Mono",
+        "Cascadia Code",
+        "Cascadia Mono",
+        "JetBrains Mono",
+        "JetBrainsMono Nerd Font",
+        "JetBrainsMono Nerd Font Mono",
+        "JetBrains Mono NL",
+        "Hack",
+        "Inconsolata",
+        "Iosevka",
+        "Victor Mono",
+        "Monaspace Neon",
+        "Monaspace Argon",
+        "Monaspace Xenon",
+        "Monaspace Radon",
+        "Monaspace Krypton",
+        "Sarasa Mono SC",
+        "Sarasa Term SC",
+        "Maple Mono",
+        "Maple Mono NF",
+        " maple mono nf cn",
+    ];
+    MONO_FAMILIES
+        .iter()
+        .any(|m| family.eq_ignore_ascii_case(m))
 }
 
 /// One arg-input item per builtin agent.
@@ -329,9 +427,11 @@ fn page_header_style() -> StyleRefinement {
     style
 }
 
-/// Apply a theme mode globally and refresh every window.
 pub(crate) fn set_theme(mode: ThemeMode, cx: &mut App) {
     Theme::change(mode, None, cx);
+    // `Theme::change` re-applies the registry theme config; keep the
+    // compact 14px base set at startup (see `main.rs`).
+    Theme::global_mut(cx).font_size = px(14.);
     cx.refresh_windows();
 }
 

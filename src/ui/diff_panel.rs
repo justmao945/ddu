@@ -180,7 +180,7 @@ fn tree_level(
     let indent = 14. * depth as f32;
     let radius_f = f32::from(radius);
 
-    let mut level = v_flex().items_start().gap_0p5();
+    let mut level = v_flex().items_stretch().gap_0p5();
 
     for (ix, f) in &tree.files {
         level = level.child(file_row(*ix, f, *ix == selected, indent, radius_f, active_bg, hov_bg, cx));
@@ -206,7 +206,7 @@ fn tree_level(
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_sm()
+                            .text_xs()
                             .font_medium()
                             .whitespace_nowrap()
                             .text_color(cx.theme().foreground.opacity(0.9))
@@ -241,8 +241,11 @@ fn file_row(
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
+    // Full width so the `+N −N` stats pin to the panel's right edge
+    // (items_stretch on the parent) instead of trailing the filename.
     div()
         .id(("diff-file", ix))
+        .w_full()
         .h(px(ROW_PX))
         .flex()
         .items_center()
@@ -262,25 +265,41 @@ fn file_row(
         )
         .child(
             div()
-                .flex_shrink_0()
-                .text_sm()
+                .flex_1()
+                .min_w_0()
+                .text_xs()
+                .overflow_hidden()
                 .whitespace_nowrap()
+                .text_ellipsis()
                 .child(name),
         )
-        .child(div().flex_1())
         .child(plus_minus(f.added, f.removed, cx))
 }
 
 fn plus_minus(added: usize, removed: usize, cx: &mut Context<AppView>) -> impl IntoElement {
     let mono = cx.theme().mono_font_family.clone();
+    // Tabular figures in a fixed track: +/- counts align vertically
+    // across rows, GitHub-style.
     div()
         .flex_shrink_0()
         .flex()
-        .gap_2()
+        .justify_end()
         .text_xs()
         .font_family(mono)
-        .child(div().text_color(cx.theme().green).child(format!("+{added}")))
-        .child(div().text_color(cx.theme().red).child(format!("−{removed}")))
+        .child(
+            div()
+                .min_w(px(34.))
+                .text_right()
+                .text_color(cx.theme().green)
+                .child(format!("+{added}")),
+        )
+        .child(
+            div()
+                .min_w(px(34.))
+                .text_right()
+                .text_color(cx.theme().red)
+                .child(format!("−{removed}")),
+        )
 }
 
 fn file_diff(file: &DiffFile, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -333,7 +352,7 @@ fn diff_line(line: &DiffLine, cx: &mut Context<AppView>) -> impl IntoElement {
         .items_start()
         .min_w_full()
         .font_family(mono)
-        .text_sm()
+        .text_xs()
         .when_some(tint, |el, tint| el.bg(tint))
         .child(gutter(old, cx))
         .child(gutter(new, cx))

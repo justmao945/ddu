@@ -160,8 +160,16 @@ impl Element for TerminalElement {
     }
 }
 
-/// Split the visible cells into rows, coalesce same-style runs per row
-/// and paint background + glyphs.
+/// Split the visible cells into rows and paint background + glyphs.
+///
+/// Each row is laid out segment-by-segment at exact cell boundaries:
+/// ASCII runs shape naturally (mono face = cell_width per char), while a
+/// `WIDE_CHAR` cell plus its `WIDE_CHAR_SPACER` partner forms a
+/// two-character run shaped with `force_width = 2 * cell_width`, so the
+/// CJK glyph occupies exactly two grid columns instead of overflowing
+/// into the next cell. Zero-width cells (combining marks) and spacer
+/// cells are skipped as separate paint targets — they are covered by
+/// their base run's shaping.
 fn paint_grid(
     content: &mut RenderableContent<'_>,
     m: &Metrics,
@@ -188,39 +196,87 @@ fn paint_grid(
         if row.iter().all(|c| c.c == ' ') {
             continue;
         }
-        let y = point(
-            origin.x,
-            origin.y + px(f32::from(m.line_height) * row_ix as f32),
-        );
+        let y = origin.y + px(f32::from(m.line_height) * row_ix as f32);
 
-        let mut text = String::with_capacity(row.len() * 2);
-        let mut runs: Vec<TextRun> = Vec::new();
-        let mut open: Option<(StyleKey, usize)> = None;
-        for cell in row {
-            let key = StyleKey::of(cell, palette);
-            match &mut open {
-                Some((k, len)) if *k == key => *len += cell.c.len_utf8(),
-                Some((k, len)) => {
-                    let (k, len) = (*k, *len);
-                    runs.push(k.into_run(len, &m.font));
-                    open = Some((key, cell.c.len_utf8()));
-                }
-                None => open = Some((key, cell.c.len_utf8())),
+        // Split the row into paintable segments at style boundaries,
+        // widening wide-char groups to their two-column footprint.
+        let mut segs: Vec<Seg> = Vec::new();
+        let mut ix = 0;
+        while ix < row.len() {
+            let cell = row[ix];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+                || cell.c == '\0'
+            {
+                ix += 1;
+                continue;
             }
-            text.push(cell.c);
+            let wide = cell.flags.contains(Flags::WIDE_CHAR);
+            // Same-style run extent. A wide char paints alone (its spacer
+            // cell is covered by the forced two-column shaping); ASCII
+            // continues while style matches and no wide cell intervenes.
+            let mut run_end = ix + 1;
+            while run_end < row.len()
+                && !row[run_end].flags.contains(Flags::WIDE_CHAR)
+                && !row[run_end]
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                && row[run_end].c != '\0'
+                && StyleKey::of(row[run_end], palette) == StyleKey::of(cell, palette)
+            {
+                run_end += 1;
+            }
+            let text: String = row[ix..run_end].iter().map(|c| c.c).collect();
+            segs.push(Seg {
+                text,
+                key: StyleKey::of(cell, palette),
+                // A wide char owns two columns: itself + its spacer.
+                cols: if wide { 2. } else { (run_end - ix) as f32 },
+                force_width: wide.then(|| px(f32::from(m.cell_width) * 2.)),
+            });
+            ix = run_end;
         }
-        if let Some((k, len)) = open.take() {
-            runs.push(k.into_run(len, &m.font));
+        let mut x = origin.x;
+        for seg in segs {
+            if seg.text.is_empty() {
+                continue;
+            }
+            let run = seg.key.into_run(seg.text.len(), &m.font);
+            let shaped = window.text_system().shape_line(
+                seg.text.clone().into(),
+                m.font_size,
+                &[run],
+                seg.force_width,
+            );
+            let _ = shaped.paint_background(
+                point(x, y),
+                m.line_height,
+                TextAlign::Left,
+                Some(shaped.width()),
+                window,
+                cx,
+            );
+            let _ = shaped.paint(
+                point(x, y),
+                m.line_height,
+                TextAlign::Left,
+                Some(shaped.width()),
+                window,
+                cx,
+            );
+            x += px(f32::from(m.cell_width) * seg.cols);
         }
-        if text.is_empty() {
-            continue;
-        }
-
-        let shaped = window.text_system().shape_line(text.into(), m.font_size, &runs, None);
-        let align = TextAlign::Left;
-        let _ = shaped.paint_background(y, m.line_height, align, None, window, cx);
-        let _ = shaped.paint(y, m.line_height, align, None, window, cx);
     }
+}
+
+/// One paintable run of same-styled cells within a row.
+struct Seg {
+    text: String,
+    key: StyleKey,
+    /// Grid columns this segment covers (wide chars count double).
+    cols: f32,
+    /// `Some(w)` pins shaping to an exact pixel width (wide-char runs).
+    force_width: Option<Pixels>,
 }
 
 fn paint_cursor(
@@ -237,16 +293,14 @@ fn paint_cursor(
         origin: point(x, y),
         size: size(m.cell_width, m.line_height),
     };
+    // Zed-style block: solid accent fill when focused (reads against the
+    // One Dark background, unlike a 30% wash), hollow outline when not.
     let accent = cx.theme().accent;
-    window.paint_quad(fill(
-        bounds,
-        if focused { accent.opacity(0.30) } else { transparent_black() },
-    ));
-    window.paint_quad(outline(
-        bounds,
-        accent.opacity(if focused { 0.9 } else { 0.4 }),
-        BorderStyle::Solid,
-    ));
+    if focused {
+        window.paint_quad(fill(bounds, accent));
+    } else {
+        window.paint_quad(outline(bounds, accent.opacity(0.6), BorderStyle::Solid));
+    }
 }
 
 /// Everything that forces a style change between cells.
@@ -302,12 +356,12 @@ impl StyleKey {
         }
     }
 }
-
 /// Maps alacritty cell colors onto a fixed terminal palette.
 ///
 /// Terminals need stable, saturated ANSI colors — theme-derived tints
-/// wash out agent CLIs' output. Both palettes are the classic Tango set
-/// used by Zed's "Tango Light" and gnome-terminal dark profiles.
+/// wash out agent CLIs' output. Both palettes are Zed's official
+/// "One Dark" / "One Light" terminal ANSI ramps
+/// (zed-industries/zed `assets/themes/one/one.json`).
 struct TerminalPalette {
     fg: Hsla,
     bg: Hsla,
@@ -318,30 +372,37 @@ impl TerminalPalette {
     fn new(theme: &Theme) -> Self {
         match theme.mode {
             ThemeMode::Dark => Self {
-                fg: rgb(0xeeeeec).into(),
-                bg: rgb(0x2e3436).into(),
-                base: tango_palette(),
+                fg: rgb(0xabb2bf).into(),
+                bg: rgb(0x282c34).into(),
+                base: one_dark_palette(),
             },
             ThemeMode::Light => Self {
-                fg: rgb(0x2e3436).into(),
-                bg: rgb(0xffffff).into(),
-                base: tango_palette(),
+                fg: rgb(0x2a2c33).into(),
+                bg: rgb(0xfafafa).into(),
+                base: one_light_palette(),
             },
         }
     }
 }
 
-/// The 16 Tango colors: dim row 0-7, bright row 8-15.
-const TANGO: [u32; 16] = [
-    0x2e3436, 0xcc0000, 0x4e9a06, 0xc4a000, 0x3465a4, 0x75507b, 0x06989a, 0xd3d7cf, //
-    0x555753, 0xef2929, 0x8ae234, 0xfce94f, 0x729fcf, 0xad7fa8, 0x34e2e2, 0xeeeeec,
+/// Zed "One Dark" terminal ANSI colors: dim row 0-7, bright row 8-15.
+const ONE_DARK: [u32; 16] = [
+    0x282c34, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf, //
+    0x636d83, 0xEA858B, 0xAAD581, 0xFFD885, 0x85C1FF, 0xD398EB, 0x6ED5DE, 0xfafafa,
 ];
 
-/// The 16 Tango colors as [`Hsla`], dim 0-7 then bright 8-15. One base
-/// table serves both modes: light/dark differ in fg/bg (and the shell
-/// background), not in the ANSI ramp.
-fn tango_palette() -> [Hsla; 16] {
-    TANGO.map(|c| rgb(c).into())
+/// Zed "One Light" terminal ANSI colors: dim row 0-7, bright row 8-15.
+const ONE_LIGHT: [u32; 16] = [
+    0x000000, 0xde3e35, 0x3f953a, 0xd2b67c, 0x2f5af3, 0x950095, 0x0997b3, 0xbbbbbb, //
+    0x555555, 0xde3e35, 0x3f953a, 0xd2b67c, 0x2f5af3, 0xa00095, 0x0bbcd6, 0xffffff,
+];
+
+fn one_dark_palette() -> [Hsla; 16] {
+    ONE_DARK.map(|c| rgb(c).into())
+}
+
+fn one_light_palette() -> [Hsla; 16] {
+    ONE_LIGHT.map(|c| rgb(c).into())
 }
 
 impl TerminalPalette {

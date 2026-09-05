@@ -484,6 +484,17 @@ impl AppView {
             // the center pane, not the sidebar.
             self.last_sidebar_size = self.resize_state.read(cx).sizes().first().copied();
         }
+        // `insert_panel`/`remove_panel` redistribute every slot's width
+        // proportionally (gpui-base `ResizableState`), which visually
+        // resizes the untouched diff pane. Re-pin the diff to its old
+        // width afterwards: `resize_panel` on the last panel takes the
+        // freed/given space only from its left neighbor — the center.
+        let old_diff_ix = usize::from(!on) + 1;
+        let diff_w = if self.show_diff {
+            self.resize_state.read(cx).sizes().get(old_diff_ix).copied()
+        } else {
+            None
+        };
         self.resize_state.update(cx, |state, cx| {
             if on {
                 state.insert_panel(Some(restore_w), Some(0), cx);
@@ -491,6 +502,11 @@ impl AppView {
                 state.remove_panel(0, cx);
             }
         });
+        if let Some(w) = diff_w {
+            // Diff sits at index 2 (sidebar open) resp. 1 (closed) after
+            // the mutation; both are the last slot.
+            self.pin_panel(usize::from(on) + 1, w, cx);
+        }
         cx.notify();
     }
 
@@ -510,6 +526,13 @@ impl AppView {
             // Capture before removal: the slot shifts after `remove_panel`.
             self.last_diff_size = self.resize_state.read(cx).sizes().get(ix).copied();
         }
+        // Pin the untouched sidebar across the toggle, like `set_sessions`:
+        // `insert_panel`/`remove_panel` would otherwise rescale it.
+        let sidebar_w = if self.show_sessions {
+            Some(self.resize_state.read(cx).sizes()[0])
+        } else {
+            None
+        };
         self.resize_state.update(cx, |state, cx| {
             if on {
                 state.insert_panel(Some(restore_w), Some(ix), cx);
@@ -517,7 +540,25 @@ impl AppView {
                 state.remove_panel(ix, cx);
             }
         });
+        if let Some(w) = sidebar_w {
+            self.pin_panel(0, w, cx);
+        }
         cx.notify();
+    }
+
+    /// Force panel `ix` to `w`, letting the center pane absorb the change
+    /// (via `resize_panel`'s drag-space math) instead of staying skewed by
+    /// `insert_panel`/`remove_panel`'s proportional redistribution.
+    fn pin_panel(&self, ix: usize, w: Pixels, cx: &mut Context<Self>) {
+        let this = cx.weak_entity();
+        let state = self.resize_state.downgrade();
+        cx.spawn(async move |_, cx| {
+            let _ = state.update_in(cx, |state, window, cx| {
+                state.resize_panel(ix, w, window, cx);
+            });
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
     }
 
     fn last_sidebar_w(&self) -> Pixels {
