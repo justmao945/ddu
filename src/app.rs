@@ -48,10 +48,9 @@ pub struct AppView {
 
 /// Panel geometry (px): defaults, drag limits and collapse thresholds.
 ///
-/// Dragging a divider below a side pane's min collapses it: sizes are
-/// measured real layout widths (the sidebar clamps at SIDEBAR_MIN during
-/// drag, so measured < min only happens when the window itself forces
-/// it smaller), and the `Resized` event fires on drag release.
+/// `size_range` min values are load-bearing twice: they clamp drags and
+/// emit CSS `min_w`, so a panel can never render below its min even when
+/// the window itself is squeezed (flex then shrinks the center pane).
 const SIDEBAR_DEFAULT: f32 = 200.;
 const SIDEBAR_MAX: f32 = 420.;
 const SIDEBAR_MIN: f32 = 150.;
@@ -60,6 +59,9 @@ const DIFF_MAX: f32 = 600.;
 const DIFF_MIN: f32 = 200.;
 /// The terminal pane never shrinks below this while dragging a divider.
 const CENTER_MIN: f32 = 400.;
+/// Window minimum: all three panes at min plus two resize handles.
+pub(crate) const WINDOW_MIN_WIDTH: f32 = SIDEBAR_MIN + CENTER_MIN + DIFF_MIN + 8.;
+pub(crate) const WINDOW_MIN_HEIGHT: f32 = 400.;
 
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -102,18 +104,6 @@ impl AppView {
             diff: None,
             diff_seq: 0,
         };
-        // Dragging a divider below a side pane's min collapses it on
-        // release (`Resized` fires at drag end, sizes are real by then).
-        // The collapse mutates the same ResizableState whose `emit`
-        // scheduled this callback, so defer it one effects frame —
-        // re-entering the emitter's update from inside its own effect
-        // would hit a live borrow.
-        cx.subscribe_in(&this.resize_state, window, |_this, _, _: &ResizablePanelEvent, window, cx| {
-            cx.defer_in(window, |this, _, cx| {
-                this.collapse_under_sized_panels(cx);
-            });
-        })
-        .detach();
         this.start_diff_poll(cx);
         this.start_ui_tick(cx);
         // First session for the first project, honoring the configured
@@ -441,24 +431,6 @@ impl AppView {
         cx.notify();
     }
 
-    /// Collapse side panels measured below their min width. Called one
-    /// frame after `Resized` (drag release): sizes are real layout
-    /// widths by then. The sidebar drags clamp at SIDEBAR_MIN, so only
-    /// a window too small for all three panes can land a side panel
-    /// under its min.
-    fn collapse_under_sized_panels(&mut self, cx: &mut Context<Self>) {
-        let sizes = self.resize_state.read(cx).sizes().clone();
-        if self.show_sessions && sizes.first().is_some_and(|w| *w < px(SIDEBAR_MIN)) {
-            self.set_sessions(false, cx);
-        }
-        if self.show_diff {
-            let ix = usize::from(self.show_sessions) + 1;
-            if sizes.get(ix).is_some_and(|w| *w < px(DIFF_MIN)) {
-                self.set_diff(false, cx);
-            }
-        }
-    }
-
     fn request_close_current_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.current_session() else {
             return;
@@ -566,7 +538,7 @@ impl Render for AppView {
                         resizable_panel()
                             .size(px(SIDEBAR_DEFAULT))
                             .flex_none()
-                            .size_range(px(0.)..px(SIDEBAR_MAX))
+                            .size_range(px(SIDEBAR_MIN)..px(SIDEBAR_MAX))
                             .child(ui::session_panel::render(self, cx)),
                     );
                 }
@@ -580,7 +552,7 @@ impl Render for AppView {
                         resizable_panel()
                             .size(px(DIFF_DEFAULT))
                             .flex_none()
-                            .size_range(px(0.)..px(DIFF_MAX))
+                            .size_range(px(DIFF_MIN)..px(DIFF_MAX))
                             .child(ui::diff_panel::render(self, cx)),
                     );
                 }

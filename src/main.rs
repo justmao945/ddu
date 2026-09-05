@@ -61,6 +61,7 @@ fn main() {
 
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(960.), px(680.)), cx)),
+            window_min_size: Some(size(px(app::WINDOW_MIN_WIDTH), px(app::WINDOW_MIN_HEIGHT))),
             ..TitleBar::window_options()
         };
 
