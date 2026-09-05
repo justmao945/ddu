@@ -39,6 +39,10 @@ pub struct AppView {
     /// while the mouse travels into the popup (the popup occludes the
     /// row, so hover alone would unmount the trigger and kill the menu).
     pub(crate) menu_project: Option<usize>,
+    /// Last dragged width of the sidebar / diff pane, restored on
+    /// toggle-open instead of snapping back to the default.
+    pub(crate) last_sidebar_size: Option<Pixels>,
+    pub(crate) last_diff_size: Option<Pixels>,
     pub(crate) diff_file: usize,
     pub(crate) session_seq: usize,
     pub(crate) diff: Option<GitDiff>,
@@ -99,6 +103,8 @@ impl AppView {
             resize_state: cx.new(|_| ResizableState::default()),
             hovered_project: None,
             menu_project: None,
+            last_sidebar_size: None,
+            last_diff_size: None,
             diff_file: 0,
             session_seq: 0,
             diff: None,
@@ -400,9 +406,15 @@ impl AppView {
             return;
         }
         self.show_sessions = on;
+        let restore_w = self.last_sidebar_w();
+        if !on {
+            // Capture before removal: after `remove_panel(0)` slot 0 is
+            // the center pane, not the sidebar.
+            self.last_sidebar_size = self.resize_state.read(cx).sizes().first().copied();
+        }
         self.resize_state.update(cx, |state, cx| {
             if on {
-                state.insert_panel(Some(px(SIDEBAR_DEFAULT)), Some(0), cx);
+                state.insert_panel(Some(restore_w), Some(0), cx);
             } else {
                 state.remove_panel(0, cx);
             }
@@ -421,14 +433,31 @@ impl AppView {
         }
         let ix = usize::from(self.show_sessions) + 1;
         self.show_diff = on;
+        let restore_w = self.last_diff_w();
+        if !on {
+            // Capture before removal: the slot shifts after `remove_panel`.
+            self.last_diff_size = self.resize_state.read(cx).sizes().get(ix).copied();
+        }
         self.resize_state.update(cx, |state, cx| {
             if on {
-                state.insert_panel(Some(px(DIFF_DEFAULT)), Some(ix), cx);
+                state.insert_panel(Some(restore_w), Some(ix), cx);
             } else {
                 state.remove_panel(ix, cx);
             }
         });
         cx.notify();
+    }
+
+    fn last_sidebar_w(&self) -> Pixels {
+        self.last_sidebar_size
+            .filter(|w| *w >= px(SIDEBAR_MIN))
+            .unwrap_or(px(SIDEBAR_DEFAULT))
+    }
+
+    fn last_diff_w(&self) -> Pixels {
+        self.last_diff_size
+            .filter(|w| *w >= px(DIFF_MIN))
+            .unwrap_or(px(DIFF_DEFAULT))
     }
 
     fn request_close_current_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {

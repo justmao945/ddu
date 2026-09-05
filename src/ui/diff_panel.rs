@@ -4,7 +4,6 @@
 //! in both axes with visible scrollbars; diff lines never truncate —
 //! long lines scroll horizontally.
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -28,7 +27,7 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         .child(body(this, cx))
 }
 
-/// Panel header: branch + `N files · +A −R` + refresh.
+/// Panel header: branch + `N files · +A −R` (hidden entirely when clean).
 fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let diff = this.diff.as_ref();
     let branch = diff.and_then(|d| d.branch.clone());
@@ -50,15 +49,18 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .flex()
         .items_center()
         .gap_2()
-        .when_some(branch, |el, branch| {
-            el.child(
-                div()
-                    .text_sm()
-                    .font_medium()
-                    .text_color(cx.theme().foreground.opacity(0.9))
-                    .child(branch),
-            )
-        })
+        .when_some(
+            branch.filter(|_| files > 0),
+            |el, branch| {
+                el.child(
+                    div()
+                        .text_sm()
+                        .font_medium()
+                        .text_color(cx.theme().foreground.opacity(0.9))
+                        .child(branch),
+                )
+            },
+        )
         .when(files > 0, |el| {
             el.child(
                 h_flex()
@@ -80,14 +82,6 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
             )
         })
         .child(div().flex_1())
-        .child(
-            Button::new("refresh-diff")
-                .icon(IconName::RotateCw)
-                .ghost()
-                .small()
-                .tooltip("Refresh")
-                .on_click(cx.listener(|this, _, _, cx| this.reload_diff(cx))),
-        )
 }
 
 fn body(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -107,7 +101,10 @@ fn body(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .flex()
         .flex_col()
         // File tree: capped height, both-axis scroll with scrollbars;
-        // bottom divider separates it from the hunks below.
+        // bottom divider separates it from the hunks below. Rows keep
+        // natural width (`items_start` + no width constraint), so the
+        // `+N −N` stats right-align to the content and long names
+        // scroll horizontally instead of squeezing.
         .child({
             let tree = build_tree(&diff.files);
             div()
@@ -374,9 +371,11 @@ fn empty(text: &str, cx: &mut Context<AppView>) -> impl IntoElement {
     div()
         .flex_1()
         .flex()
-        .items_center()
+        .items_start()
         .justify_center()
+        .p_4()
         .text_sm()
         .text_color(cx.theme().foreground.opacity(0.4))
-        .child(text.to_string())
+        // Wrap instead of clipping when the panel is narrow.
+        .child(div().max_w_full().child(text.to_string()))
 }
