@@ -27,7 +27,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>ddu</string>
+  <key>CFBundleName</key><string>Day Day Up</string>
+  <key>CFBundleDisplayName</key><string>Day Day Up</string>
   <key>CFBundleIdentifier</key><string>dev.just.ddu</string>
   <key>CFBundleExecutable</key><string>launch.sh</string>
   <key>CFBundlePackageType</key><string>APPL</string>

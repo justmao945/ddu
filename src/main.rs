@@ -60,7 +60,7 @@ fn main() {
         cx.set_global(config::Config::load());
 
         let window_options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(1320.), px(820.)), cx)),
+            window_bounds: Some(WindowBounds::centered(size(px(960.), px(680.)), cx)),
             ..TitleBar::window_options()
         };
 

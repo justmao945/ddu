@@ -10,7 +10,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{PANEL_HEADER_PX, hover_bg, selection_bg, ROW_PX};
+use super::{AppIcon, PANEL_HEADER_PX, hover_bg, selection_bg, ROW_PX};
 use crate::app::AppView;
 use crate::session::{AgentSession, AgentStatus};
 
@@ -59,7 +59,7 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                 )
                 .child(
                     Button::new("add-project")
-                        .icon(super::AppIcon::FolderPlus)
+                        .icon(AppIcon::FolderPlus)
                         .ghost()
                         .small()
                         .tooltip("Add project…")
@@ -132,27 +132,49 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                     .text_color(if active_project { fg } else { fg.opacity(0.85) })
                                     .child(project.name.clone()),
                             )
-                            // Ops appear only while the row is hovered.
-                            .when(this.hovered_project == Some(p), |el| {
-                                el.child(
-                                    Button::new(("quick-add", p))
-                                        .icon(IconName::Plus)
-                                        .ghost()
-                                        .xsmall()
-                                        .tooltip("New session (default)")
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.current_project = p;
-                                            this.spawn_session(window, cx);
-                                        })),
-                                )
-                                .child(more_menu(this, p, cx))
-                            }),
+                            // Ops appear while the row is hovered — or while
+                            // this row's `...` menu is open: the popup
+                            // occludes the row, so hover would drop and
+                            // unmount the trigger mid-interaction.
+                            .when(
+                                this.hovered_project == Some(p) || this.menu_project == Some(p),
+                                |el| {
+                                    el.child(
+                                        Button::new(("quick-add", p))
+                                            .icon(IconName::Plus)
+                                            .ghost()
+                                            .xsmall()
+                                            .tooltip("New session (default)")
+                                            .on_click(cx.listener(
+                                                move |this, _, window, cx| {
+                                                    this.current_project = p;
+                                                    this.spawn_session(window, cx);
+                                                },
+                                            )),
+                                    )
+                                    .child(more_menu(this, p, cx))
+                                },
+                            ),
                     )
                     // ── level 2: session rows ──
                     .when(expanded, |el| {
-                        el.children(project.sessions.iter().enumerate().map(|(six, s)| {
-                            session_row(this, p, six, s, active_project, cx)
-                        }))
+                        if project.sessions.is_empty() {
+                            el.child(
+                                div()
+                                    .h(px(ROW_PX))
+                                    .flex()
+                                    .items_center()
+                                    .pl(px(18.))
+                                    .ml_1()
+                                    .text_xs()
+                                    .text_color(fg.opacity(0.35))
+                                    .child("No session yet"),
+                            )
+                        } else {
+                            el.children(project.sessions.iter().enumerate().map(|(six, s)| {
+                                session_row(this, p, six, s, active_project, cx)
+                            }))
+                        }
                     }),
             )
         }))
@@ -179,8 +201,8 @@ fn session_row(
         && s.term
             .as_ref()
             .is_some_and(|t| t.read(cx).active_within(ACTIVE_WINDOW));
+    let active_hover_bg = hover_bg(cx);
     let title = session_title(s, cx);
-
     div()
         .id(element_id)
         .h(px(SESSION_ROW_PX))
@@ -193,7 +215,7 @@ fn session_row(
         .rounded(radius)
         .cursor_pointer()
         .map(|el| if active { el.bg(active_bg) } else { el })
-        .hover(move |el| if active { el } else { el.bg(hov_bg) })
+        .hover(move |el| if active { el.bg(active_hover_bg) } else { el.bg(hov_bg) })
         .on_click(cx.listener(move |this, _, window, cx| {
             this.select_session(p, six, window, cx);
         }))
@@ -350,4 +372,13 @@ fn more_menu(_this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoE
         .ghost()
         .xsmall()
         .dropdown_menu_with_anchor(Anchor::TopRight, build_menu)
+        .on_open_change({
+            let view = cx.weak_entity();
+            move |open, _, cx| {
+                let _ = view.update(cx, |this, cx| {
+                    this.menu_project = if *open { Some(p) } else { None };
+                    cx.notify();
+                });
+            }
+        })
 }

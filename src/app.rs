@@ -35,6 +35,10 @@ pub struct AppView {
     pub(crate) resize_state: Entity<ResizableState>,
     /// Project row currently under the mouse (hides/reveals its buttons).
     pub(crate) hovered_project: Option<usize>,
+    /// Project whose `...` menu is open: keeps the row's buttons mounted
+    /// while the mouse travels into the popup (the popup occludes the
+    /// row, so hover alone would unmount the trigger and kill the menu).
+    pub(crate) menu_project: Option<usize>,
     pub(crate) diff_file: usize,
     pub(crate) session_seq: usize,
     pub(crate) diff: Option<GitDiff>,
@@ -43,7 +47,12 @@ pub struct AppView {
 }
 
 /// Panel geometry (px): defaults, drag limits and collapse thresholds.
-const SIDEBAR_DEFAULT: f32 = 232.;
+///
+/// Dragging a divider below a side pane's min collapses it: sizes are
+/// measured real layout widths (the sidebar clamps at SIDEBAR_MIN during
+/// drag, so measured < min only happens when the window itself forces
+/// it smaller), and the `Resized` event fires on drag release.
+const SIDEBAR_DEFAULT: f32 = 200.;
 const SIDEBAR_MAX: f32 = 420.;
 const SIDEBAR_MIN: f32 = 150.;
 const DIFF_DEFAULT: f32 = 340.;
@@ -51,7 +60,6 @@ const DIFF_MAX: f32 = 600.;
 const DIFF_MIN: f32 = 200.;
 /// The terminal pane never shrinks below this while dragging a divider.
 const CENTER_MIN: f32 = 400.;
-
 
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -88,6 +96,7 @@ impl AppView {
             show_diff: false,
             resize_state: cx.new(|_| ResizableState::default()),
             hovered_project: None,
+            menu_project: None,
             diff_file: 0,
             session_seq: 0,
             diff: None,
@@ -95,21 +104,14 @@ impl AppView {
         };
         // Dragging a divider below a side pane's min collapses it on
         // release (`Resized` fires at drag end, sizes are real by then).
-        cx.subscribe_in(&this.resize_state, window, |this, _, _: &ResizablePanelEvent, _, cx| {
-            let sizes = this.resize_state.read(cx).sizes().clone();
-            if this.show_sessions && sizes.first().is_some_and(|w| *w < px(SIDEBAR_MIN)) {
-                this.show_sessions = false;
-                this.resize_state.update(cx, |state, cx| state.remove_panel(0, cx));
-                cx.notify();
-            }
-            if this.show_diff {
-                let ix = usize::from(this.show_sessions) + 1;
-                if sizes.get(ix).is_some_and(|w| *w < px(DIFF_MIN)) {
-                    this.show_diff = false;
-                    this.resize_state.update(cx, |state, cx| state.remove_panel(ix, cx));
-                    cx.notify();
-                }
-            }
+        // The collapse mutates the same ResizableState whose `emit`
+        // scheduled this callback, so defer it one effects frame —
+        // re-entering the emitter's update from inside its own effect
+        // would hit a live borrow.
+        cx.subscribe_in(&this.resize_state, window, |_this, _, _: &ResizablePanelEvent, window, cx| {
+            cx.defer_in(window, |this, _, cx| {
+                this.collapse_under_sized_panels(cx);
+            });
         })
         .detach();
         this.start_diff_poll(cx);
@@ -206,6 +208,8 @@ impl AppView {
         };
 
         if let Some(project) = self.projects.get_mut(self.current_project) {
+            // A freshly created session must be visible immediately.
+            self.expanded[self.current_project] = true;
             project.sessions.push(crate::session::AgentSession {
                 id: format!("s-{seq}"),
                 title,
@@ -436,6 +440,25 @@ impl AppView {
         });
         cx.notify();
     }
+
+    /// Collapse side panels measured below their min width. Called one
+    /// frame after `Resized` (drag release): sizes are real layout
+    /// widths by then. The sidebar drags clamp at SIDEBAR_MIN, so only
+    /// a window too small for all three panes can land a side panel
+    /// under its min.
+    fn collapse_under_sized_panels(&mut self, cx: &mut Context<Self>) {
+        let sizes = self.resize_state.read(cx).sizes().clone();
+        if self.show_sessions && sizes.first().is_some_and(|w| *w < px(SIDEBAR_MIN)) {
+            self.set_sessions(false, cx);
+        }
+        if self.show_diff {
+            let ix = usize::from(self.show_sessions) + 1;
+            if sizes.get(ix).is_some_and(|w| *w < px(DIFF_MIN)) {
+                self.set_diff(false, cx);
+            }
+        }
+    }
+
     fn request_close_current_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.current_session() else {
             return;

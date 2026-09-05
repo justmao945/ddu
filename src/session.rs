@@ -79,7 +79,7 @@ impl AgentSession {
         let end = self.ended.unwrap_or_else(Instant::now);
         let secs = end.saturating_duration_since(self.started).as_secs();
         if secs < 60 {
-            "<1m".into()
+            "1m".into()
         } else if secs < 3600 {
             format!("{}m", secs / 60)
         } else if secs < 86_400 {
