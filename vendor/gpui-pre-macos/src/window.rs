@@ -759,12 +759,18 @@ impl MacWindowState {
 
     fn start_display_link(&mut self) {
         self.stop_display_link();
+        // ddu (macOS 26): windows of background apps no longer report
+        // NSWindowOcclusionStateVisible — they report a private on-screen
+        // bit (0x2000) instead, and windowDidChangeOcclusionState is not
+        // delivered for them either. Requiring the old Visible bit here
+        // made the display link never start for background-launched apps,
+        // freezing the window after its first frame. Any non-empty state
+        // means the window is composited on screen (fully occluded or
+        // miniaturized windows still report 0), which preserves upstream's
+        // intent of ticking only while the window can be seen.
         unsafe {
-            if !self
-                .native_window
-                .occlusionState()
-                .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
-            {
+            let state = self.native_window.occlusionState();
+            if state.bits() == 0 {
                 return;
             }
         }
@@ -1331,33 +1337,12 @@ impl Drop for MacWindow {
 /// window, as some messages will end hard faulting if dispatched to no longer
 /// valid window handles.
 fn if_window_not_closed(closed: Arc<AtomicBool>, f: impl FnOnce()) {
-    if !closed.load(std::sync::atomic::Ordering::Acquire) {
+    if !closed.load(Ordering::Acquire) {
         f();
     }
 }
 
 impl PlatformWindow for MacWindow {
-    fn schedule_frame(&self) {
-        // The CVDisplayLink pipeline only runs once something has kicked it
-        // (occlusion/became-key events that can be missed when the window is
-        // shown while the app launches in the background). Mirror the other
-        // platforms: whenever GPUI marks this window dirty, drive one frame
-        // through the same `step` entry point the display link uses, on the
-        // main thread via the foreground executor.
-        let lock = self.0.as_ref().lock();
-        let view = lock.native_view.as_ptr();
-        let executor = lock.foreground_executor.clone();
-        let closed = lock.closed.clone();
-        drop(lock);
-        executor
-            .spawn(async move {
-                if !closed.load(std::sync::atomic::Ordering::Acquire) {
-                    unsafe { step(view as *mut std::ffi::c_void) };
-                }
-            })
-            .detach();
-    }
-
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.as_ref().lock().bounds()
     }
@@ -1598,7 +1583,7 @@ impl PlatformWindow for MacWindow {
         let executor = lock.foreground_executor.clone();
         executor
             .spawn(async move {
-                if !closed.load(std::sync::atomic::Ordering::Acquire) {
+                if !closed.load(Ordering::Acquire) {
                     // SAFETY: `native_window` is an Objective-C `NSWindow` pointer
                     // owned by the platform window; bridge it into objc2.
                     let sheet_window: &Objc2NSWindow =
@@ -1619,7 +1604,7 @@ impl PlatformWindow for MacWindow {
         let executor = lock.foreground_executor.clone();
         executor
             .spawn(async move {
-                if !closed.load(std::sync::atomic::Ordering::Acquire) {
+                if !closed.load(Ordering::Acquire) {
                     unsafe {
                         let _: () = msg_send![window, makeKeyAndOrderFront: nil];
                     }
