@@ -15,9 +15,14 @@ mod grid;
 mod input;
 mod pty;
 
+use std::time::{Duration, Instant};
+
 use gpui_kit::*;
 
 pub use pty::PtySpawn;
+
+/// Minimum gap between grid+PTY reflows while a drag is resizing.
+const RESIZE_DEBOUNCE: Duration = Duration::from_millis(140);
 
 /// Terminal events emitted to subscribers (the app shell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +38,11 @@ pub struct TermSession {
     process: Option<pty::PtyProcess>,
     pub(crate) focus: FocusHandle,
     exit: Option<i32>,
+    /// Grid/PTY resize target waiting for the debounce window to close.
+    pending_resize: Option<(u16, u16)>,
+    last_resize: Instant,
+    ever_resized: bool,
+    flush_scheduled: bool,
 }
 
 impl gpui_kit::EventEmitter<TermEvent> for TermSession {}
@@ -51,6 +61,10 @@ impl TermSession {
             process: Some(process),
             focus: cx.focus_handle(),
             exit: None,
+            pending_resize: None,
+            last_resize: Instant::now(),
+            ever_resized: false,
+            flush_scheduled: false,
         });
 
         // Foreground pump: coalesced wakeups → notify; exit → event.
@@ -86,14 +100,47 @@ impl TermSession {
         self.exit
     }
 
+    /// True when the PTY delivered bytes within `window` — the "agent is
+    /// producing output" signal behind the sidebar spinner.
+    pub fn active_within(&self, window: Duration) -> bool {
+        let last = self.grid.activity.load(std::sync::atomic::Ordering::Relaxed);
+        grid::now_ms().saturating_sub(last) <= window.as_millis() as u64
+    }
+
     /// Terminal-set window title (OSC 0), if any.
     pub fn title(&self) -> Option<String> {
         self.grid.meta.lock().title.clone()
     }
 
-    /// Grid + PTY resize; both sides must agree or the child's output
-    /// wraps at the wrong width.
-    pub(crate) fn resize_if_needed(&mut self, cols: u16, rows: u16) {
+    /// Stage a grid+PTY resize. Applies immediately when the last resize
+    /// is older than the debounce window; otherwise the latest target is
+    /// flushed by a short timer — a window drag then reflows the grid at
+    /// most ~7×/s instead of once per pixel.
+    pub(crate) fn request_resize(&mut self, cols: u16, rows: u16, cx: &mut Context<Self>) {
+        if self.grid.size() == (cols, rows) {
+            self.pending_resize = None;
+            return;
+        }
+        self.pending_resize = Some((cols, rows));
+        if !self.ever_resized || self.last_resize.elapsed() >= RESIZE_DEBOUNCE {
+            self.flush_resize(cx);
+        } else if !self.flush_scheduled {
+            self.flush_scheduled = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(RESIZE_DEBOUNCE).await;
+                let _ = this.update(cx, |s, cx| s.flush_resize(cx));
+            })
+            .detach();
+        }
+    }
+
+    fn flush_resize(&mut self, cx: &mut Context<Self>) {
+        self.flush_scheduled = false;
+        let Some((cols, rows)) = self.pending_resize.take() else {
+            return;
+        };
+        self.last_resize = Instant::now();
+        self.ever_resized = true;
         if self.grid.size() == (cols, rows) {
             return;
         }
@@ -101,6 +148,7 @@ impl TermSession {
         if let Some(process) = &self.process {
             process.resize(cols, rows);
         }
+        cx.notify();
     }
 
     /// Send keystrokes/paste bytes to the child.

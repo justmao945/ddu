@@ -3,9 +3,10 @@
 //! bytes into the grid and a waiter that reports the exit status.
 
 use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use alacritty_terminal::event::{Event, EventListener};
-use std::sync::Arc;
 
 use parking_lot::Mutex;
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -96,12 +97,15 @@ pub struct TermGrid {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     pub meta: Arc<Mutex<TermMeta>>,
     pub writer: PtyWriter,
+    /// Epoch ms of the last PTY read; drives the "agent is working" spinner.
+    pub activity: Arc<AtomicU64>,
     cols: u16,
     rows: u16,
 }
 
 impl TermGrid {
     pub fn new(cols: u16, rows: u16, writer: PtyWriter, wake: async_channel::Sender<PumpMsg>) -> Self {
+        let activity = Arc::new(AtomicU64::new(now_ms()));
         let meta = Arc::new(Mutex::new(TermMeta::default()));
         let proxy = EventProxy { writer: writer.clone(), wake, meta: meta.clone() };
         let term = Arc::new(FairMutex::new(Term::new(
@@ -109,7 +113,7 @@ impl TermGrid {
             &GridDims { cols, rows },
             proxy,
         )));
-        Self { term, meta, writer, cols, rows }
+        Self { term, meta, writer, activity, cols, rows }
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -142,7 +146,6 @@ impl TermGrid {
         self.term.lock().scroll_display(Scroll::Bottom);
     }
 }
-
 /// Spawn the two pump threads for a freshly started [`PtyProcess`].
 ///
 /// * Reader thread: `read → parse per byte → coalesced Wakeup`, exits on
@@ -151,6 +154,7 @@ impl TermGrid {
 pub fn spawn_pump(
     term: Arc<FairMutex<Term<EventProxy>>>,
     wake: async_channel::Sender<PumpMsg>,
+    activity: Arc<AtomicU64>,
     mut reader: Box<dyn Read + Send>,
     mut child: Box<dyn Child + Send + Sync>,
 ) {
@@ -164,16 +168,11 @@ pub fn spawn_pump(
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        activity.store(now_ms(), Ordering::Relaxed);
                         {
                             let mut term = term.lock();
                             for &byte in &buf[..n] {
                                 parser.advance(&mut *term, byte);
-                            }
-                            let _ = n;
-                            static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                            if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                                let mode = term.mode();
-                                eprintln!("[ddu] alt_screen={} cursor_mode={:?}", mode.contains(alacritty_terminal::term::TermMode::ALT_SCREEN), mode);
                             }
                         }
                         let _ = reader_wake.try_send(PumpMsg::Wakeup);
@@ -205,7 +204,7 @@ pub fn spawn_session(
 ) -> anyhow::Result<(TermGrid, PtyProcess)> {
     let (process, reader, child) = PtyProcess::spawn(cmd, cols, rows)?;
     let grid = TermGrid::new(cols, rows, process.writer().clone(), wake.clone());
-    spawn_pump(grid.term.clone(), wake, reader, child);
+    spawn_pump(grid.term.clone(), wake, grid.activity.clone(), reader, child);
     Ok((grid, process))
 }
 
@@ -213,7 +212,6 @@ pub fn spawn_session(
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
-
     fn visible_text(term: &FairMutex<Term<EventProxy>>) -> String {
         let term = term.lock();
         let mut text = String::new();
@@ -329,4 +327,11 @@ mod zsh_probe {
         let t = feed(bytes);
         assert!(t.contains("just@"), "got {t:?}");
     }
+}
+/// Current time as epoch milliseconds (PTY activity stamp).
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

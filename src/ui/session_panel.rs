@@ -17,6 +17,9 @@ use crate::session::{AgentSession, AgentStatus};
 /// Height of a two-line session row.
 const SESSION_ROW_PX: f32 = 40.;
 
+/// PTY output within this window ⇒ the agent is actively working.
+const ACTIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     v_flex()
         .h_full()
@@ -31,13 +34,29 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                 .items_center()
                 .gap_1()
                 .child(
-                    div()
+                    // Two-tone SVG wordmark: SF Pro Heavy outlines; "Up"
+                    // in the Claude-orange accent, slightly slanted.
+                    h_flex()
                         .flex_1()
                         .min_w_0()
-                        .text_sm()
-                        .font_semibold()
-                        .text_color(cx.theme().foreground)
-                        .child("DayDayUp"),
+                        .items_center()
+                        .gap(px(1.))
+                        .child(
+                            svg()
+                                .path("icons/wordmark-day.svg")
+                                .w(px(58.))
+                                .h(px(16.))
+                                .flex_shrink_0()
+                                .text_color(cx.theme().foreground),
+                        )
+                        .child(
+                            svg()
+                                .path("icons/wordmark-up.svg")
+                                .w(px(25.))
+                                .h(px(16.))
+                                .flex_shrink_0()
+                                .text_color(hsla(15. / 360., 0.65, 0.5, 1.)),
+                        ),
                 )
                 .child(
                     Button::new("add-project")
@@ -86,6 +105,13 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                             .rounded(radius)
                             .cursor_pointer()
                             .hover(move |el| if active_project { el } else { el.bg(hov_bg) })
+                            .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+                                let next = if *hovering { Some(p) } else { None };
+                                if this.hovered_project != next {
+                                    this.hovered_project = next;
+                                    cx.notify();
+                                }
+                            }))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.expanded[p] = !this.expanded[p];
                                 cx.notify();
@@ -107,18 +133,21 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                     .text_color(if active_project { fg } else { fg.opacity(0.85) })
                                     .child(project.name.clone()),
                             )
-                            .child(
-                                Button::new(("quick-add", p))
-                                    .icon(IconName::Plus)
-                                    .ghost()
-                                    .xsmall()
-                                    .tooltip("New session (default)")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.current_project = p;
-                                        this.spawn_session(window, cx);
-                                    })),
-                            )
-                            .child(more_menu(this, p, cx)),
+                            // Ops appear only while the row is hovered.
+                            .when(this.hovered_project == Some(p), |el| {
+                                el.child(
+                                    Button::new(("quick-add", p))
+                                        .icon(IconName::Plus)
+                                        .ghost()
+                                        .xsmall()
+                                        .tooltip("New session (default)")
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.current_project = p;
+                                            this.spawn_session(window, cx);
+                                        })),
+                                )
+                                .child(more_menu(this, p, cx))
+                            }),
                     )
                     // ── level 2: session rows ──
                     .when(expanded, |el| {
@@ -144,7 +173,13 @@ fn session_row(
     let fg = cx.theme().foreground;
     let active = active_project && six == this.current_session;
     let element_id = SharedString::from(s.id.clone());
-    let working = s.status.is_running() && s.is_agent();
+    // Spinner tracks live PTY output, not the (long-lived) process:
+    // an agent idling at its prompt must not look busy.
+    let working = s.status.is_running()
+        && s.is_agent()
+        && s.term
+            .as_ref()
+            .is_some_and(|t| t.read(cx).active_within(ACTIVE_WINDOW));
     let title = session_title(s, cx);
 
     div()

@@ -31,12 +31,26 @@ pub struct AppView {
     pub(crate) current_session: usize,
     pub(crate) show_sessions: bool,
     pub(crate) show_diff: bool,
+    /// Owns the three-pane splitter sizes (see `set_sessions`/`set_diff`).
+    pub(crate) resize_state: Entity<ResizableState>,
+    /// Project row currently under the mouse (hides/reveals its buttons).
+    pub(crate) hovered_project: Option<usize>,
     pub(crate) diff_file: usize,
     pub(crate) session_seq: usize,
     pub(crate) diff: Option<GitDiff>,
     /// Guards against stale poll results overwriting newer ones.
     diff_seq: u64,
 }
+
+/// Panel geometry (px): defaults, drag limits and collapse thresholds.
+const SIDEBAR_DEFAULT: f32 = 232.;
+const SIDEBAR_MAX: f32 = 420.;
+const SIDEBAR_MIN: f32 = 150.;
+const DIFF_DEFAULT: f32 = 340.;
+const DIFF_MAX: f32 = 600.;
+const DIFF_MIN: f32 = 200.;
+/// The terminal pane never shrinks below this while dragging a divider.
+const CENTER_MIN: f32 = 400.;
 
 
 impl AppView {
@@ -71,12 +85,33 @@ impl AppView {
             current_project: 0,
             current_session: 0,
             show_sessions: true,
-            show_diff: true,
+            show_diff: false,
+            resize_state: cx.new(|_| ResizableState::default()),
+            hovered_project: None,
             diff_file: 0,
             session_seq: 0,
             diff: None,
             diff_seq: 0,
         };
+        // Dragging a divider below a side pane's min collapses it on
+        // release (`Resized` fires at drag end, sizes are real by then).
+        cx.subscribe_in(&this.resize_state, window, |this, _, _: &ResizablePanelEvent, _, cx| {
+            let sizes = this.resize_state.read(cx).sizes().clone();
+            if this.show_sessions && sizes.first().is_some_and(|w| *w < px(SIDEBAR_MIN)) {
+                this.show_sessions = false;
+                this.resize_state.update(cx, |state, cx| state.remove_panel(0, cx));
+                cx.notify();
+            }
+            if this.show_diff {
+                let ix = usize::from(this.show_sessions) + 1;
+                if sizes.get(ix).is_some_and(|w| *w < px(DIFF_MIN)) {
+                    this.show_diff = false;
+                    this.resize_state.update(cx, |state, cx| state.remove_panel(ix, cx));
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
         this.start_diff_poll(cx);
         this.start_ui_tick(cx);
         // First session for the first project, honoring the configured
@@ -360,6 +395,47 @@ impl AppView {
         window.push_notification(Notification::info(format!("Restarted “{title}”")), cx);
         cx.notify();
     }
+
+    /// Toggle the sidebar, keeping the splitter slot list in sync.
+    pub(crate) fn toggle_sessions(&mut self, cx: &mut Context<Self>) {
+        self.set_sessions(!self.show_sessions, cx);
+    }
+
+    pub(crate) fn set_sessions(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.show_sessions {
+            return;
+        }
+        self.show_sessions = on;
+        self.resize_state.update(cx, |state, cx| {
+            if on {
+                state.insert_panel(Some(px(SIDEBAR_DEFAULT)), Some(0), cx);
+            } else {
+                state.remove_panel(0, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    /// Toggle the diff panel (slot sits after the always-present center).
+    pub(crate) fn toggle_diff(&mut self, cx: &mut Context<Self>) {
+        self.set_diff(!self.show_diff, cx);
+    }
+
+    pub(crate) fn set_diff(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.show_diff {
+            return;
+        }
+        let ix = usize::from(self.show_sessions) + 1;
+        self.show_diff = on;
+        self.resize_state.update(cx, |state, cx| {
+            if on {
+                state.insert_panel(Some(px(DIFF_DEFAULT)), Some(ix), cx);
+            } else {
+                state.remove_panel(ix, cx);
+            }
+        });
+        cx.notify();
+    }
     fn request_close_current_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.current_session() else {
             return;
@@ -454,36 +530,39 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {
                 this.spawn_session(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleDiff, _, cx| {
-                this.show_diff = !this.show_diff;
-                cx.notify();
-            }))
+            .on_action(cx.listener(|this, _: &ToggleDiff, _, cx| this.toggle_diff(cx)))
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| {
                 this.request_close_current_session(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleSessions, _, cx| {
-                this.show_sessions = !this.show_sessions;
-                cx.notify();
-            }))
+            .on_action(cx.listener(|this, _: &ToggleSessions, _, cx| this.toggle_sessions(cx)))
             .child(ui::title_bar::render(self, cx))
-            .child(
-                h_resizable("main")
-                    .child(
+            .child({
+                let mut group = h_resizable("main").with_state(&self.resize_state);
+                if self.show_sessions {
+                    group = group.child(
                         resizable_panel()
-                            .size(px(232.))
+                            .size(px(SIDEBAR_DEFAULT))
                             .flex_none()
-                            .visible(self.show_sessions)
+                            .size_range(px(0.)..px(SIDEBAR_MAX))
                             .child(ui::session_panel::render(self, cx)),
-                    )
-                    .child(resizable_panel().child(ui::terminal::render(self, cx)))
-                    .child(
+                    );
+                }
+                group = group.child(
+                    resizable_panel()
+                        .size_range(px(CENTER_MIN)..px(f32::MAX))
+                        .child(ui::terminal::render(self, cx)),
+                );
+                if self.show_diff {
+                    group = group.child(
                         resizable_panel()
-                            .size(px(340.))
+                            .size(px(DIFF_DEFAULT))
                             .flex_none()
-                            .visible(self.show_diff)
+                            .size_range(px(0.)..px(DIFF_MAX))
                             .child(ui::diff_panel::render(self, cx)),
-                    ),
-            )
+                    );
+                }
+                group
+            })
             .child(ui::status_bar::render(self, cx))
             // Overlay layers (anchored, no layout impact): dialogs opened via
             // window.open_dialog / open_alert_dialog and notifications are

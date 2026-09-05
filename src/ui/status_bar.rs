@@ -20,10 +20,7 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                     .ghost()
                     .small()
                     .tooltip("Toggle sidebar (⌘\\)")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_sessions = !this.show_sessions;
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sessions(cx))),
             ),
         )
         .right(
@@ -37,10 +34,7 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                     .ghost()
                     .small()
                     .tooltip("Toggle changes (⌘B)")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_diff = !this.show_diff;
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_diff(cx))),
             ),
         )
 }

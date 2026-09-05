@@ -23,10 +23,19 @@ impl gpui::AssetSource for AppAssets {
             "icons/claude.svg" => {
                 Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/claude.svg"))))
             }
-            "icons/openai.svg" => {
-                Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/openai.svg"))))
+            "icons/wordmark-day.svg" => {
+                Ok(Some(Cow::Borrowed(include_bytes!(
+                    "../assets/icons/wordmark-day.svg"
+                ))))
             }
-            "icons/omp.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/omp.svg")))),
+            "icons/wordmark-up.svg" => {
+                Ok(Some(Cow::Borrowed(include_bytes!(
+                    "../assets/icons/wordmark-up.svg"
+                ))))
+            }
+            "icons/omp.svg" => {
+                Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/omp.svg"))))
+            }
             _ => gpui_kit::assets::Assets.load(path),
         }
     }

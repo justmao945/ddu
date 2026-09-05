@@ -120,7 +120,7 @@ impl Element for TerminalElement {
         let cols = ((usable_w / m.cell_width).floor() as u16).max(2);
         let rows = ((usable_h / m.line_height).floor() as u16).max(2);
         if let Some(session) = self.session.upgrade() {
-            session.update(cx, |s, _| s.resize_if_needed(cols, rows));
+            session.update(cx, |s, cx| s.request_resize(cols, rows, cx));
         }
     }
 

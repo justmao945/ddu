@@ -74,14 +74,18 @@ impl AgentSession {
         self.kind != "terminal"
     }
 
-    /// Time the current (or last) run has taken, `m:ss` style.
+    /// Time the current (or last) run has taken, in `m`/`h`/`d` units.
     pub fn elapsed_label(&self) -> String {
         let end = self.ended.unwrap_or_else(Instant::now);
         let secs = end.saturating_duration_since(self.started).as_secs();
-        if secs >= 3600 {
-            format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+        if secs < 60 {
+            "<1m".into()
+        } else if secs < 3600 {
+            format!("{}m", secs / 60)
+        } else if secs < 86_400 {
+            format!("{}h", secs / 3600)
         } else {
-            format!("{}:{:02}", secs / 60, secs % 60)
+            format!("{}d", secs / 86_400)
         }
     }
 }
