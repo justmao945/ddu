@@ -25,8 +25,6 @@ const DIFF_POLL_SECS: u64 = 3;
 
 pub struct AppView {
     pub(crate) projects: Vec<crate::session::Project>,
-    /// Sidebar session-search query.
-    pub(crate) search: Entity<gpui_kit::base::input::InputState>,
     /// Which project rows are expanded in the sidebar tree.
     pub(crate) expanded: Vec<bool>,
     pub(crate) current_project: usize,
@@ -67,14 +65,8 @@ impl AppView {
                 expanded[ix] = p.expanded;
             }
         }
-        let search = cx.new(|cx| {
-            let mut state = gpui_kit::base::input::InputState::new(window, cx);
-            state.set_placeholder("Search sessions", window, cx);
-            state
-        });
         let mut this = Self {
             projects,
-            search,
             expanded,
             current_project: 0,
             current_session: 0,
@@ -86,6 +78,7 @@ impl AppView {
             diff_seq: 0,
         };
         this.start_diff_poll(cx);
+        this.start_ui_tick(cx);
         // First session for the first project, honoring the configured
         // default launcher.
         this.spawn_session_of(&cfg.new_session.kind, window, cx);
@@ -150,7 +143,7 @@ impl AppView {
         let cwd = project.path.clone();
         self.session_seq += 1;
         let seq = self.session_seq;
-        let title = format!("{} {seq}", cmd.program);
+        let title = cmd.basename();
 
         let (status, term) = match TermSession::spawn(&cmd.spec(&cwd), cx) {
             Ok(term) => {
@@ -184,6 +177,8 @@ impl AppView {
                 status,
                 cmd,
                 kind: kind.to_string(),
+                started: std::time::Instant::now(),
+                ended: None,
                 term,
             });
             self.current_session = project.sessions.len() - 1;
@@ -282,12 +277,14 @@ impl AppView {
             code if code > 0 => AgentStatus::Done(code),
             code => AgentStatus::Error(format!("abnormal exit {code}")),
         };
+        let ended = std::time::Instant::now();
         for session in self.projects[self.current_project]
             .sessions
             .iter_mut()
             .filter(|s| s.term.as_ref() == Some(&emitter))
         {
             session.status = status.clone();
+            session.ended = Some(ended);
         }
         let message = match code {
             0 => format!("{program} finished"),
@@ -355,12 +352,14 @@ impl AppView {
         };
         if let Some(session) = project.sessions.get_mut(self.current_session) {
             session.status = status;
+            session.title = cmd.basename();
             session.term = term;
+            session.started = std::time::Instant::now();
+            session.ended = None;
         }
         window.push_notification(Notification::info(format!("Restarted “{title}”")), cx);
         cx.notify();
     }
-
     fn request_close_current_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.current_session() else {
             return;
@@ -431,6 +430,17 @@ impl AppView {
                 })?;
             }
             anyhow::Ok(())
+        })
+        .detach();
+    }
+    /// One notify per second so elapsed times in the sidebar tick even
+    /// while a session produces no output.
+    fn start_ui_tick(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            }
         })
         .detach();
     }

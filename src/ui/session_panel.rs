@@ -1,17 +1,21 @@
 //! Left pane: project tree. Level 1 = project folders (`+` quick-add,
 //! `...` menu for all launchers and project ops), level 2 = that
-//! project's sessions (status dot + title + kind, single line). The
-//! panel header is a session-search box; typing filters session rows.
+//! project's sessions as two-line rows: kind badge + live title, and a
+//! meta line with run duration (plus a spinner while an agent works).
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{PANEL_HEADER_PX, hover_bg, meta_text, selection_bg, status_dot, ROW_PX};
+use super::{PANEL_HEADER_PX, hover_bg, selection_bg, ROW_PX};
 use crate::app::AppView;
+use crate::session::{AgentSession, AgentStatus};
+
+/// Height of a two-line session row.
+const SESSION_ROW_PX: f32 = 40.;
 
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     v_flex()
@@ -26,7 +30,15 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                 .flex()
                 .items_center()
                 .gap_1()
-                .child(Input::new(&this.search).small().cleanable(true).flex_1())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(cx.theme().foreground)
+                        .child("DayDayUp"),
+                )
                 .child(
                     Button::new("add-project")
                         .icon(IconName::Folder)
@@ -41,17 +53,10 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         .child(tree(this, cx))
 }
 
-fn query(this: &AppView, cx: &Context<AppView>) -> String {
-    this.search.read(cx).value().trim().to_lowercase()
-}
-
 fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let radius = cx.theme().radius;
-    let active_bg = selection_bg(cx);
     let hov_bg = hover_bg(cx);
     let fg = cx.theme().foreground;
-    let query = query(this, cx);
-    let filtering = !query.is_empty();
 
     v_flex()
         .id("project-tree")
@@ -65,21 +70,6 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
             let expanded = this.expanded.get(p).copied().unwrap_or(true);
             let active_project = p == this.current_project;
             let chevron = if expanded { IconName::ChevronDown } else { IconName::ChevronRight };
-
-            // Session rows, filtered by the search query (title or kind).
-            let sessions: Vec<_> = project
-                .sessions
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| {
-                    !filtering
-                        || s.title.to_lowercase().contains(&query)
-                            || s.kind_label_inner().to_lowercase().contains(&query)
-                })
-                .collect();
-            if filtering && sessions.is_empty() {
-                return None;
-            }
 
             Some(
                 v_flex()
@@ -132,51 +122,142 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                     )
                     // ── level 2: session rows ──
                     .when(expanded, |el| {
-                        el.children(sessions.into_iter().map(|(six, s)| {
-                            let active = active_project && six == this.current_session;
-                            let dot = status_dot(&s.status, cx);
-                            let element_id = SharedString::from(s.id.clone());
-                            let kind = s.kind_label_inner();
-
-                            div()
-                                .id(element_id)
-                                .h(px(ROW_PX))
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .pl(px(18.))
-                                .pr_2()
-                                .ml_1()
-                                .rounded(radius)
-                                .cursor_pointer()
-                                .map(|el| if active { el.bg(active_bg) } else { el })
-                                .hover(move |el| if active { el } else { el.bg(hov_bg) })
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.select_session(p, six, window, cx);
-                                }))
-                                .child(
-                                    div()
-                                        .size(px(7.))
-                                        .flex_shrink_0()
-                                        .rounded_full()
-                                        .bg(dot),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_sm()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .text_color(if active { fg } else { fg.opacity(0.85) })
-                                        .child(s.title.clone()),
-                                )
-                                .child(meta_text(kind, cx))
+                        el.children(project.sessions.iter().enumerate().map(|(six, s)| {
+                            session_row(this, p, six, s, active_project, cx)
                         }))
                     }),
             )
         }))
+}
+
+fn session_row(
+    this: &AppView,
+    p: usize,
+    six: usize,
+    s: &AgentSession,
+    active_project: bool,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement + use<> {
+    let radius = cx.theme().radius;
+    let active_bg = selection_bg(cx);
+    let hov_bg = hover_bg(cx);
+    let fg = cx.theme().foreground;
+    let active = active_project && six == this.current_session;
+    let element_id = SharedString::from(s.id.clone());
+    let working = s.status.is_running() && s.is_agent();
+    let title = session_title(s, cx);
+
+    div()
+        .id(element_id)
+        .h(px(SESSION_ROW_PX))
+        .flex()
+        .items_center()
+        .gap_2()
+        .pl(px(18.))
+        .pr_2()
+        .ml_1()
+        .rounded(radius)
+        .cursor_pointer()
+        .map(|el| if active { el.bg(active_bg) } else { el })
+        .hover(move |el| if active { el } else { el.bg(hov_bg) })
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.select_session(p, six, window, cx);
+        }))
+        .child(kind_icon(s, cx))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_sm()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(if active { fg } else { fg.opacity(0.85) })
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .map(|el| match &s.status {
+                            AgentStatus::Error(_) => el.text_color(cx.theme().red.opacity(0.8)),
+                            _ => el.text_color(fg.opacity(0.45)),
+                        })
+                        .child(meta_label(s)),
+                ),
+        )
+        .when(working, |el| {
+            el.child(
+                div().flex_shrink_0().child(
+                    Spinner::new().with_size(gpui_kit::component::Size::XSmall),
+                ),
+            )
+        })
+}
+
+/// Live row title: agents adopt the PTY's OSC title once they set one;
+/// shells keep their program basename (`zsh`).
+fn session_title(s: &AgentSession, cx: &Context<AppView>) -> String {
+    if s.is_agent() {
+        if let Some(term) = &s.term {
+            if let Some(title) = term.read(cx).title() {
+                if !title.trim().is_empty() {
+                    return title.trim().to_string();
+                }
+            }
+        }
+    }
+    s.title.clone()
+}
+
+/// Second line: run duration, with the terminal state for exited runs.
+fn meta_label(s: &AgentSession) -> String {
+    match s.status {
+        AgentStatus::Running => s.elapsed_label(),
+        AgentStatus::Done(_) => format!("done · {}", s.elapsed_label()),
+        AgentStatus::Error(_) => format!("failed · {}", s.elapsed_label()),
+    }
+}
+
+/// Kind badge: the shell terminal icon, or the agent's brand mark
+/// (monochrome SVGs tinted per brand, like Zed's icons).
+fn kind_icon(s: &AgentSession, cx: &Context<AppView>) -> Div {
+    let fg = cx.theme().foreground;
+    let cell = |child: AnyElement| {
+        div()
+            .size(px(18.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(child)
+    };
+    if !s.is_agent() {
+        return cell(
+            Icon::new(IconName::SquareTerminal)
+                .with_size(gpui_kit::component::Size::Small)
+                .text_color(fg.opacity(0.6))
+                .into_any_element(),
+        );
+    }
+    let (path, tint) = match s.kind.as_str() {
+        "claude" => ("icons/claude.svg", hsla(15. / 360., 0.64, 0.5, 1.)),
+        "codex" => ("icons/openai.svg", fg.opacity(0.85)),
+        "omp" => ("icons/omp.svg", hsla(258. / 360., 0.7, 0.55, 1.)),
+        _ => ("icons/omp.svg", fg.opacity(0.5)),
+    };
+    cell(
+        svg()
+            .path(path)
+            .size(px(15.))
+            .flex_shrink_0()
+            .text_color(tint)
+            .into_any_element(),
+    )
 }
 
 /// The `...` dropdown on a project row: every launcher plus project ops.

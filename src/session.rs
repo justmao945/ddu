@@ -2,8 +2,8 @@
 //! presets used to spawn them (DESIGN.md §5, §9).
 
 use std::path::{Path, PathBuf};
-use gpui_kit::{App, Entity};
-
+use std::time::Instant;
+use gpui_kit::Entity;
 
 use crate::terminal::{PtySpawn, TermSession};
 
@@ -18,15 +18,6 @@ pub enum AgentStatus {
 impl AgentStatus {
     pub fn is_running(&self) -> bool {
         matches!(self, AgentStatus::Running)
-    }
-
-    pub fn label(&self) -> String {
-        match self {
-            AgentStatus::Running => "running".into(),
-            AgentStatus::Done(0) => "done".into(),
-            AgentStatus::Done(code) => format!("exit {code}"),
-            AgentStatus::Error(err) => format!("error: {err}"),
-        }
     }
 }
 
@@ -47,11 +38,15 @@ impl AgentCmd {
         }
     }
 
+    /// Basename of the program (`/bin/zsh` → `zsh`); the sidebar title.
+    pub fn basename(&self) -> String {
+        self.program.rsplit('/').next().unwrap_or(&self.program).to_string()
+    }
+
     /// Build the PTY spawn spec with `cwd` as the working directory.
     pub fn spec(&self, cwd: &Path) -> PtySpawn {
         PtySpawn { program: self.program.clone(), args: self.args.clone(), cwd: cwd.into() }
     }
-
 }
 
 /// One agent session inside a project.
@@ -59,27 +54,37 @@ impl AgentCmd {
 pub struct AgentSession {
     /// Stable id, source of element ids.
     pub id: String,
+    /// Row title; agents override it live via the PTY's OSC title.
     pub title: String,
     pub status: AgentStatus,
     pub cmd: AgentCmd,
     /// Which launcher created this (`terminal`/builtin/custom name).
     pub kind: String,
+    /// When the current process was spawned (reset on restart).
+    pub started: Instant,
+    /// When the process exited, for the final duration reading.
+    pub ended: Option<Instant>,
     /// Live terminal; `None` while the process failed to spawn.
     pub term: Option<Entity<TermSession>>,
 }
 
 impl AgentSession {
-    /// Sidebar sub-label: the launcher kind, resolved for display.
-    pub fn kind_label(&self, cx: &App) -> String {
-        cx.global::<crate::config::Config>().label_for(&self.kind)
+    /// Shell sessions are plain terminals; everything else is an agent.
+    pub fn is_agent(&self) -> bool {
+        self.kind != "terminal"
     }
 
-    /// Raw kind key without an `App` handle (search filtering).
-    pub fn kind_label_inner(&self) -> String {
-        self.kind.clone()
+    /// Time the current (or last) run has taken, `m:ss` style.
+    pub fn elapsed_label(&self) -> String {
+        let end = self.ended.unwrap_or_else(Instant::now);
+        let secs = end.saturating_duration_since(self.started).as_secs();
+        if secs >= 3600 {
+            format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+        } else {
+            format!("{}:{:02}", secs / 60, secs % 60)
+        }
     }
 }
-
 
 /// One project in the left pane.
 #[derive(Debug, Clone)]
@@ -87,12 +92,6 @@ pub struct Project {
     pub name: String,
     pub path: PathBuf,
     pub sessions: Vec<AgentSession>,
-}
-
-impl Project {
-    pub fn running_count(&self) -> usize {
-        self.sessions.iter().filter(|s| s.status.is_running()).count()
-    }
 }
 
 /// The workspace the app starts with: the directory it was launched

@@ -8,8 +8,11 @@ License: Apache-2.0, GPL-free throughout. Design doc: `DESIGN.md`.
 ## Source map
 
 - `src/main.rs` — entry; window creation (`gpui_kit::application`).
-- `src/app.rs` — `AppView`: all shared state + actions (sessions, diff polling,
-  notifications, folder picker). Keyboard actions declared here.
+- `assets/icons/` + `src/main.rs` `AppAssets` — brand SVGs (claude/openai
+  from simple-icons, CC0; `omp.svg` hand-drawn π) layered over the
+  gpui-kit icon set; monochrome, tinted via `text_color`.
+- `src/app.rs` — `AppView`: all shared state + actions (sessions, diff
+  polling, notifications, folder picker). Keyboard actions declared here.
 - `src/session.rs` — domain model (`Project`, `AgentSession`, `AgentStatus`),
   launch presets, `initial_projects()` (= cwd).
 - `src/config.rs` — `~/.config/ddu/config.toml` (agent menu, overrides) and

@@ -6,8 +6,6 @@ use gpui::SharedString;
 use gpui_kit::component::*;
 use gpui_kit::*;
 
-use crate::session::AgentStatus;
-
 pub(crate) mod diff_panel;
 pub(crate) mod session_panel;
 pub(crate) mod status_bar;
@@ -20,23 +18,6 @@ pub(crate) const PANEL_HEADER_PX: f32 = 32.;
 /// Shared height of a selectable single-line list row.
 pub(crate) const ROW_PX: f32 = 26.;
 
-/// Unified status→color mapping used by every list row and the status bar.
-pub(crate) fn status_dot(status: &AgentStatus, cx: &App) -> Hsla {
-    match status {
-        AgentStatus::Running => cx.theme().green,
-        AgentStatus::Done(_) => cx.theme().foreground.opacity(0.4),
-        AgentStatus::Error(_) => cx.theme().red,
-    }
-}
-
-/// Sentence-case 13px medium panel label (Zed panel-header style).
-pub(crate) fn panel_label(text: impl Into<SharedString>, cx: &App) -> Div {
-    div()
-        .text_sm()
-        .font_medium()
-        .text_color(cx.theme().foreground.opacity(0.9))
-        .child(text.into())
-}
 
 /// Dim count/meta text next to a panel label.
 pub(crate) fn meta_text(text: impl Into<SharedString>, cx: &App) -> Div {
