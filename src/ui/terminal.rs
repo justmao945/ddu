@@ -18,7 +18,7 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         .bg(cx.theme().background)
         .child(match this.current_term() {
             Some(term) => surface(term, cx).into_any_element(),
-            None => empty_state(cx).into_any_element(),
+            None => empty_state(this, cx).into_any_element(),
         })
 }
 
@@ -118,12 +118,15 @@ fn exited_banner(exit: Option<i32>, cx: &mut Context<AppView>) -> impl IntoEleme
         )
 }
 
-fn empty_state(cx: &mut Context<AppView>) -> impl IntoElement {
+/// Empty center pane: no session in this project. Tracks a handle so the
+/// window keeps a focus chain and global shortcuts keep working.
+fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     v_flex()
         .size_full()
         .items_center()
         .justify_center()
         .gap_2()
+        .track_focus(&this.window_focus)
         .text_color(cx.theme().foreground.opacity(0.5))
         .child("No agent session — start one with ⌘T")
 }

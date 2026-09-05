@@ -50,7 +50,27 @@ impl gpui::AssetSource for AppAssets {
     }
 }
 
+/// Panics inside AppKit event callbacks cross extern "C" boundaries and
+/// abort before the message is printed; tee them to a file so crashes
+/// are diagnosable.
+fn install_panic_logger() {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("[{}] {info}\n", chrono_like_timestamp());
+        eprint!("{msg}");
+        let _ = std::fs::write("/tmp/ddu-panic.log", &msg);
+    }));
+}
+
+/// Wall-clock seconds since startup is enough to order panics.
+fn chrono_like_timestamp() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as u128)
+        .unwrap_or(0)
+}
+
 fn main() {
+    install_panic_logger();
     let app = gpui_kit::application().with_assets(AppAssets);
 
     app.run(move |cx| {
@@ -58,6 +78,12 @@ fn main() {
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Light, None, cx);
         cx.set_global(config::Config::load());
+        // Activate BEFORE the first window exists: the display-link start
+        // guard latches on the window's occlusion state at creation, and a
+        // background-launched (unactivated) process misses it — the window
+        // then freezes after its first frame and no later activation
+        // recovers it (see scripts/ddu-app.sh comments).
+        cx.activate(true);
 
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(960.), px(680.)), cx)),

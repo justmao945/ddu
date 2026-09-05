@@ -2,7 +2,7 @@
 //! window of the alacritty grid as shaped mono lines and owns the
 //! grid↔panel resize handshake.
 
-use gpui_kit::component::theme::Theme;
+use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 
@@ -39,7 +39,14 @@ struct Metrics {
 impl Metrics {
     fn new(window: &Window, cx: &App) -> Self {
         let theme = cx.theme();
-        let font = font(theme.mono_font_family.clone());
+        // Configured terminal font wins; empty = the system mono face.
+        let family = cx
+            .global::<crate::config::Config>()
+            .terminal_font
+            .clone()
+            .filter(|f| !f.trim().is_empty())
+            .unwrap_or_else(|| theme.mono_font_family.to_string());
+        let font = font(SharedString::from(family));
         let font_size = theme.mono_font_size;
         let line_height = px(f32::from(font_size) * LINE_HEIGHT_FACTOR);
         let run = TextRun {
@@ -296,7 +303,11 @@ impl StyleKey {
     }
 }
 
-/// Maps alacritty cell colors onto the current theme.
+/// Maps alacritty cell colors onto a fixed terminal palette.
+///
+/// Terminals need stable, saturated ANSI colors — theme-derived tints
+/// wash out agent CLIs' output. Both palettes are the classic Tango set
+/// used by Zed's "Tango Light" and gnome-terminal dark profiles.
 struct TerminalPalette {
     fg: Hsla,
     bg: Hsla,
@@ -305,30 +316,35 @@ struct TerminalPalette {
 
 impl TerminalPalette {
     fn new(theme: &Theme) -> Self {
-        // Agent CLIs lean on saturated brights; the classic VS Code
-        // palette reads fine against both theme modes. Theme tokens
-        // are used where they exist (red/green/blue/foreground).
-        let base = [
-            rgb(0x555555).into(),           // black
-            theme.red,                      // red
-            theme.green,                    // green
-            rgb(0xd7af00).into(),           // yellow
-            theme.blue,                     // blue
-            rgb(0xbc3fbc).into(),           // magenta
-            rgb(0x11a8cd).into(),           // cyan
-            theme.foreground.opacity(0.85), // white
-            theme.foreground.opacity(0.45), // bright black
-            theme.red.opacity(1.15),        // bright red
-            theme.green.opacity(1.15),      // bright green
-            rgb(0xf5f543).into(),           // bright yellow
-            theme.blue.opacity(1.15),       // bright blue
-            rgb(0xd670d6).into(),           // bright magenta
-            rgb(0x29b8db).into(),           // bright cyan
-            rgb(0xffffff).into(),           // bright white
-        ];
-        Self { fg: theme.foreground, bg: theme.background, base }
+        match theme.mode {
+            ThemeMode::Dark => Self {
+                fg: rgb(0xeeeeec).into(),
+                bg: rgb(0x2e3436).into(),
+                base: tango_palette(),
+            },
+            ThemeMode::Light => Self {
+                fg: rgb(0x2e3436).into(),
+                bg: rgb(0xffffff).into(),
+                base: tango_palette(),
+            },
+        }
     }
+}
 
+/// The 16 Tango colors: dim row 0-7, bright row 8-15.
+const TANGO: [u32; 16] = [
+    0x2e3436, 0xcc0000, 0x4e9a06, 0xc4a000, 0x3465a4, 0x75507b, 0x06989a, 0xd3d7cf, //
+    0x555753, 0xef2929, 0x8ae234, 0xfce94f, 0x729fcf, 0xad7fa8, 0x34e2e2, 0xeeeeec,
+];
+
+/// The 16 Tango colors as [`Hsla`], dim 0-7 then bright 8-15. One base
+/// table serves both modes: light/dark differ in fg/bg (and the shell
+/// background), not in the ANSI ramp.
+fn tango_palette() -> [Hsla; 16] {
+    TANGO.map(|c| rgb(c).into())
+}
+
+impl TerminalPalette {
     fn color(&self, c: TermColor) -> Hsla {
         match c {
             TermColor::Named(NamedColor::Foreground) => self.fg,

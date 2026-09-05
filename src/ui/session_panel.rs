@@ -145,10 +145,24 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                             .ghost()
                                             .xsmall()
                                             .tooltip("New session (default)")
+                                            // gpui synthesizes a click for
+                                            // EVERY hitbox under the pointer;
+                                            // stopping the click event alone
+                                            // doesn't stop the row's own click
+                                            // synthesis. Kill the mouse-down
+                                            // instead, like BasePopover
+                                            // triggers do, so the row never
+                                            // records a press and its
+                                            // expand/collapse on_click stays
+                                            // quiet.
+                                            .on_mouse_down(
+                                                gpui::MouseButton::Left,
+                                                |_, _, cx| cx.stop_propagation(),
+                                            )
                                             .on_click(cx.listener(
-                                                move |this, _, window, cx| {
+                                                move |this, _, _window, cx| {
                                                     this.current_project = p;
-                                                    this.spawn_session(window, cx);
+                                                    this.spawn_session(_window, cx);
                                                 },
                                             )),
                                     )
@@ -216,6 +230,13 @@ fn session_row(
         .cursor_pointer()
         .map(|el| if active { el.bg(active_bg) } else { el })
         .hover(move |el| if active { el.bg(active_hover_bg) } else { el.bg(hov_bg) })
+        .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+            let next = if *hovering { Some((p, six)) } else { None };
+            if this.hovered_session != next {
+                this.hovered_session = next;
+                cx.notify();
+            }
+        }))
         .on_click(cx.listener(move |this, _, window, cx| {
             this.select_session(p, six, window, cx);
         }))
@@ -231,7 +252,7 @@ fn session_row(
                         .whitespace_nowrap()
                         .text_ellipsis()
                         .text_color(if active { fg } else { fg.opacity(0.85) })
-                        .child(title),
+                        .child(title.clone())
                 )
                 .child(
                     div()
@@ -253,6 +274,27 @@ fn session_row(
                 ),
             )
         })
+        .when(
+            this.hovered_session == Some((p, six)) && !working,
+            |el| {
+                el.child(
+                    Button::new(SharedString::from(format!("close-{p}-{six}")))
+                        .icon(IconName::Close)
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Close session")
+                        // Stop the mouse-down so the row's own click
+                        // synthesis never sees this press (see quick-add).
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            |_, _, cx| cx.stop_propagation(),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.request_close_session(p, six, window, cx);
+                        })),
+                )
+            },
+        )
 }
 
 /// Live row title: agents adopt the PTY's OSC title once they set one;

@@ -102,6 +102,9 @@ pub struct Config {
     pub agent_args: BTreeMap<String, String>,
     #[serde(default)]
     pub custom_agents: Vec<AgentPreset>,
+    /// Terminal font family; `None` = system default mono face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_font: Option<String>,
 }
 
 /// The three builtin agent launchers, in menu order.

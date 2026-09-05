@@ -86,6 +86,12 @@ pub(crate) fn open(window: &mut Window, cx: &mut App) {
                                         .item(
                                             SettingItem::new("Shell args", shell_args_field())
                                                 .description("Extra arguments (space separated)."),
+                                        )
+                                        .item(
+                                            SettingItem::new("Font", terminal_font_field())
+                                                .description(
+                                                    "Family name; empty = system mono.",
+                                                ),
                                         ),
                                 )
                                 .group(builtin_agent_groups(cx))
@@ -162,6 +168,28 @@ fn shell_args_field() -> SettingField<SharedString> {
         |value, cx| {
             let v = value.to_string();
             update_config(|c, _| c.shell.args = v, cx);
+        },
+    )
+}
+
+/// Terminal font family input; empty means the system default mono face.
+fn terminal_font_field() -> SettingField<SharedString> {
+    SettingField::<SharedString>::input(
+        |cx| {
+            cx.global::<crate::config::Config>()
+                .terminal_font
+                .clone()
+                .unwrap_or_default()
+                .into()
+        },
+        |value, cx| {
+            let v = value.trim().to_string();
+            update_config(
+                move |c, _| {
+                    c.terminal_font = (!v.is_empty()).then_some(v.clone());
+                },
+                cx,
+            );
         },
     )
 }

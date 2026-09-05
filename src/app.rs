@@ -24,6 +24,9 @@ gpui_kit::actions!(ddu, [NewSession, ToggleSessions, ToggleDiff, CloseSession]);
 const DIFF_POLL_SECS: u64 = 3;
 
 pub struct AppView {
+    /// Holds focus when no session exists so global shortcuts (⌘B/⌘R/⌘T)
+    /// keep working on the empty state.
+    pub(crate) window_focus: gpui::FocusHandle,
     pub(crate) projects: Vec<crate::session::Project>,
     /// Which project rows are expanded in the sidebar tree.
     pub(crate) expanded: Vec<bool>,
@@ -43,6 +46,8 @@ pub struct AppView {
     /// toggle-open instead of snapping back to the default.
     pub(crate) last_sidebar_size: Option<Pixels>,
     pub(crate) last_diff_size: Option<Pixels>,
+    /// Session row currently under the mouse: reveals its delete button.
+    pub(crate) hovered_session: Option<(usize, usize)>,
     pub(crate) diff_file: usize,
     pub(crate) session_seq: usize,
     pub(crate) diff: Option<GitDiff>,
@@ -73,8 +78,8 @@ impl AppView {
         // cmd-w close.
         cx.bind_keys([
             KeyBinding::new("cmd-t", NewSession, None),
-            KeyBinding::new("cmd-\\", ToggleSessions, None),
-            KeyBinding::new("cmd-b", ToggleDiff, None),
+            KeyBinding::new("cmd-b", ToggleSessions, None),
+            KeyBinding::new("cmd-r", ToggleDiff, None),
             KeyBinding::new("cmd-w", CloseSession, None),
         ]);
 
@@ -93,7 +98,9 @@ impl AppView {
                 expanded[ix] = p.expanded;
             }
         }
+        let window_focus = cx.focus_handle();
         let mut this = Self {
+            window_focus,
             projects,
             expanded,
             current_project: 0,
@@ -102,6 +109,7 @@ impl AppView {
             show_diff: false,
             resize_state: cx.new(|_| ResizableState::default()),
             hovered_project: None,
+            hovered_session: None,
             menu_project: None,
             last_sidebar_size: None,
             last_diff_size: None,
@@ -110,6 +118,7 @@ impl AppView {
             diff: None,
             diff_seq: 0,
         };
+        this.window_focus.focus(window, cx);
         this.start_diff_poll(cx);
         this.start_ui_tick(cx);
         // First session for the first project, honoring the configured
@@ -334,23 +343,86 @@ impl AppView {
         cx.notify();
     }
 
-    /// Close (and kill if needed) the current session.
-    fn close_current_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project) = self.projects.get_mut(self.current_project) else {
+    /// Close (and kill if needed) session `six` of project `p`.
+    /// A closed current session selects the nearest neighbor.
+    pub(crate) fn close_session(
+        &mut self,
+        p: usize,
+        six: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.projects.get_mut(p) else {
             return;
         };
-        if project.sessions.is_empty() {
+        let Some(six) = (six < project.sessions.len()).then_some(six) else {
+            return;
+        };
+        let was_current = p == self.current_project && six == self.current_session;
+        let became_empty;
+        let title;
+        {
+            let session = project.sessions.remove(six);
+            if let Some(term) = &session.term {
+                term.update(cx, |s, _| s.kill());
+            }
+            became_empty = project.sessions.is_empty();
+            title = session.title.clone();
+        }
+        if was_current {
+            self.current_session = six.min(self.projects[p].sessions.len().saturating_sub(1));
+            self.diff_file = 0;
+            self.reload_diff(cx);
+            if became_empty {
+                // Keep global shortcuts alive when the pane empties out.
+                self.window_focus.focus(window, cx);
+            }
+        } else if p == self.current_project {
+            // Keep pointing at the same session when a sibling before it
+            // went away.
+            self.current_session =
+                self.current_session.min(self.projects[p].sessions.len().saturating_sub(1));
+        }
+        window.push_notification(Notification::info(format!("Closed “{title}”")), cx);
+        cx.notify();
+    }
+
+    /// Confirm closing a running session, else close immediately.
+    pub(crate) fn request_close_session(
+        &mut self,
+        p: usize,
+        six: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.projects.get(p) else {
+            return;
+        };
+        let Some(session) = project.sessions.get(six) else {
+            return;
+        };
+        let running = session.status.is_running();
+        let title = session.title.clone();
+        if !running {
+            self.close_session(p, six, window, cx);
             return;
         }
-        let ix = self.current_session.min(project.sessions.len() - 1);
-        let session = project.sessions.remove(ix);
-        if let Some(term) = &session.term {
-            term.update(cx, |s, _| s.kill());
-        }
-        self.current_session = self.current_session.min(project.sessions.len().saturating_sub(1));
-        self.diff_file = 0;
-        window.push_notification(Notification::info(format!("Closed “{}”", session.title)), cx);
-        cx.notify();
+        let this = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            alert
+                .title(format!("Close “{title}”?"))
+                .description("The running agent will be stopped.")
+                .show_cancel(true)
+                .on_ok({
+                    let this = this.clone();
+                    move |_, window, cx| {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |v, cx| v.close_session(p, six, window, cx));
+                        }
+                        true
+                    }
+                })
+        });
     }
 
     /// Restart the current session with the same command in a fresh PTY.
@@ -460,33 +532,6 @@ impl AppView {
             .unwrap_or(px(DIFF_DEFAULT))
     }
 
-    fn request_close_current_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.current_session() else {
-            return;
-        };
-        let running = session.status.is_running();
-        let title = session.title.clone();
-        if !running {
-            self.close_current_session(window, cx);
-            return;
-        }
-        let this = cx.weak_entity();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            alert
-                .title(format!("Close “{title}”?"))
-                .description("The running agent will be stopped.")
-                .show_cancel(true)
-                .on_ok({
-                    let this = this.clone();
-                    move |_, window, cx| {
-                        if let Some(this) = this.upgrade() {
-                            this.update(cx, |v, cx| v.close_current_session(window, cx));
-                        }
-                        true
-                    }
-                })
-        });
-    }
 
     /// Kick off one diff reload; results newer than any in-flight one win.
     pub(crate) fn reload_diff(&mut self, cx: &mut Context<Self>) {
@@ -556,7 +601,9 @@ impl Render for AppView {
             }))
             .on_action(cx.listener(|this, _: &ToggleDiff, _, cx| this.toggle_diff(cx)))
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| {
-                this.request_close_current_session(window, cx);
+                let p = this.current_project;
+                let six = this.current_session;
+                this.request_close_session(p, six, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSessions, _, cx| this.toggle_sessions(cx)))
             .child(ui::title_bar::render(self, cx))
