@@ -9,8 +9,15 @@ use crate::app::AppView;
 
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let project = this.current_project();
-    let breadcrumb = match this.current_session() {
-        Some(s) => format!("{} — {}", project.name, s.title),
+    let session_title = this.current_session().and_then(|s| {
+        s.term
+            .as_ref()
+            .map(|t| t.read(cx).title())
+            .unwrap_or_default()
+            .or_else(|| Some(s.title.clone()))
+    });
+    let breadcrumb = match session_title {
+        Some(title) => format!("{} — {}", project.name, title),
         None => project.name.clone(),
     };
 
@@ -22,7 +29,6 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                 .gap_2()
                 .px_2()
                 .text_sm()
-                .child(div().font_medium().child("Day Day Up"))
                 .child(meta_text(breadcrumb, cx)),
         )
         .child(

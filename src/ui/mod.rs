@@ -24,7 +24,7 @@ pub(crate) const ROW_PX: f32 = 26.;
 pub(crate) fn status_dot(status: &AgentStatus, cx: &App) -> Hsla {
     match status {
         AgentStatus::Running => cx.theme().green,
-        AgentStatus::Done(_) | AgentStatus::Killed => cx.theme().foreground.opacity(0.4),
+        AgentStatus::Done(_) => cx.theme().foreground.opacity(0.4),
         AgentStatus::Error(_) => cx.theme().red,
     }
 }

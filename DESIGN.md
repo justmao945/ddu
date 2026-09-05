@@ -25,14 +25,22 @@ ddu/
   Cargo.toml
   DESIGN.md
   src/
-    main.rs        # app shell: init + open_window + Root, composition only
-    app.rs         # AppView: three-pane assembly + global state ownership
-    session.rs     # Project / AgentSession model + spawn/kill/restart
-    terminal.rs    # ddu-terminal: PTY + grid + TerminalView (only complex module)
-    diff.rs        # GitDiff model + right-pane view
-    explorer.rs    # left-pane project tree (later; MVP can use nested SidebarMenuItem)
-    config.rs      # config + persistence + agent command definitions
-```
+    main.rs           # app shell: init + open_window + Root, composition only
+    app.rs            # AppView: three-pane assembly + global state ownership
+    session.rs        # Project / AgentSession model + agent cmd presets
+    terminal/         # ddu-terminal (only complex module; own directory)
+      mod.rs          # TermSession entity: spawn/kill/resize/write + events
+      pty.rs          # portable-pty wrapper: spawn, writer, resize, killer
+      grid.rs         # alacritty Term behind FairMutex + pump threads
+      input.rs        # keystroke → escape-sequence encoding (+ tests)
+      element.rs      # custom GPUI Element painting the grid
+    diff/             # git diff model (M3)
+      mod.rs          # DiffFile / DiffHunk / DiffLine / GitDiff types
+      git.rs          # git2 HEAD→workdir query (+ tests)
+    ui/               # surface regions, thin composition over the models
+      terminal.rs     # center pane: focus, keys, scroll, exit banner
+      session_panel.rs / diff_panel.rs / status_bar.rs / title_bar.rs
+      settings_dialog.rs
 
 Dependency direction: `app -> {session, terminal, diff, explorer}`; features never point at each other, communication via `cx.emit / subscribe` or small shared types. Don't touch `gpui-base` (unless building new behavior); styling lives in the app layer only.
 
@@ -41,11 +49,13 @@ Dependency direction: `app -> {session, terminal, diff, explorer}`; features nev
 gpui-kit = "0.6"                    # the only GPUI source; never pull gpui directly
 alacritty_terminal = "0.24"         # crates.io build, Apache; never the zed fork git rev
 portable-pty = "0.9"                # MIT, PTY allocation
-vte = { version = "0.15", features = ["ansi"] }  # MIT, only if needed (alacritty_terminal already parses)
 git2 = "0.19"                       # MIT, diff data layer
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 anyhow = "1"
+async-channel = "2"                 # pump → UI wakeup channel (bounded(1) = coalescing)
+parking_lot = "0.12"                # unwrappable locks (TermMeta etc.)
+rustix = { version = "0.38", features = ["std"] }  # feature fix: rustix-openpty on macOS
+                                    # needs rustix std; unified here (serde/serde_json/vte
+                                    # arrive transitively when their features are needed)
 ```
 
 Note: pin the exact `alacritty_terminal` 0.2x minor version against docs.rs at implementation time. Direct GitHub access from China is extremely slow, so **no git dependencies** — crates.io plus a domestic mirror only.
@@ -149,11 +159,11 @@ struct AgentCmd { program: String, args: Vec<String>, cwd: PathBuf, env: Vec<(St
 
 ## 12. Milestones
 
-* M1 Static three panes: resizable + Sidebar mock data + TabBar switching + right-pane mock diff. Acceptance: window drags, all three panes switch correctly.
-* M2 Real PTY: `ddu-terminal` runs `bash` echo + `claude` launch + clean resize. Acceptance: `cargo run` is interactive on M2.
-* M3 Real diff: wire up git2 + refresh on change. Acceptance: editing a file updates the right pane within 3s.
-* M4 Session management: open/kill/restart/notifications/confirmations/persistence. Acceptance: killing a session never crashes, restart recovers.
-* M5 File tree + worktree + polish: explorer, per-session worktrees, shortcuts, theme.
+* ~~M1 Static three panes~~ ✅ shipped (c41296a): resizable + mock panes, settings + theme switching.
+* ~~M2 Real PTY~~ ✅ shipped: `terminal/` runs real agents (`claude`/`codex`, `bash` fallback), streaming, colors, scrollback, resize, keystroke encoding. Acceptance met: `cargo run` is interactive; headless roundtrip test covers spawn → parse → grid → exit.
+* ~~M3 Real diff~~ ✅ shipped: `diff/` queries HEAD→workdir (staged + unstaged + untracked) via git2; 3s poll + manual refresh; branch label; stat counts; 5000-line cap per file.
+* M4 Session management: open ✅ / kill ✅ / restart ✅ / exit notifications ✅ / confirmations ✅ / persistence — **state.json persistence remains**.
+* M5 File tree + worktree + polish: explorer, per-session worktrees, shortcuts (partially: cmd-t / cmd-b / cmd-w live), theme.
 
 ## 13. Risks
 

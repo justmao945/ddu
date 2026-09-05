@@ -1,110 +1,129 @@
-//! Center pane: the agent terminal. M1 renders the mock transcript with
-//! terminal semantics - Zed agent-panel style: each `$` command opens a
-//! bordered block containing the command and its output until the next
-//! prompt; `❯` lines are user input outside blocks. M2 replaces the
-//! transcript source with a real PTY.
+//! Center pane: the live agent terminal. A focus-tracked surface that
+//! forwards keystrokes and scroll events into the PTY and paints the
+//! grid via [`crate::terminal::element::TerminalElement`].
 
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::*;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::app::AppView;
+use crate::terminal::TermSession;
 
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     div()
+        .h_full()
         .flex_1()
         .min_w_0()
         .bg(cx.theme().background)
-        .child(match this.current_session() {
-            Some(session) => scroll(session.transcript.clone(), cx).into_any_element(),
+        .child(match this.current_term() {
+            Some(term) => surface(term, cx).into_any_element(),
             None => empty_state(cx).into_any_element(),
         })
 }
 
-enum Group {
-    /// `$ command` plus output lines captured inside one bordered block.
-    Block { cmd: String, out: Vec<String> },
-    /// `❯ user input` - outside blocks, like Zed user messages.
-    User(String),
-}
-
-fn group_lines(lines: &[String]) -> Vec<Group> {
-    let mut groups = Vec::new();
-    for line in lines {
-        if let Some(cmd) = line.strip_prefix("$ ") {
-            groups.push(Group::Block {
-                cmd: cmd.to_string(),
-                out: Vec::new(),
-            });
-        } else if let Some(input) = line.strip_prefix("> ") {
-            groups.push(Group::User(input.to_string()));
-        } else if let Some(Group::Block { out, .. }) = groups.last_mut() {
-            out.push(line.clone());
-        }
-    }
-    groups
-}
-
-fn scroll(lines: Vec<String>, cx: &mut Context<AppView>) -> impl IntoElement {
-    let fg = cx.theme().foreground;
-    let accent = cx.theme().accent;
-    let border = cx.theme().border;
-    let radius = cx.theme().radius;
-    let mono = cx.theme().mono_font_family.clone();
+/// The focus-tracked terminal surface for one live session.
+fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoElement {
+    let focus = term.read(cx).focus.clone();
+    let exited = term.read(cx).exit();
+    let weak = term.downgrade();
 
     div()
-        .id("terminal-scroll")
-        .size_full()
-        .overflow_y_scroll()
+        .id("terminal-surface")
+        .relative()
+        .h_full()
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .text_color(cx.theme().foreground)
+        .track_focus(&focus)
+        .key_context("Terminal")
+        .on_click(cx.listener({
+            let focus = focus.clone();
+            move |_, _, window, cx| {
+                focus.focus(window, cx);
+            }
+        }))
+        .on_key_down(cx.listener({
+            let weak = weak.clone();
+            move |_, event: &KeyDownEvent, _, cx| {
+                // ⌘-chords stay reserved for app actions.
+                let Some(bytes) = TermSession::encode_keystroke(&event.keystroke) else { return };
+                if let Some(term) = weak.upgrade() {
+                    term.update(cx, |s, _| {
+                        s.write(&bytes);
+                        s.scroll_to_bottom();
+                    });
+                    cx.stop_propagation();
+                }
+            }
+        }))
+        .on_scroll_wheel(cx.listener({
+            let weak = weak.clone();
+            move |_, event: &ScrollWheelEvent, _, cx| {
+                let lines = match event.delta {
+                    ScrollDelta::Lines(p) => p.y,
+                    ScrollDelta::Pixels(p) => f32::from(p.y / px(40.)),
+                };
+                if let Some(term) = weak.upgrade() {
+                    term.update(cx, |s, _| s.scroll(lines as i32));
+                }
+                cx.stop_propagation();
+            }
+        }))
         .child(
-            v_flex()
-                .px_4()
-                .py_3()
-                .gap_3()
-                .font_family(mono)
-                .text_sm()
-                .children(group_lines(&lines).into_iter().map(|group| match group {
-                    Group::User(input) => div()
-                        .flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_color(accent.opacity(0.7))
-                                .child("❯"),
-                        )
-                        .child(div().text_color(fg).child(input))
-                        .into_any_element(),
-                    Group::Block { cmd, out } => v_flex()
-                        .gap_1()
-                        .border_1()
-                        .border_color(border)
-                        .rounded(radius)
-                        .px_3()
-                        .py_2()
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(div().flex_shrink_0().text_color(accent).child("$"))
-                                .child(div().text_color(fg).child(cmd)),
-                        )
-                        .children(
-                            out.into_iter().map(|line| {
-                                div().text_color(fg.opacity(0.65)).child(line)
-                            }),
-                        )
-                        .into_any_element(),
+            div()
+                .h_full()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .child(TermSession::element(weak, focus)),
+        )
+        .when(exited.is_some(), |el| el.child(exited_banner(exited, cx)))
+}
+
+/// In-flow exit strip at the bottom of the terminal: status + restart
+/// (same command, fresh PTY). Lives inside the flex column so it can
+/// never be clipped like the old absolutely-positioned chip.
+fn exited_banner(exit: Option<i32>, cx: &mut Context<AppView>) -> impl IntoElement {
+    let label = match exit {
+        Some(0) => "agent finished".to_string(),
+        Some(code) => format!("agent exited ({code})"),
+        None => String::new(),
+    };
+    h_flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .border_t_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().background)
+        .px_3()
+        .py_1p5()
+        .text_sm()
+        .text_color(cx.theme().foreground.opacity(0.8))
+        .child(label)
+        .child(
+            Button::new("restart-session")
+                .label("Restart")
+                .ghost()
+                .small()
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.restart_current_session(window, cx);
                 })),
         )
 }
 
 fn empty_state(cx: &mut Context<AppView>) -> impl IntoElement {
-    div()
+    v_flex()
         .size_full()
-        .flex()
         .items_center()
         .justify_center()
-        .text_sm()
-        .text_color(cx.theme().foreground.opacity(0.4))
-        .child("No sessions yet — press ⌘T to create one.")
+        .gap_2()
+        .text_color(cx.theme().foreground.opacity(0.5))
+        .child("No agent session — start one with ⌘T")
 }

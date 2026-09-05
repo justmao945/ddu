@@ -1,5 +1,8 @@
 mod app;
+mod config;
+mod diff;
 mod session;
+mod terminal;
 mod ui;
 
 use app::AppView;
@@ -16,6 +19,7 @@ fn main() {
         // Must be first, before using any component features.
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Light, None, cx);
+        cx.set_global(config::Config::load());
 
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1320.), px(820.)), cx)),
