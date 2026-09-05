@@ -33,6 +33,11 @@ impl gpui::AssetSource for AppAssets {
                     "../assets/icons/wordmark-up.svg"
                 ))))
             }
+            "icons/folder-plus.svg" => {
+                Ok(Some(Cow::Borrowed(include_bytes!(
+                    "../assets/icons/folder-plus.svg"
+                ))))
+            }
             "icons/omp.svg" => {
                 Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/omp.svg"))))
             }

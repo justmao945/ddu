@@ -32,35 +32,34 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                 .px_2()
                 .flex()
                 .items_center()
-                .gap_1()
+                .justify_between()
+                .child(div().w(px(26.)))
                 .child(
                     // Two-tone SVG wordmark: SF Pro Heavy outlines; "Up"
                     // in the Claude-orange accent, slightly slanted.
                     h_flex()
-                        .flex_1()
-                        .min_w_0()
                         .items_center()
                         .gap(px(1.))
                         .child(
                             svg()
                                 .path("icons/wordmark-day.svg")
-                                .w(px(58.))
-                                .h(px(16.))
+                                .w(px(46.))
+                                .h(px(13.))
                                 .flex_shrink_0()
                                 .text_color(cx.theme().foreground),
                         )
                         .child(
                             svg()
                                 .path("icons/wordmark-up.svg")
-                                .w(px(25.))
-                                .h(px(16.))
+                                .w(px(20.))
+                                .h(px(13.))
                                 .flex_shrink_0()
                                 .text_color(hsla(15. / 360., 0.65, 0.5, 1.)),
                         ),
                 )
                 .child(
                     Button::new("add-project")
-                        .icon(IconName::Folder)
+                        .icon(super::AppIcon::FolderPlus)
                         .ghost()
                         .small()
                         .tooltip("Add project…")

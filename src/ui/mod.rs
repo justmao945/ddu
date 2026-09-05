@@ -18,13 +18,28 @@ pub(crate) const PANEL_HEADER_PX: f32 = 32.;
 /// Shared height of a selectable single-line list row.
 pub(crate) const ROW_PX: f32 = 26.;
 
-
 /// Dim count/meta text next to a panel label.
 pub(crate) fn meta_text(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .text_xs()
         .text_color(cx.theme().foreground.opacity(0.45))
         .child(text.into())
+}
+
+/// Custom icons shipped from `assets/icons` and registered in
+/// `main.rs::AppAssets`, drop-in usable wherever an `IconName` fits
+/// (via the `IconNamed` trait).
+#[derive(Clone, Copy)]
+pub(crate) enum AppIcon {
+    FolderPlus,
+}
+
+impl gpui_kit::component::IconNamed for AppIcon {
+    fn path(self) -> SharedString {
+        match self {
+            AppIcon::FolderPlus => "icons/folder-plus.svg".into(),
+        }
+    }
 }
 
 /// Zed reserves accent for activity; list selection is elevated neutral.
