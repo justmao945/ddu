@@ -60,8 +60,14 @@ pub struct AppView {
     pub(crate) current_session: usize,
     pub(crate) show_sessions: bool,
     pub(crate) show_diff: bool,
-    /// Owns the three-pane splitter sizes (see `set_sessions`/`set_diff`).
-    pub(crate) resize_state: Entity<ResizableState>,
+    /// Outer splitter: [sidebar | center+diff region]. The sidebar
+    /// column carries its own status strip, so this divider runs to
+    /// the window's bottom edge (see `set_sessions`).
+    pub(crate) shell_state: Entity<ResizableState>,
+    /// Inner splitter inside the center+diff region:
+    /// [terminal | changes]. It ends above the region's unified status
+    /// strip, so this divider never cuts through it (see `set_diff`).
+    pub(crate) panes_state: Entity<ResizableState>,
     /// Project row currently under the mouse (hides/reveals its buttons).
     pub(crate) diff_tree_scroll: ScrollHandle,
     pub(crate) diff_hunks_scroll: ScrollHandle,
@@ -216,7 +222,8 @@ impl AppView {
             // Diff visibility is per-session live, but the last saved
             // value seeds the restored window.
             show_diff: state.show_diff,
-            resize_state: cx.new(|_| ResizableState::default()),
+            shell_state: cx.new(|_| ResizableState::default()),
+            panes_state: cx.new(|_| ResizableState::default()),
             diff_tree_scroll: ScrollHandle::new(),
             diff_hunks_scroll: ScrollHandle::new(),
             diff_split_state: cx.new(|_| ResizableState::default()),
@@ -258,39 +265,42 @@ impl AppView {
         this.start_diff_poll(cx);
         this.start_ui_tick(cx);
         // Panel drags: capture the new width into the persisted state.
-        // The handler is deferred a tick — `resize_state.update` during
+        // Handlers are deferred a tick — a state update during
         // `set_diff`/`set_sessions` emits this event synchronously, and
         // a direct `view.update` there would re-enter AppView's own
         // update (panic: "already being updated").
-        let resize = this.resize_state.clone();
-        cx.subscribe_in(
-            &this.resize_state,
-            window,
-            move |_, _, _: &ResizablePanelEvent, _, cx| {
-                // Deferred: `resize_state.update` during set_diff /
-                // set_sessions emits this event synchronously; updating
-                // AppView right there would re-enter its own update
-                // (panic: "already being updated").
-                let resize = resize.clone();
-                cx.spawn(async move |this, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        let sizes = resize.read(cx).sizes();
-                        if this.show_sessions {
-                            this.last_sidebar_size = sizes.first().copied();
-                        }
-                        if this.show_diff {
-                            // diff slot: index 1 with sidebar visible,
-                            // index 0 without (center is always present).
-                            let ix = usize::from(this.show_sessions);
-                            this.last_diff_size = sizes.get(ix).copied();
-                        }
-                        this.persist(cx);
-                    });
-                })
-                .detach();
-            },
-        )
-        .detach();
+        for state in [&this.shell_state, &this.panes_state] {
+            let resize = state.clone();
+            cx.subscribe_in(
+                state,
+                window,
+                move |_, _, _: &ResizablePanelEvent, _, cx| {
+                    let resize = resize.clone();
+                    cx.spawn(async move |this, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            let sizes = resize.read(cx).sizes();
+                            // Outer drag: slot 0 is the sidebar.
+                            match resize.entity_id() == this.shell_state.entity_id() {
+                                true => {
+                                    if this.show_sessions {
+                                        this.last_sidebar_size = sizes.first().copied();
+                                    }
+                                }
+                                // Inner drag: the diff is the last slot.
+                                false => {
+                                    if this.show_diff {
+                                        this.last_diff_size = sizes.last().copied();
+                                    }
+                                }
+                            }
+                            this.persist(cx);
+                        });
+                    })
+                    .detach();
+                },
+            )
+            .detach();
+        }
         // Tree/content splitter drags: persist the tree pane height and
         // clear the seed so it can't fight a later live resize.
         cx.subscribe_in(
@@ -933,32 +943,18 @@ impl AppView {
         let restore_w = self.last_sidebar_w();
         if !on {
             // Capture before removal: after `remove_panel(0)` slot 0 is
-            // the center pane, not the sidebar.
-            self.last_sidebar_size = self.resize_state.read(cx).sizes().first().copied();
+            // the center+diff region, not the sidebar.
+            self.last_sidebar_size = self.shell_state.read(cx).sizes().first().copied();
         }
-        // `insert_panel`/`remove_panel` redistribute every slot's width
-        // proportionally (gpui-base `ResizableState`), which visually
-        // resizes the untouched diff pane. Re-pin the diff to its old
-        // width afterwards: `resize_panel` on the last panel takes the
-        // freed/given space only from its left neighbor — the center.
-        let old_diff_ix = usize::from(!on) + 1;
-        let diff_w = if self.show_diff {
-            self.resize_state.read(cx).sizes().get(old_diff_ix).copied()
-        } else {
-            None
-        };
-        self.resize_state.update(cx, |state, cx| {
+        // The panes (terminal/diff) live in their own splitter, so a
+        // sidebar insert/remove never rescales them — no re-pin needed.
+        self.shell_state.update(cx, |state, cx| {
             if on {
                 state.insert_panel(Some(restore_w), Some(0), cx);
             } else {
                 state.remove_panel(0, cx);
             }
         });
-        if let Some(w) = diff_w {
-            // Diff sits at index 2 (sidebar open) resp. 1 (closed) after
-            // the mutation; both are the last slot.
-            self.pin_panel(usize::from(on) + 1, w, cx);
-        }
         cx.notify();
     }
 
@@ -971,7 +967,8 @@ impl AppView {
         if on == self.show_diff {
             return;
         }
-        let ix = usize::from(self.show_sessions) + 1;
+        // Inner splitter slots: the terminal is 0, the diff 1.
+        const DIFF_IX: usize = 1;
         self.show_diff = on;
         // Remember the panel state on the current session: switching
         // sessions must restore each session's own diff visibility.
@@ -986,41 +983,18 @@ impl AppView {
         let restore_w = self.last_diff_w();
         if !on {
             // Capture before removal: the slot shifts after `remove_panel`.
-            self.last_diff_size = self.resize_state.read(cx).sizes().get(ix).copied();
+            self.last_diff_size = self.panes_state.read(cx).sizes().get(DIFF_IX).copied();
         }
-        // Pin the untouched sidebar across the toggle, like `set_sessions`:
-        // `insert_panel`/`remove_panel` would otherwise rescale it.
-        let sidebar_w = if self.show_sessions {
-            self.resize_state.read(cx).sizes().first().copied()
-        } else {
-            None
-        };
-        self.resize_state.update(cx, |state, cx| {
+        // The sidebar lives in the outer splitter, so a diff
+        // insert/remove never rescales it — no re-pin needed.
+        self.panes_state.update(cx, |state, cx| {
             if on {
-                state.insert_panel(Some(restore_w), Some(ix), cx);
+                state.insert_panel(Some(restore_w), Some(DIFF_IX), cx);
             } else {
-                state.remove_panel(ix, cx);
+                state.remove_panel(DIFF_IX, cx);
             }
         });
-        if let Some(w) = sidebar_w {
-            self.pin_panel(0, w, cx);
-        }
         cx.notify();
-    }
-
-    /// Force panel `ix` to `w`, letting the center pane absorb the change
-    /// (via `resize_panel`'s drag-space math) instead of staying skewed by
-    /// `insert_panel`/`remove_panel`'s proportional redistribution.
-    fn pin_panel(&self, ix: usize, w: Pixels, cx: &mut Context<Self>) {
-        let this = cx.weak_entity();
-        let state = self.resize_state.downgrade();
-        cx.spawn(async move |_, cx| {
-            let _ = state.update_in(cx, |state, window, cx| {
-                state.resize_panel(ix, w, window, cx);
-            });
-            let _ = this.update(cx, |_, cx| cx.notify());
-        })
-        .detach();
     }
 
     fn last_sidebar_w(&self) -> Pixels {
@@ -1220,50 +1194,77 @@ impl Render for AppView {
             }))
             .child(ui::title_bar::render(self, cx))
             .child({
-                // Each column owns its status strip, so the resize
-                // dividers run all the way to the window's bottom edge.
-                let column = |content: AnyElement, strip: AnyElement| {
-                    v_flex()
-                        .size_full()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(div().flex_1().min_h_0().min_w_0().child(content))
-                        .child(strip)
-                };
-                let mut group = h_resizable("main").with_state(&self.resize_state);
+                // Two nested splitters. The sidebar column owns a status
+                // strip, so the LEFT divider runs to the window's bottom
+                // edge; the terminal/changes region wraps its splitter
+                // ABOVE one unified strip, so the RIGHT divider stops at
+                // the strip's top edge and all strips sit on one line.
+                let panes_min = CENTER_MIN + if self.show_diff { DIFF_MIN } else { 0. } + 8.;
+                let mut shell = h_resizable("shell").with_state(&self.shell_state);
                 if self.show_sessions {
-                    group = group.child(
+                    shell = shell.child(
                         resizable_panel()
                             .size(self.last_sidebar_w())
                             .flex_none()
                             .size_range(px(SIDEBAR_MIN)..px(SIDEBAR_MAX))
-                            .child(column(
-                                ui::session_panel::render(self, cx).into_any_element(),
-                                ui::status_bar::render_sidebar(self, cx).into_any_element(),
-                            )),
+                            .child(
+                                v_flex()
+                                    .size_full()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .child(ui::session_panel::render(self, cx)),
+                                    )
+                                    .child(ui::status_bar::render_sidebar(self, cx)),
+                            ),
                     );
                 }
-                group = group.child(
+                let mut panes = h_resizable("panes").with_state(&self.panes_state);
+                panes = panes.child(
                     resizable_panel()
                         .size_range(px(CENTER_MIN)..px(f32::MAX))
-                        .child(column(
-                            ui::terminal::render(self, cx).into_any_element(),
-                            ui::status_bar::render_center(self, cx).into_any_element(),
-                        )),
+                        .child(
+                            div()
+                                .size_full()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(ui::terminal::render(self, cx)),
+                        ),
                 );
                 if self.show_diff {
-                    group = group.child(
+                    panes = panes.child(
                         resizable_panel()
                             .size(self.last_diff_w())
                             .flex_none()
                             .size_range(px(DIFF_MIN)..px(DIFF_MAX))
-                            .child(column(
-                                ui::diff_panel::render(self, window, cx).into_any_element(),
-                                ui::status_bar::render_diff(self, cx).into_any_element(),
-                            )),
+                            .child(
+                                div()
+                                    .size_full()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .child(ui::diff_panel::render(self, window, cx)),
+                            ),
                     );
                 }
-                div().flex_1().min_h_0().overflow_hidden().child(group)
+                let region = v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(div().flex_1().min_h_0().overflow_hidden().child(panes))
+                    .child(ui::status_bar::render_center(self, cx));
+                div().flex_1().min_h_0().overflow_hidden().child(
+                    shell.child(
+                        resizable_panel()
+                            .size_range(px(panes_min)..px(f32::MAX))
+                            .child(region),
+                    ),
+                )
             })
             // Overlay layers (anchored, no layout impact): dialogs opened via
             // window.open_dialog / open_alert_dialog are hosted here —
