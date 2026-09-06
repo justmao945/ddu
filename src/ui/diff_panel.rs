@@ -17,13 +17,16 @@ use crate::diff::{DiffFile, DiffLine};
 const FILE_TREE_MAX_H: f32 = 220.;
 
 pub(crate) fn render(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl IntoElement {
+    // No branch/stat strip when the tree is clean — the body's
+    // "No changes" state carries the panel on its own.
+    let dirty = this.diff.as_ref().is_some_and(|d| !d.is_empty());
     v_flex()
         .h_full()
         .w_full()
         .min_w_0()
         .overflow_hidden()
         .bg(cx.theme().background)
-        .child(header(this, cx))
+        .when(dirty, |el| el.child(header(this, cx)))
         .child(body(this, window, cx))
 }
 

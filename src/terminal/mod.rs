@@ -17,6 +17,10 @@ mod pty;
 
 use std::cell::Cell;
 use std::ops::Range;
+use alacritty_terminal::grid::Dimensions as _;
+use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
+
 use std::time::{Duration, Instant};
 
 use gpui_kit::*;
@@ -52,6 +56,13 @@ pub struct TermSession {
     /// Cursor rect in window coordinates from the last paint — the
     /// platform anchors the IME candidate popup to it.
     ime_cursor_bounds: Cell<Option<Bounds<Pixels>>>,
+    /// Left-button drag in progress (between mouse down and up).
+    selecting: bool,
+    /// Terminal element bounds in window coordinates from the last
+    /// paint — mouse events map through them into grid cells.
+    grid_bounds: Cell<Option<Bounds<Pixels>>>,
+    /// Scrollbar thumb drag: grab offset (px) below the thumb's top.
+    scrollbar_drag: Option<f32>,
 }
 
 impl gpui_kit::EventEmitter<TermEvent> for TermSession {}
@@ -68,6 +79,9 @@ impl TermSession {
         let entity = cx.new(|cx| {
             cx.observe_global::<gpui_kit::component::theme::Theme>(|this: &mut Self, cx| {
                 this.grid.dark.store(gpui_kit::component::theme::Theme::global(cx).is_dark(), std::sync::atomic::Ordering::Relaxed);
+                // The palette is resolved from the live theme at paint
+                // time — wake so existing sessions repaint immediately.
+                cx.emit(TermEvent::Wakeup);
             }).detach();
             Self {
             grid,
@@ -76,11 +90,14 @@ impl TermSession {
             exit: None,
             pending_resize: None,
             last_resize: Instant::now(),
+            selecting: false,
+            grid_bounds: Cell::new(None),
             ever_resized: false,
             flush_scheduled: false,
             scroll_remainder: 0.,
             marked_text: None,
             ime_cursor_bounds: Cell::new(None),
+            scrollbar_drag: None,
         }});
 
         // Foreground pump: coalesced wakeups → notify; exit → event.
@@ -164,7 +181,7 @@ impl TermSession {
         if let Some(process) = &self.process {
             process.resize(cols, rows);
         }
-        cx.notify();
+        cx.emit(TermEvent::Wakeup);
     }
 
     /// Send keystrokes/paste bytes to the child.
@@ -204,8 +221,147 @@ impl TermSession {
         self.scroll_remainder -= whole as f32;
         if whole != 0 {
             self.grid.scroll(whole);
-            cx.notify();
+            cx.emit(TermEvent::Wakeup);
         }
+    }
+    /// Map a window-coordinate point to a grid cell, clamped into the
+    /// visible area (a drag outside the grid pins to its edge). The
+    /// `Side` picks the cell edge nearest the x fraction — alacritty's
+    /// anchor convention for drag ends.
+    pub(crate) fn cell_at(
+        &self,
+        pos: Point<Pixels>,
+        window: &Window,
+        cx: &App,
+    ) -> Option<(GridPoint, Side)> {
+        let bounds = self.grid_bounds.get()?;
+        let m = element::Metrics::new(window, cx);
+        let rel = pos - bounds.origin - point(px(element::PAD), px(element::PAD));
+        let (cols, rows) = self.grid.size();
+        let col = (rel.x / m.cell_width).floor().clamp(0., f32::from(cols.saturating_sub(1)));
+        let row = (rel.y / m.line_height).floor().clamp(0., f32::from(rows.saturating_sub(1)));
+        let side = if (rel.x / m.cell_width) - col < 0.5 { Side::Left } else { Side::Right };
+        let offset = self.grid.term.lock().grid().display_offset() as i32;
+        Some((GridPoint::new(Line(row as i32 - offset), Column(col as usize)), side))
+    }
+
+    /// Start a selection on mouse down; a double-click extends to the
+    /// semantic (word) run around the cell.
+    pub(crate) fn begin_selection(
+        &mut self,
+        cell: GridPoint,
+        side: Side,
+        clicks: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let ty = if clicks >= 2 { SelectionType::Semantic } else { SelectionType::Simple };
+        self.grid.term.lock().selection = Some(Selection::new(ty, cell, side));
+        self.selecting = true;
+        cx.emit(TermEvent::Wakeup);
+    }
+
+    /// Extend the active drag to the cell under the pointer.
+    pub(crate) fn grow_selection(&mut self, cell: GridPoint, side: Side, cx: &mut Context<Self>) {
+        if !self.selecting {
+            return;
+        }
+        if let Some(selection) = self.grid.term.lock().selection.as_mut() {
+            selection.update(cell, side);
+            cx.emit(TermEvent::Wakeup);
+        }
+    }
+
+    /// End the drag; a plain click (empty selection) clears the wash.
+    pub(crate) fn end_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.selecting {
+            return;
+        }
+        self.selecting = false;
+        let mut term = self.grid.term.lock();
+        if term.selection.as_ref().is_some_and(|s| s.is_empty()) {
+            term.selection = None;
+        }
+        cx.emit(TermEvent::Wakeup);
+    }
+
+    pub(crate) fn copy_selection(&self, cx: &mut App) -> bool {
+        match self.grid.term.lock().selection_to_string() {
+            Some(text) if !text.trim().is_empty() => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Non-empty mouse selection present (drives Copy enablement).
+    pub(crate) fn has_selection(&self) -> bool {
+        self.grid.term.lock().selection.as_ref().is_some_and(|s| !s.is_empty())
+    }
+
+    /// Right-edge scrollbar track+thumb in window coordinates, or None
+    /// when there is no scrollback to navigate.
+    pub(crate) fn scrollbar_geometry(&self) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+        let bounds = self.grid_bounds.get()?;
+        let (_cols, rows) = self.grid.size();
+        let (history, offset) = {
+            let term = self.grid.term.lock();
+            (term.grid().history_size(), term.grid().display_offset())
+        };
+        // Full element height, flush with both ends — same rect the
+        // element paints against.
+        element::scrollbar_geometry(bounds, rows as usize, history, offset)
+    }
+
+    /// Left button down on the scrollbar strip: on the thumb starts a
+    /// drag, on the bare track pages up/down. True = event consumed.
+    pub(crate) fn scrollbar_mouse_down(
+        &mut self,
+        pos: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((track, thumb)) = self.scrollbar_geometry() else { return false };
+        if thumb.contains(&pos) {
+            self.scrollbar_drag = Some(f32::from(pos.y - thumb.origin.y));
+        } else if track.contains(&pos) {
+            let (_cols, rows) = self.grid.size();
+            let page = rows as i32 - 1;
+            self.grid.scroll(if pos.y < thumb.origin.y { page } else { -page });
+            cx.emit(TermEvent::Wakeup);
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// Drag the thumb to the pointer's scroll fraction. True while a
+    /// scrollbar drag is active (the caller then skips selection).
+    pub(crate) fn scrollbar_mouse_drag(
+        &mut self,
+        pos: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(grab) = self.scrollbar_drag else { return false };
+        let Some((track, thumb)) = self.scrollbar_geometry() else { return false };
+        let travel = f32::from(track.size.height - thumb.size.height);
+        let history = self.grid.term.lock().grid().history_size() as f32;
+        let frac = if travel <= 0. {
+            0.
+        } else {
+            1. - ((f32::from(pos.y) - grab - f32::from(track.origin.y)) / travel).clamp(0., 1.)
+        };
+        let target = (frac * history).round() as i32;
+        let current = self.grid.term.lock().grid().display_offset() as i32;
+        if target != current {
+            self.grid.scroll(target - current);
+            cx.emit(TermEvent::Wakeup);
+        }
+        true
+    }
+
+    /// End any scrollbar drag (mouse up anywhere).
+    pub(crate) fn scrollbar_mouse_up(&mut self) {
+        self.scrollbar_drag = None;
     }
 
     /// Scroll back to the live bottom.
@@ -333,7 +489,7 @@ mod tests {
     use super::{PtySpawn, TermSession};
     use gpui_kit::component::theme::Theme;
     use gpui_kit::{
-        App, AnyWindowHandle, AppContext as _, Context, Entity, EntityInputHandler as _, IntoElement, Render, Styled as _, TestAppContext, Window, div, gpui,
+        App, AnyWindowHandle, AppContext as _, Context, Entity, EntityInputHandler as _, InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext, Window, div, gpui,
     };
     use std::time::{Duration, Instant};
 
@@ -360,7 +516,253 @@ mod tests {
         }
         text
     }
+    /// Hit-test mapping: window px → grid cell, clamped at the edges
+    /// and shifted by the scroll offset — an off-by-one here selects
+    /// the wrong row/column.
+    #[test]
+    fn cell_at_maps_pixels_to_grid() {
+        gpui::run_test_once(0, Box::new(|dispatcher| {
+            let mut cx0 = TestAppContext::build(dispatcher, Some("cell_at_maps_pixels_to_grid"));
+            let cx = &mut cx0;
+            let window = cx.add_window(|_, _| TestRoot);
+            let window = AnyWindowHandle::from(window);
+            let session = cx
+                .update(|cx| {
+                    cx.set_global(Theme::default());
+                    cx.set_global(crate::config::Config::default());
+                    TermSession::spawn(
+                        &PtySpawn { program: "cat".into(), args: vec![], cwd: std::env::temp_dir() },
+                        cx,
+                    )
+                })
+                .expect("spawn cat");
 
+            cx.update_window(window, |_, window, cx| {
+                session.update(cx, |s, cx| {
+                    // Pretend a paint: element at (100, 50), 80×24 grid.
+                    s.grid_bounds.set(Some(gpui_kit::Bounds {
+                        origin: gpui_kit::point(gpui_kit::px(100.), gpui_kit::px(50.)),
+                        size: gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(500.)),
+                    }));
+                    let m = super::element::Metrics::new(window, cx);
+                    let cell_w = f32::from(m.cell_width);
+                    let line_h = f32::from(m.line_height);
+                    let pad = super::element::PAD;
+
+                    // Center of cell (3, 2) → line 2, column 3.
+                    let pos = gpui_kit::point(
+                        gpui_kit::px(100. + pad + 3.5 * cell_w),
+                        gpui_kit::px(50. + pad + 2.5 * line_h),
+                    );
+                    let (cell, _side) = s.cell_at(pos, window, cx).expect("inside bounds");
+                    assert_eq!((cell.line.0, cell.column.0), (2, 3));
+
+                    // Far outside the grid clamps to the last cell.
+                    let pos = gpui_kit::point(gpui_kit::px(5000.), gpui_kit::px(5000.));
+                    let (cell, _) = s.cell_at(pos, window, cx).expect("clamped");
+                    assert_eq!((cell.line.0, cell.column.0), (23, 79));
+
+                    // Scrolled 5 lines into history: the same screen row
+                    // addresses a grid line 5 lower. Fill 40 lines first
+                    // so the 24-row grid actually has scrollback.
+                    let mut parser = alacritty_terminal::vte::ansi::Processor::<
+                        alacritty_terminal::vte::ansi::StdSyncHandler,
+                    >::new();
+                    let mut term = s.grid.term.lock();
+                    for i in 0..40 {
+                        for &byte in format!("line{i}\r\n").as_bytes() {
+                            parser.advance(&mut *term, byte);
+                        }
+                    }
+                    term.scroll_display(alacritty_terminal::grid::Scroll::Delta(5));
+                    drop(term);
+                    let pos = gpui_kit::point(
+                        gpui_kit::px(100. + pad + 3.5 * cell_w),
+                        gpui_kit::px(50. + pad + 2.5 * line_h),
+                    );
+                    let (cell, _) = s.cell_at(pos, window, cx).expect("scrolled");
+                    assert_eq!((cell.line.0, cell.column.0), (-3, 3));
+                });
+            })
+            .unwrap();
+
+            cx.update(|cx| {
+                cx.background_executor().forbid_parking();
+                cx.quit();
+            });
+            cx.run_until_parked();
+        }));
+    }
+
+    /// Render-affecting mutations must emit `Wakeup`: the app shell
+    /// repaints solely off that event, so a bare `cx.notify()` here
+    /// means mouse selection / wheel scroll never become visible.
+    #[test]
+    fn render_mutations_emit_wakeup() {
+        gpui::run_test_once(0, Box::new(|dispatcher| {
+            let mut cx0 =
+                TestAppContext::build(dispatcher, Some("render_mutations_emit_wakeup"));
+            let cx = &mut cx0;
+            let session = cx
+                .update(|cx| {
+                    cx.set_global(Theme::default());
+                    cx.set_global(crate::config::Config::default());
+                    TermSession::spawn(
+                        &PtySpawn { program: "cat".into(), args: vec![], cwd: std::env::temp_dir() },
+                        cx,
+                    )
+                })
+                .expect("spawn cat");
+            let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            cx.update(|cx| {
+                let events = events.clone();
+                cx.subscribe(&session, move |_, event: &super::TermEvent, _| {
+                    events.borrow_mut().push(*event);
+                })
+                .detach();
+            });
+
+            cx.update(|cx| {
+                session.update(cx, |s, cx| {
+                    s.begin_selection(
+                        super::GridPoint::new(super::Line(0), super::Column(0)),
+                        super::Side::Left,
+                        1,
+                        cx,
+                    );
+                    s.scroll_by(2., cx);
+                    s.end_selection(cx);
+                });
+            });
+
+            let log = events.borrow();
+            let wakeups =
+                log.iter().filter(|e| **e == super::TermEvent::Wakeup).count();
+            assert!(wakeups >= 3, "begin/scroll/end each emit Wakeup, got {log:?}");
+        }));
+    }
+
+
+    /// End-to-end: a left-drag across grid cells must set a selection
+    /// whose copy text is the swept run — this exercises the same
+    /// hitbox → listener → `cell_at` → alacritty-model chain the live
+    /// surface uses (`ui::terminal::surface` mirrors these listeners).
+    #[test]
+    fn mouse_drag_selects_grid_text() {
+        struct SelRoot {
+            term: Entity<TermSession>,
+            focus: gpui_kit::FocusHandle,
+        }
+        impl Render for SelRoot {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let weak = self.term.downgrade();
+                div()
+                    .size_full()
+                    .child(
+                        div()
+                            .h_full()
+                            .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener({
+                                let weak = weak.clone();
+                                move |_, event: &gpui_kit::MouseDownEvent, window, cx| {
+                                    if let Some(term) = weak.upgrade() {
+                                        term.update(cx, |s, cx| {
+                                            if let Some((cell, side)) =
+                                                s.cell_at(event.position, window, cx)
+                                            {
+                                                s.begin_selection(cell, side, event.click_count, cx);
+                                            }
+                                        });
+                                    }
+                                }
+                            }))
+                            .on_mouse_move(cx.listener({
+                                let weak = weak.clone();
+                                move |_, event: &gpui_kit::MouseMoveEvent, window, cx| {
+                                    if let Some(term) = weak.upgrade() {
+                                        term.update(cx, |s, cx| {
+                                            if let Some((cell, side)) =
+                                                s.cell_at(event.position, window, cx)
+                                            {
+                                                s.grow_selection(cell, side, cx);
+                                            }
+                                        });
+                                    }
+                                }
+                            }))
+                            .on_mouse_up(gpui_kit::MouseButton::Left, cx.listener({
+                                let weak = weak.clone();
+                                move |_, _, _, cx| {
+                                    if let Some(term) = weak.upgrade() {
+                                        term.update(cx, |s, cx| s.end_selection(cx));
+                                    }
+                                }
+                            }))
+                            .child(TermSession::element(weak, self.focus.clone())),
+                    )
+            }
+        }
+
+        gpui::run_test_once(0, Box::new(|dispatcher| {
+            let mut cx0 =
+                TestAppContext::build(dispatcher, Some("mouse_drag_selects_grid_text"));
+            let cx = &mut cx0;
+            let session = cx
+                .update(|cx| {
+                    cx.set_global(Theme::default());
+                    cx.set_global(crate::config::Config::default());
+                    TermSession::spawn(
+                        &PtySpawn { program: "cat".into(), args: vec![], cwd: std::env::temp_dir() },
+                        cx,
+                    )
+                })
+                .expect("spawn cat");
+            // Deterministic rows: "row00-abcdefghij" .. "row09-abcdefghij".
+            {
+                cx.update(|cx| {
+                    let mut parser = alacritty_terminal::vte::ansi::Processor::<
+                        alacritty_terminal::vte::ansi::StdSyncHandler,
+                    >::new();
+                    let mut term = session.read(cx).grid.term.lock();
+                    for i in 0..10 {
+                        for &byte in format!("row{i:02}-abcdefghij\r\n").as_bytes() {
+                            parser.advance(&mut *term, byte);
+                        }
+                    }
+                });
+            }
+
+            let session2 = session.clone();
+            let (_view, vcx) =
+                cx.add_window_view(move |_, cx| SelRoot { term: session2, focus: cx.focus_handle() });
+
+            // A rendered frame stashed the element bounds; map row 2,
+            // cols 5→10 (side-aware: 5¼ starts left of col 5, 10¾ ends
+            // right of col 10) to window pixels.
+            let (down, up) = vcx.update(|window, cx| {
+                let bounds = session.read(cx).grid_bounds.get().expect("painted bounds");
+                let m = super::element::Metrics::new(window, cx);
+                let (w, h) = (f32::from(m.cell_width), f32::from(m.line_height));
+                let pad = super::element::PAD;
+                let at = |col: f32| gpui_kit::point(
+                    bounds.origin.x + gpui_kit::px(pad + col * w),
+                    bounds.origin.y + gpui_kit::px(pad + 2.5 * h),
+                );
+                (at(5.25), at(10.75))
+            });
+            vcx.simulate_mouse_down(down, gpui_kit::MouseButton::Left, gpui_kit::Modifiers::none());
+            vcx.simulate_mouse_move(up, gpui_kit::MouseButton::Left, gpui_kit::Modifiers::none());
+            vcx.simulate_mouse_up(up, gpui_kit::MouseButton::Left, gpui_kit::Modifiers::none());
+
+            let copied = vcx.update(|_, cx| session.read(cx).grid.term.lock().selection_to_string());
+            assert_eq!(copied.as_deref(), Some("-abcde"));
+
+            cx.update(|cx| {
+                cx.background_executor().forbid_parking();
+                cx.quit();
+            });
+            cx.run_until_parked();
+        }));
+    }
     /// IME acceptance: preedit stays out of the PTY, a commit lands as
     /// UTF-8 bytes (a `cat` child echoes them back onto the grid), and
     /// unmark drops a cancelled composition.

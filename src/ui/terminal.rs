@@ -3,11 +3,12 @@
 //! grid via [`crate::terminal::element::TerminalElement`].
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::app::{AppView, TermBacktab, TermPaste, TermTab};
+use crate::app::{AppView, TermBacktab, TermCopy, TermPaste, TermTab};
 use crate::terminal::TermSession;
 
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -56,7 +57,7 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                     term.update(cx, |s, cx| {
                         s.write(&bytes);
                         s.scroll_to_bottom();
-                        cx.notify();
+                        cx.emit(crate::terminal::TermEvent::Wakeup);
                     });
                     cx.stop_propagation();
                 }
@@ -85,7 +86,7 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                     term.update(cx, |s, cx| {
                         s.write(b"\t");
                         s.scroll_to_bottom();
-                        cx.notify();
+                        cx.emit(crate::terminal::TermEvent::Wakeup);
                     });
                 }
             }
@@ -97,7 +98,7 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                     term.update(cx, |s, cx| {
                         s.write(b"\x1b[Z");
                         s.scroll_to_bottom();
-                        cx.notify();
+                        cx.emit(crate::terminal::TermEvent::Wakeup);
                     });
                 }
             }
@@ -111,14 +112,123 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                 if let Some(term) = weak.upgrade() {
                     term.update(cx, |s, cx| {
                         s.paste_text(&text);
-                        cx.notify();
+                        cx.emit(crate::terminal::TermEvent::Wakeup);
                     });
                 }
             }
         }))
+        // Right-click context menu: copy the selection / paste from the
+        // clipboard. The menu takes focus while open and restores it to
+        // the terminal on dismiss.
+        .context_menu({
+            let weak = weak.clone();
+            move |menu, _window, cx| {
+                let has_selection =
+                    weak.upgrade().is_some_and(|t| t.read(cx).has_selection());
+                let can_paste =
+                    cx.read_from_clipboard().is_some_and(|item| item.text().is_some());
+                let copy_term = weak.clone();
+                let paste_term = weak.clone();
+                menu.item(
+                    PopupMenuItem::new("Copy").disabled(!has_selection).on_click(
+                        move |_, _, cx| {
+                            if let Some(t) = copy_term.upgrade() {
+                                t.update(cx, |s, cx| {
+                                    s.copy_selection(cx);
+                                });
+                            }
+                        },
+                    ),
+                )
+                .item(
+                    PopupMenuItem::new("Paste").disabled(!can_paste).on_click(
+                        move |_, _, cx| {
+                            let Some(text) =
+                                cx.read_from_clipboard().and_then(|item| item.text())
+                            else {
+                                return;
+                            };
+                            if let Some(t) = paste_term.upgrade() {
+                                t.update(cx, |s, cx| {
+                                    s.paste_text(&text);
+                                    cx.emit(crate::terminal::TermEvent::Wakeup);
+                                });
+                            }
+                        },
+                    ),
+                )
+            }
+        })
         .child(
             div()
                 .h_full()
+        // Mouse text selection: down starts (double-click = semantic
+        // word), move grows while the button is held, up settles — a
+        // plain click collapses to nothing and clears the wash. The
+        // right-edge scrollbar strip intercepts first: thumb drag or
+        // track paging instead of selecting.
+        .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener({
+            let weak = weak.clone();
+            move |_, event: &MouseDownEvent, window, cx| {
+                if let Some(term) = weak.upgrade() {
+                    term.update(cx, |s, cx| {
+                        if s.scrollbar_mouse_down(event.position, cx) {
+                            return;
+                        }
+                        if let Some((cell, side)) = s.cell_at(event.position, window, cx) {
+                            s.begin_selection(cell, side, event.click_count, cx);
+                        }
+                    });
+                }
+            }
+        }))
+        .on_mouse_move(cx.listener({
+            let weak = weak.clone();
+            move |_, event: &MouseMoveEvent, window, cx| {
+                if let Some(term) = weak.upgrade() {
+                    term.update(cx, |s, cx| {
+                        if s.scrollbar_mouse_drag(event.position, cx) {
+                            return;
+                        }
+                        if let Some((cell, side)) = s.cell_at(event.position, window, cx) {
+                            s.grow_selection(cell, side, cx);
+                        }
+                    });
+                }
+            }
+        }))
+        .on_mouse_up(gpui_kit::MouseButton::Left, cx.listener({
+            let weak = weak.clone();
+            move |_, _, _, cx| {
+                if let Some(term) = weak.upgrade() {
+                    term.update(cx, |s, cx| {
+                        s.scrollbar_mouse_up();
+                        s.end_selection(cx);
+                    });
+                }
+            }
+        }))
+        .on_mouse_up_out(gpui_kit::MouseButton::Left, cx.listener({
+            let weak = weak.clone();
+            move |_, _, _, cx| {
+                if let Some(term) = weak.upgrade() {
+                    term.update(cx, |s, cx| {
+                        s.scrollbar_mouse_up();
+                        s.end_selection(cx);
+                    });
+                }
+            }
+        }))
+        .on_action(cx.listener({
+            let weak = weak.clone();
+            move |_, _: &TermCopy, _, cx| {
+                if let Some(term) = weak.upgrade() {
+                    if term.update(cx, |s, cx| s.copy_selection(cx)) {
+                        cx.stop_propagation();
+                    }
+                }
+            }
+        }))
                 .flex_1()
                 .min_h_0()
                 .min_w_0()

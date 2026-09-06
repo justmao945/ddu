@@ -38,6 +38,6 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
             h_flex()
                 .items_center()
                 .px_2()
-                .child(super::settings_dialog::button()),
+                .child(super::settings_window::button()),
         )
 }

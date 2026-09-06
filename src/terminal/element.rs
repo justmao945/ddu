@@ -6,6 +6,7 @@ use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 
+use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color as TermColor, CursorShape, NamedColor};
 use alacritty_terminal::term::RenderableContent;
@@ -13,9 +14,42 @@ use alacritty_terminal::term::RenderableContent;
 use super::TermSession;
 
 /// Line height as a factor of the mono font size.
-const LINE_HEIGHT_FACTOR: f32 = 1.45;
+pub(crate) const LINE_HEIGHT_FACTOR: f32 = 1.45;
 /// Grid inset inside the panel, all sides.
-const PAD: f32 = 10.;
+pub(crate) const PAD: f32 = 10.;
+/// Right-edge scrollbar strip width.
+pub(crate) const SCROLLBAR_W: f32 = 6.;
+/// Minimum thumb height so short scrollback stays grabbable.
+const THUMB_MIN: f32 = 18.;
+
+/// Scrollbar track + thumb rects for the grid area, or None when there
+/// is no scrollback. The thumb rides the very right edge of `area`;
+/// `display_offset` 0 pins it to the bottom (live), `history` to the top.
+pub(crate) fn scrollbar_geometry(
+    area: Bounds<Pixels>,
+    screen_lines: usize,
+    history: usize,
+    display_offset: usize,
+) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+    if history == 0 {
+        return None;
+    }
+    let track = Bounds {
+        origin: point(area.origin.x + area.size.width - px(SCROLLBAR_W), area.origin.y),
+        size: size(px(SCROLLBAR_W), area.size.height),
+    };
+    let thumb_h = (f32::from(track.size.height) * screen_lines as f32
+        / (screen_lines + history) as f32)
+        .max(THUMB_MIN);
+    let travel = (f32::from(track.size.height) - thumb_h).max(0.);
+    let frac = display_offset.min(history) as f32 / history as f32;
+    let top = track.origin.y + px(travel * (1. - frac));
+    let thumb = Bounds {
+        origin: point(track.origin.x, top),
+        size: size(px(SCROLLBAR_W), px(thumb_h)),
+    };
+    Some((track, thumb))
+}
 
 pub(crate) struct TerminalElement {
     session: WeakEntity<TermSession>,
@@ -29,15 +63,15 @@ impl TerminalElement {
 }
 
 /// Font metrics for the grid, derived from the theme's mono face.
-struct Metrics {
-    line_height: Pixels,
-    cell_width: Pixels,
+pub(crate) struct Metrics {
+    pub(crate) line_height: Pixels,
+    pub(crate) cell_width: Pixels,
     font: Font,
     font_size: Pixels,
 }
 
 impl Metrics {
-    fn new(window: &Window, cx: &App) -> Self {
+    pub(crate) fn new(window: &Window, cx: &App) -> Self {
         let theme = cx.theme();
         // Configured terminal font wins; empty = the system mono face.
         let family = cx
@@ -153,8 +187,8 @@ impl Element for TerminalElement {
             cx,
         );
         let m = Metrics::new(window, cx);
-        let theme = cx.theme();
-        let palette = TerminalPalette::new(theme);
+        let scrollbar_thumb = cx.theme().scrollbar_thumb;
+        let palette = TerminalPalette::new(cx.theme());
         window.paint_quad(fill(bounds, palette.bg));
         let focused = self.focus.is_focused(window);
 
@@ -165,24 +199,42 @@ impl Element for TerminalElement {
         let term_lock = term.lock();
         let mut content = term_lock.renderable_content();
         let cursor = content.cursor;
+        // Mouse hit-testing maps window points through these bounds.
+        session.read(cx).grid_bounds.set(Some(bounds));
 
         let origin = bounds.origin + point(px(PAD), px(PAD));
+        // `display_iter` starts at the topmost visible line (grid line
+        // `-display_offset`), so the cursor's screen row is its grid
+        // line plus the scroll offset — without this the block cursor
+        // and the IME overlay land rows above the text once scrolled.
+        let cursor_row = cursor.point.line.0 + content.display_offset as i32;
         // Stash the cursor rect so `bounds_for_range` can anchor the
         // platform's IME candidate popup at the insertion point.
-        let cursor_bounds = (cursor.shape != CursorShape::Hidden && cursor.point.line.0 >= 0).then(|| {
+        let cursor_bounds = (cursor.shape != CursorShape::Hidden && cursor_row >= 0).then(|| {
             Bounds {
                 origin: point(
                     origin.x + px(f32::from(m.cell_width) * cursor.point.column.0 as f32),
-                    origin.y + px(f32::from(m.line_height) * cursor.point.line.0 as f32),
+                    origin.y + px(f32::from(m.line_height) * cursor_row as f32),
                 ),
                 size: size(m.cell_width, m.line_height),
             }
         });
         session.read(cx).ime_cursor_bounds.set(cursor_bounds);
         paint_grid(&mut content, &m, &palette, origin, window, cx);
-        paint_cursor(&cursor, &m, origin, focused, window, cx);
+        paint_cursor(&cursor, cursor_row, &m, &palette, origin, focused, window, cx);
+        // Right-edge scrollbar thumb once scrollback exists — same
+        // geometry the mouse handlers hit-test against. The track spans
+        // the element's full height, flush with both ends.
+        let (rows, history) = {
+            let g = term_lock.grid();
+            (g.screen_lines(), g.history_size())
+        };
+        if let Some((_track, thumb)) = scrollbar_geometry(bounds, rows, history, content.display_offset)
+        {
+            window.paint_quad(fill(thumb, scrollbar_thumb));
+        }
         if let Some(marked) = marked.filter(|t| !t.is_empty()) {
-            paint_marked(&marked, &cursor, &m, &palette, origin, window, cx);
+            paint_marked(&marked, &cursor, cursor_row, &m, &palette, origin, window, cx);
         }
     }
 }
@@ -205,8 +257,10 @@ fn paint_grid(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let selection = content.selection.clone();
     // Collect visible cells row-major, remembering where each line starts.
     let mut cells: Vec<&Cell> = Vec::new();
+    let mut selected: Vec<bool> = Vec::new();
     let mut line_starts: Vec<usize> = Vec::new();
     let mut last_line: Option<i32> = None;
     for indexed in &mut content.display_iter {
@@ -214,16 +268,64 @@ fn paint_grid(
             line_starts.push(cells.len());
             last_line = Some(indexed.point.line.0);
         }
+        selected.push(selection.as_ref().is_some_and(|s| s.contains(indexed.point)));
         cells.push(indexed.cell);
     }
     line_starts.push(cells.len());
 
     for (row_ix, range) in line_starts.windows(2).enumerate() {
         let row = &cells[range[0]..range[1]];
+        let sel = &selected[range[0]..range[1]];
+        let y = origin.y + px(f32::from(m.line_height) * row_ix as f32);
+
+        // Cell backgrounds first, merged into one rect per same-color
+        // run — a wide char and its spacer (or any adjacent same-bg
+        // cells) share a seamless band, no hairline seams.
+        let mut col = 0;
+        while col < row.len() {
+            let bg = StyleKey::of(row[col], palette).bg;
+            let start = col;
+            while col < row.len() && StyleKey::of(row[col], palette).bg == bg {
+                col += 1;
+            }
+            if let Some(bg) = bg {
+                window.paint_quad(fill(
+                    Bounds {
+                        origin: point(origin.x + m.cell_width * start as f32, y),
+                        size: size(m.cell_width * (col - start) as f32, m.line_height),
+                    },
+                    bg,
+                ));
+            }
+        }
+
+        // Selection wash above backgrounds, under glyphs — runs even
+        // for blank rows, which the text pass below skips.
+        let mut col = 0;
+        while col < row.len() {
+            if !sel[col] {
+                col += 1;
+                continue;
+            }
+            let start = col;
+            while col < row.len() && sel[col] {
+                col += 1;
+            }
+            window.paint_quad(fill(
+                Bounds {
+                    origin: point(
+                        origin.x + m.cell_width * start as f32,
+                        y,
+                    ),
+                    size: size(m.cell_width * (col - start) as f32, m.line_height),
+                },
+                palette.selection,
+            ));
+        }
+
         if row.iter().all(|c| c.c == ' ') {
             continue;
         }
-        let y = origin.y + px(f32::from(m.line_height) * row_ix as f32);
 
         // Split the row into paintable segments at style boundaries,
         // widening wide-char groups to their two-column footprint.
@@ -275,14 +377,7 @@ fn paint_grid(
                 &[run],
                 seg.force_width,
             );
-            let _ = shaped.paint_background(
-                point(x, y),
-                m.line_height,
-                TextAlign::Left,
-                Some(shaped.width()),
-                window,
-                cx,
-            );
+            // Backgrounds were already painted as merged row runs above.
             let _ = shaped.paint(
                 point(x, y),
                 m.line_height,
@@ -314,17 +409,18 @@ struct Seg {
 fn paint_marked(
     text: &str,
     cursor: &alacritty_terminal::term::RenderableCursor,
+    cursor_row: i32,
     m: &Metrics,
     palette: &TerminalPalette,
     origin: Point<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    if cursor.point.line.0 < 0 {
+    if cursor_row < 0 {
         return;
     }
     let x = origin.x + px(f32::from(m.cell_width) * cursor.point.column.0 as f32);
-    let y = origin.y + px(f32::from(m.line_height) * cursor.point.line.0 as f32);
+    let y = origin.y + px(f32::from(m.line_height) * cursor_row as f32);
     let run = TextRun {
         len: text.len(),
         font: m.font.clone(),
@@ -356,26 +452,29 @@ fn paint_marked(
 }
 fn paint_cursor(
     cursor: &alacritty_terminal::term::RenderableCursor,
+    cursor_row: i32,
     m: &Metrics,
+    palette: &TerminalPalette,
     origin: Point<Pixels>,
     focused: bool,
     window: &mut Window,
-    cx: &mut App,
+    _cx: &mut App,
 ) {
-    if cursor.shape == alacritty_terminal::vte::ansi::CursorShape::Hidden || cursor.point.line.0 < 0 { return; }
+    if cursor.shape == alacritty_terminal::vte::ansi::CursorShape::Hidden || cursor_row < 0 { return; }
     let x = origin.x + px(f32::from(m.cell_width) * cursor.point.column.0 as f32);
-    let y = origin.y + px(f32::from(m.line_height) * cursor.point.line.0 as f32);
+    let y = origin.y + px(f32::from(m.line_height) * cursor_row as f32);
     let bounds = Bounds {
         origin: point(x, y),
         size: size(m.cell_width, m.line_height),
     };
-    // Zed-style block: solid accent fill when focused (reads against the
-    // One Dark background, unlike a 30% wash), hollow outline when not.
-    let accent = cx.theme().accent;
+    // Focused: solid block in the palette's bright blue (contrasts with
+    // both terminal backgrounds, unlike the theme accent). Unfocused:
+    // full-strength outline over a faint fill so it stays findable.
     if focused {
-        window.paint_quad(fill(bounds, accent));
+        window.paint_quad(fill(bounds, palette.cursor));
     } else {
-        window.paint_quad(outline(bounds, accent.opacity(0.6), BorderStyle::Solid));
+        window.paint_quad(fill(bounds, palette.cursor.opacity(0.15)));
+        window.paint_quad(outline(bounds, palette.cursor, BorderStyle::Solid));
     }
 }
 
@@ -422,7 +521,8 @@ impl StyleKey {
             len,
             font,
             color,
-            background_color: self.bg,
+            // Painted as merged row runs in `paint_grid`, not per segment.
+            background_color: None,
             underline: self.underline.then(|| UnderlineStyle {
                 thickness: px(1.),
                 color: Some(color),
@@ -441,6 +541,11 @@ impl StyleKey {
 struct TerminalPalette {
     fg: Hsla,
     bg: Hsla,
+    /// Block cursor fill / unfocused outline.
+    cursor: Hsla,
+    /// Selection wash — opaque, contrasts with `bg` in both modes
+    /// (VSCode dark / macOS light selection blues).
+    selection: Hsla,
     base: [Hsla; 16],
 }
 
@@ -450,11 +555,15 @@ impl TerminalPalette {
             ThemeMode::Dark => Self {
                 fg: rgb(0xabb2bf).into(),
                 bg: rgb(0x282c34).into(),
+                cursor: rgb(0x61afef).into(),
+                selection: rgb(0x264f78).into(),
                 base: one_dark_palette(),
             },
             ThemeMode::Light => Self {
                 fg: rgb(0x2a2c33).into(),
                 bg: rgb(0xfafafa).into(),
+                cursor: rgb(0x2f5af3).into(),
+                selection: rgb(0xb3d7ff).into(),
                 base: one_light_palette(),
             },
         }
@@ -552,5 +661,41 @@ mod palette_tests {
         }
         assert_eq!(dimmed_index(NamedColor::BrightRed), 9);
         assert_eq!(dimmed_index(NamedColor::DimRed), 1);
+    }
+}
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use super::{scrollbar_geometry, SCROLLBAR_W};
+    use gpui_kit::{point, px, size, Bounds};
+
+    fn area() -> Bounds<gpui_kit::Pixels> {
+        Bounds { origin: point(px(10.), px(10.)), size: size(px(500.), px(240.)) }
+    }
+
+    #[test]
+    fn no_scrollback_no_scrollbar() {
+        assert!(scrollbar_geometry(area(), 24, 0, 0).is_none());
+    }
+
+    #[test]
+    fn thumb_tracks_the_scroll_fraction() {
+        // 24 rows visible, 100 in scrollback: thumb ≈ 240·24/124 ≈ 46.5px.
+        let (_, bottom) = scrollbar_geometry(area(), 24, 100, 0).unwrap();
+        let (_, top) = scrollbar_geometry(area(), 24, 100, 100).unwrap();
+        let thumb_h = f32::from(bottom.size.height);
+        assert!((thumb_h - 240. * 24. / 124.).abs() < 0.5);
+        // Live bottom (offset 0) pins the thumb to the track bottom...
+        assert!((f32::from(bottom.origin.y) - (10. + 240. - thumb_h)).abs() < 0.5);
+        // ...and full history (offset == history) to the track top.
+        assert!((f32::from(top.origin.y) - 10.).abs() < 0.01);
+        // The strip hugs the area's right edge.
+        assert!((f32::from(bottom.origin.x) - (10. + 500. - SCROLLBAR_W)).abs() < 0.01);
+    }
+
+    #[test]
+    fn huge_scrollback_keeps_grabbable_thumb() {
+        let (_, thumb) = scrollbar_geometry(area(), 24, 100_000, 50_000).unwrap();
+        assert_eq!(f32::from(thumb.size.height), 18.);
     }
 }

@@ -18,7 +18,7 @@ use crate::terminal::{TermEvent, TermSession};
 use crate::ui;
 
 // Global keyboard actions: new session, dock toggles, close session.
-gpui_kit::actions!(ddu, [NewSession, ToggleSessions, ToggleDiff, CloseSession, OpenSettings, TermTab, TermBacktab, TermPaste, DialogEnterSink]);
+gpui_kit::actions!(ddu, [NewSession, ToggleSessions, ToggleDiff, CloseSession, OpenSettings, TermTab, TermBacktab, TermPaste, TermCopy, CloseSettings]);
 
 /// Seconds between working-tree diff polls.
 const DIFF_POLL_SECS: u64 = 3;
@@ -92,13 +92,13 @@ impl AppView {
             KeyBinding::new("tab", TermTab, Some("Terminal")),
             KeyBinding::new("shift-tab", TermBacktab, Some("Terminal")),
             KeyBinding::new("cmd-v", TermPaste, Some("Terminal")),
-            // Single-line gpui-component Inputs propagate Enter
-            // (`cx.propagate()` on purpose, so forms can submit), and the
-            // Dialog context maps it to Confirm — which CLOSED the
-            // settings dialog on every field commit. Our later binding
-            // wins over the component's, sinking Enter with no listener.
-            // Escape (Cancel) still closes dialogs.
-            KeyBinding::new("enter", DialogEnterSink, Some("Dialog")),
+            // ⌘C copies the mouse selection when one exists (the
+            // handler propagates otherwise); PTYs never see it.
+            KeyBinding::new("cmd-c", TermCopy, Some("Terminal")),
+            // The standalone settings window: Escape/⌘W close it (the
+            // deeper context beats the global ⌘W → CloseSession).
+            KeyBinding::new("escape", CloseSettings, Some("SettingsWindow")),
+            KeyBinding::new("cmd-w", CloseSettings, Some("SettingsWindow")),
         ]);
 
         let cfg = cx.global::<crate::config::Config>().clone();
@@ -721,7 +721,7 @@ impl Render for AppView {
         v_flex()
             .size_full()
             .bg(cx.theme().background)
-            .on_action(cx.listener(|_, _: &OpenSettings, window, cx| ui::settings_dialog::open(window, cx)))
+            .on_action(cx.listener(|_, _: &OpenSettings, _, cx| ui::settings_window::open(cx)))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {
                 if window.has_active_dialog(cx) { return; }
                 this.spawn_session(window, cx);

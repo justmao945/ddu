@@ -1,23 +1,119 @@
-//! Settings dialog: classic sidebar-based [`Settings`] surface inside a
-//! [`Dialog`], opened from the title-bar gear. Appearance (theme) lives here;
-//! future config (fonts, agent commands, persistence) appends as new pages.
+//! Settings window: the sidebar-based [`Settings`] surface in its own
+//! native window, opened from the title-bar gear or ⌘,. Appearance
+//! (theme) lives here; future config appends as new pages.
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::setting::{
     SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
-use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{IconName, WindowExt as _};
+use gpui_kit::component::IconName;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-/// Title-bar gear button that opens the settings dialog.
+/// The one settings window, while open (singleton slot).
+struct SettingsWindowSlot(Option<AnyWindowHandle>);
+impl Global for SettingsWindowSlot {}
+
+/// Root view of the standalone settings window. Config edits go through
+/// [`update_config`], which persists and refreshes every window, so the
+/// main workspace picks changes up live.
+pub(crate) struct SettingsWindow {
+    focus: FocusHandle,
+}
+
+impl SettingsWindow {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus = cx.focus_handle().tab_stop(false);
+        focus.focus(window, cx);
+        Self { focus }
+    }
+}
+
+impl Render for SettingsWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .text_sm()
+            .track_focus(&self.focus)
+            .key_context("SettingsWindow")
+            .on_action(|_: &crate::app::CloseSettings, window, _| window.remove_window())
+            .child(
+                Settings::new("ddu-settings")
+                    .with_group_variant(GroupBoxVariant::Outline)
+                    .page(
+                        SettingPage::new("Appearance")
+                            .header_style(&page_header_style())
+                            .icon(IconName::Settings)
+                            .group(
+                                SettingGroup::new().item(
+                                    SettingItem::new("Theme", theme_field())
+                                        .description("Color scheme for the interface."),
+                                ),
+                            ),
+                    )
+                    .page(
+                        SettingPage::new("Terminal")
+                            .header_style(&page_header_style())
+                            .icon(IconName::SquareTerminal)
+                            .group(
+                                SettingGroup::new()
+                                    .item(
+                                        SettingItem::new("Shell", shell_program_field())
+                                            .layout(Axis::Vertical)
+                                            .description("Program for Terminal sessions."),
+                                    )
+                                    .item(
+                                        SettingItem::new("Shell args", shell_args_field())
+                                            .layout(Axis::Vertical)
+                                            .description("Arguments; quote values containing spaces."),
+                                    )
+                                    .item(
+                                        SettingItem::new("Font", terminal_font_field())
+                                            .layout(Axis::Vertical)
+                                            .description(
+                                                "Typeface for all sessions. System default uses the platform monospace font.",
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .page(
+                        SettingPage::new("Sessions")
+                            .header_style(&page_header_style())
+                            .icon(IconName::PanelLeftOpen)
+                            .group(
+                                SettingGroup::new().item(
+                                    SettingItem::new(
+                                        "Default type",
+                                        default_session_field(),
+                                    )
+                                    .description(
+                                        "What the sidebar + button creates.",
+                                    ),
+                                ),
+                            )
+                            .group(builtin_agent_groups(cx))
+                            .groups(custom_agents_groups(cx)),
+                    ),
+            )
+            // Overlay layers (anchored, no layout impact): dropdown
+            // menus and any dialog/notification a component raises are
+            // hosted here, same as the main window root.
+            .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
+            .children(gpui_kit::component::Root::render_notification_layer(
+                window, cx,
+            ))
+    }
+}
+
+/// Title-bar gear button that opens the settings window.
 pub(crate) fn button() -> impl IntoElement {
     Button::new("open-settings")
         .icon(IconName::Settings)
@@ -25,108 +121,53 @@ pub(crate) fn button() -> impl IntoElement {
         .small()
         .tab_stop(false)
         .tooltip("Settings (⌘,)")
-        .on_click(|_, window, cx| open(window, cx))
+        .on_click(|_, _, cx| open(cx))
 }
 
-pub(crate) fn open(window: &mut Window, cx: &mut App) {
-    if window.has_active_dialog(cx) { return; }
-    window.open_dialog(cx, |dialog, window, cx| {
-        let viewport = window.viewport_size();
-        dialog
-            .close_button(false)
-            .title(
-                div()
-                    .pt_3()
-                    .px_4()
-                    .pb_3()
-                    .mb(-px(8.))
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .text_sm()
-                    .font_medium()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child("Settings")
-                    .child(Button::new("settings-close").small().ghost().icon(IconName::Close)
-                        .on_click(|_, window, cx| window.close_dialog(cx))),
-            )
-            .overflow_hidden()
-            .p_0()
-            .w(px(840.).min(viewport.width - px(48.)))
-            .content(move |content, _, cx| {
-                content.h(px(560.).min((viewport.height - px(144.)).max(px(160.)))).text_sm().child(
-                    div()
-                        .size_full()
-                        // gpui-component single-line Inputs propagate Enter
-                        // on purpose; the Dialog context then maps it to
-                        // Confirm, closing the dialog mid-edit. The
-                        // DialogEnterSink binding (app.rs) outranks Confirm
-                        // and this listener stops the dispatch loop, so
-                        // Enter commits the field without dismissing.
-                        .on_action(|_: &crate::app::DialogEnterSink, _, _| {})
-                        .child(
-                    Settings::new("ddu-settings")
-                        .with_group_variant(GroupBoxVariant::Outline)
-                        .sidebar_style(&sidebar_corner_style(cx.theme().radius_lg))
-                        .page(
-                            SettingPage::new("Appearance")
-                                .header_style(&page_header_style())
-                                .icon(IconName::Settings)
-                                .group(
-                                    SettingGroup::new().item(
-                                        SettingItem::new("Theme", theme_field())
-                                            .description("Color scheme for the interface."),
-                                    ),
-                                ),
-                        )
-                        .page(
-                            SettingPage::new("Terminal")
-                                .header_style(&page_header_style())
-                                .icon(IconName::SquareTerminal)
-                                .group(
-                                    SettingGroup::new()
-                                        .item(
-                                            SettingItem::new("Shell", shell_program_field())
-                                                .layout(Axis::Vertical)
-                                                .description("Program for Terminal sessions."),
-                                        )
-                                        .item(
-                                            SettingItem::new("Shell args", shell_args_field())
-                                                .layout(Axis::Vertical)
-                                                .description("Arguments; quote values containing spaces."),
-                                        )
-                                        .item(
-                                            SettingItem::new("Font", terminal_font_field())
-                                                .layout(Axis::Vertical)
-                                                .description(
-                                                    "Typeface for all sessions. System default uses the platform monospace font.",
-                                                ),
-                                        ),
-                                ),
-                        )
-                        .page(
-                            SettingPage::new("Sessions")
-                                .header_style(&page_header_style())
-                                .icon(IconName::PanelLeftOpen)
-                                .group(
-                                    SettingGroup::new().item(
-                                        SettingItem::new(
-                                            "Default type",
-                                            default_session_field(),
-                                        )
-                                        .description(
-                                            "What the sidebar + button creates.",
-                                        ),
-                                    ),
-                                )
-                                .group(builtin_agent_groups(cx))
-                                .groups(custom_agents_groups(cx)),
-                        ),
-                    )
-                )
-            })
-    })
+/// Open the settings window, or bring the existing one forward — the
+/// gear and ⌘, never spawn a duplicate.
+pub(crate) fn open(cx: &mut App) {
+    let existing = cx.try_global::<SettingsWindowSlot>().and_then(|slot| slot.0);
+    if let Some(handle) = existing
+        && handle.update(cx, |_, window, _| window.activate_window()).is_ok()
+    {
+        return;
+    }
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: point(px(240.), px(140.)),
+            size: size(px(880.), px(600.)),
+        })),
+        titlebar: Some(TitlebarOptions {
+            title: Some("Settings".into()),
+            appears_transparent: false,
+            traffic_light_position: None,
+        }),
+        focus: true,
+        show: true,
+        kind: WindowKind::Normal,
+        is_movable: true,
+        app_owns_titlebar_drag: false,
+        inactive_frame_interval: None,
+        is_resizable: true,
+        is_minimizable: true,
+        display_id: None,
+        window_background: WindowBackgroundAppearance::Opaque,
+        app_id: None,
+        window_min_size: Some(size(px(640.), px(440.))),
+        window_decorations: None,
+        icon: None,
+        tabbing_identifier: None,
+    };
+    match cx.open_window(options, |window, cx| cx.new(|cx| SettingsWindow::new(window, cx))) {
+        Ok(handle) => {
+            if cx.try_global::<SettingsWindowSlot>().is_none() {
+                cx.set_global(SettingsWindowSlot(None));
+            }
+            cx.global_mut::<SettingsWindowSlot>().0 = Some(handle.into());
+        }
+        Err(err) => eprintln!("failed to open settings window: {err}"),
+    }
 }
 
 /// Update the global config and persist from a settings field.
@@ -501,18 +542,8 @@ fn custom_agents_groups(cx: &App) -> Vec<SettingGroup> {
     groups
 }
 
-/// gpui clips children to the dialog's rectangular bounds, not its rounded
-/// corners — the sidebar's fill must round its own bottom-left corner to
-/// match the popup, or a square sliver pokes out past the curve.
-fn sidebar_corner_style(radius: Pixels) -> StyleRefinement {
-    let mut style = StyleRefinement::default();
-    style.corner_radii.bottom_left = Some(AbsoluteLength::from(radius));
-    style
-}
-
 /// Zed-style page header: a prominent 16px medium title above the muted
-/// group titles. Also strips the stock header's bottom hairline — with the
-/// dialog title's rule above, two stacked lines read heavy.
+/// group titles, without the stock header's bottom hairline.
 fn page_header_style() -> StyleRefinement {
     let mut style = StyleRefinement::default();
     style.text.font_size = Some(AbsoluteLength::from(px(16.)));
@@ -526,6 +557,10 @@ pub(crate) fn set_theme(mode: ThemeMode, cx: &mut App) {
     // `Theme::change` re-applies the registry theme config; keep the
     // compact 14px base set at startup (see `main.rs`).
     Theme::global_mut(cx).font_size = px(14.);
+    // `Theme::change(.., None, ..)` refreshes no window — repaint all,
+    // or existing terminals/panels keep the old palette until their
+    // next wakeup.
+    cx.refresh_windows();
     update_config(|config, _| config.dark_theme = mode == ThemeMode::Dark, cx);
 }
 

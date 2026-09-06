@@ -23,7 +23,8 @@ License: Apache-2.0, GPL-free throughout. Design doc: `DESIGN.md`.
   events; `grid.rs` alacritty_terminal grid + parser; `element.rs` custom
   paint element (char-cell metrics, TextRuns, SGR colors).
 - `src/ui/` — panels: `session_panel`, `terminal`, `diff_panel`,
-  `status_bar`, `title_bar`, `settings_dialog`. Shared metrics/mappings in
+  `status_bar`, `title_bar`, `settings_window` (standalone native window,
+  singleton via a global slot). Shared metrics/mappings in
   `src/ui/mod.rs` (`PANEL_HEADER_PX` 32, `ROW_PX` 26, selection =
   `foreground.opacity(0.12)`, accent reserved for activity).
 

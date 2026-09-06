@@ -10,7 +10,7 @@ pub(crate) mod diff_panel;
 pub(crate) mod session_panel;
 pub(crate) mod status_bar;
 pub(crate) mod terminal;
-pub(crate) mod settings_dialog;
+pub(crate) mod settings_window;
 pub(crate) mod title_bar;
 
 /// Shared height of the session/changes panel headers (Zed: ~28px).
