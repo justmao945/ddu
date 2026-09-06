@@ -9,7 +9,7 @@ use gpui_kit::*;
 pub(crate) mod diff_panel;
 pub(crate) mod diff_tree;
 pub(crate) mod session_panel;
-pub(crate) mod settings_window;
+pub(crate) mod settings;
 pub(crate) mod status_bar;
 pub(crate) mod terminal;
 pub(crate) mod title_bar;

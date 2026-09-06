@@ -163,7 +163,7 @@ fn main() {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(600))
                     .await;
-                let _ = cx.update(|cx| ui::settings_window::open(cx));
+                let _ = cx.update(|cx| ui::settings::open(cx));
             })
             .detach();
         }
