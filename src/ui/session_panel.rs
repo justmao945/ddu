@@ -35,10 +35,11 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let radius = cx.theme().radius;
     let hov_bg = hover_bg(cx);
     let fg = cx.theme().foreground;
-    // The `+` button spawns the configured default — say which.
+    // The `+` button spawns the configured default — say which, and
+    // its global shortcut.
     let cfg = cx.global::<crate::config::Config>();
     let quick_tooltip: SharedString =
-        format!("New {}", cfg.label_for(&cfg.new_session.kind)).into();
+        format!("New {} (⌘T)", cfg.label_for(&cfg.new_session.kind)).into();
     v_flex()
         .id("project-tree")
         .flex_1()
@@ -264,7 +265,7 @@ fn session_row(
                     .ghost()
                     .xsmall()
                     .tab_stop(false)
-                    .tooltip("Close session")
+                    .tooltip("Close session (⌘W)")
                     // Stop the mouse-down so the row's own click
                     // synthesis never sees this press (see quick-add).
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())

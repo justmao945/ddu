@@ -161,6 +161,25 @@ pub(crate) fn dialog_footer(
         )
         .into_any_element()
 }
+/// Single-button footer for informational alerts (no choice to make).
+/// Outline 'OK' mirrors `dialog_footer`'s Cancel, so alert buttons read
+/// as the same family as confirm footers instead of a lone primary.
+pub(crate) fn alert_ok_footer() -> gpui::AnyElement {
+    use gpui_kit::component::button::Button;
+    use gpui_kit::component::dialog::DialogFooter;
+    DialogFooter::new()
+        .child(
+            Button::new("alert-ok")
+                .label("OK")
+                .outline()
+                .small()
+                .on_click(|_, window, cx| {
+                    use gpui_kit::component::WindowExt as _;
+                    window.close_dialog(cx)
+                }),
+        )
+        .into_any_element()
+}
 /// Zed reserves accent for activity; list selection is elevated neutral.
 pub(crate) fn selection_bg(cx: &App) -> Hsla {
     cx.theme().foreground.opacity(0.12)

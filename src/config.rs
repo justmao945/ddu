@@ -185,88 +185,13 @@ pub struct ProjectState {
 pub struct StartupWarnings(pub Vec<String>);
 impl gpui_kit::Global for StartupWarnings {}
 
-/// The single-file shape the app used before the settings/state split;
-/// kept only to migrate it.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct LegacyStore {
-    #[serde(default)]
-    projects: Vec<ProjectConfig>,
-    #[serde(default)]
-    new_session: NewSessionDefault,
-    #[serde(default)]
-    shell: ShellConfig,
-    #[serde(default)]
-    agent_args: BTreeMap<String, String>,
-    #[serde(default)]
-    custom_agents: Vec<AgentPreset>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    terminal_font: Option<String>,
-    #[serde(default)]
-    dark_theme: bool,
-    #[serde(default)]
-    hidden_sessions: bool,
-    #[serde(default)]
-    show_diff: bool,
-}
-
-impl From<LegacyStore> for Config {
-    fn from(l: LegacyStore) -> Self {
-        Self {
-            new_session: l.new_session,
-            shell: l.shell,
-            agent_args: l.agent_args,
-            custom_agents: l.custom_agents,
-            terminal_font: l.terminal_font,
-            dark_theme: l.dark_theme,
-        }
-    }
-}
-
-impl From<LegacyStore> for State {
-    fn from(l: LegacyStore) -> Self {
-        Self {
-            projects: l.projects,
-            hidden_sessions: l.hidden_sessions,
-            show_diff: l.show_diff,
-            ..Default::default()
-        }
-    }
-}
-
 // ── load / save ───────────────────────────────────────────────────────
 
 /// Load settings + state plus any warnings worth showing the user.
 pub fn load_all() -> (Config, State, Vec<String>) {
     let mut warnings = Vec::new();
 
-    // One-time migration from the legacy single `state.json`. Do it
-    // before loading so the migrated values are the live ones.
     let cfg_path = settings_path();
-    if !cfg_path.exists() && state_path().exists() {
-        match read_legacy(&state_path()) {
-            Ok(legacy) => {
-                let config = Config::from(legacy.clone());
-                let state = State::from(legacy);
-                let mut ok = true;
-                if let Err(e) = config.save() {
-                    warnings.push(e);
-                    ok = false;
-                }
-                if let Err(e) = state.save() {
-                    warnings.push(e);
-                    ok = false;
-                }
-                if ok {
-                    warnings.push(
-                        "Migrated settings from the legacy state.json into settings.json.".into(),
-                    );
-                }
-                return (config, state, warnings);
-            }
-            Err(e) => warnings.push(e),
-        }
-    }
-
     let config = match read_json(&cfg_path) {
         Ok(c) => c,
         Err(e) => {
@@ -412,12 +337,6 @@ where
     }
 }
 
-fn read_legacy(path: &Path) -> Result<LegacyStore, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("Could not migrate {}: {e}", path.display()))?;
-    serde_json::from_str(&text).map_err(|e| format!("Could not migrate {}: {e}", path.display()))
-}
-
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     let json = serde_json::to_string_pretty(value)
         .map_err(|e| format!("Could not serialize {}: {e}", path.display()))?;
@@ -495,54 +414,6 @@ mod tests {
             std::fs::read_to_string(dir.join(backup_name.unwrap())).unwrap(),
             "{ not json"
         );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn legacy_single_file_splits_into_settings_and_state() {
-        let dir = std::env::temp_dir().join(format!("ddu-cfg-mig-{}", unix_secs()));
-        let state_path = dir.join("state.json");
-        let settings_path = dir.join("settings.json");
-        std::fs::create_dir_all(&dir).unwrap();
-        let legacy = serde_json::json!({
-            "projects": [{"name": "proj", "path": "/tmp", "expanded": false}],
-            "new_session": {"kind": "claude"},
-            "shell": {"program": "/bin/zsh", "args": "-l"},
-            "agent_args": {"claude": "--fast"},
-            "custom_agents": [{"name": "a1", "program": "echo", "args": "hi"}],
-            "terminal_font": "Fira Code",
-            "dark_theme": true,
-            "hidden_sessions": true,
-            "show_diff": false,
-        });
-        std::fs::write(&state_path, serde_json::to_string(&legacy).unwrap()).unwrap();
-
-        // Simulate the env overrides without touching process env: call
-        // the file-level helpers via the paths captured in load_all.
-        let _ = (settings_path.clone(),);
-        // load_all reads env; stub by temporarily setting the vars.
-        unsafe {
-            std::env::set_var("DDU_STATE_PATH", state_path.to_str().unwrap());
-            std::env::set_var("DDU_SETTINGS_PATH", settings_path.to_str().unwrap());
-        }
-        let (config, state, warnings) = load_all();
-        unsafe {
-            std::env::remove_var("DDU_STATE_PATH");
-            std::env::remove_var("DDU_SETTINGS_PATH");
-        }
-        assert_eq!(config.new_session.kind, "claude");
-        assert_eq!(config.agent_args["claude"], "--fast");
-        assert_eq!(config.custom_agents[0].name, "a1");
-        assert!(config.dark_theme);
-        assert!(config.terminal_font.as_deref() == Some("Fira Code"));
-        assert_eq!(state.projects.len(), 1);
-        assert!(!state.projects[0].expanded);
-        assert!(state.hidden_sessions);
-        assert!(!state.show_diff);
-        // Both files now exist, legacy migrated.
-        assert!(settings_path.exists());
-        assert!(state_path.exists());
-        assert!(warnings.iter().any(|w| w.contains("Migrated")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

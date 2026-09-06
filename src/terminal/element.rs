@@ -544,13 +544,15 @@ fn paint_cursor(
         origin: point(x, y),
         size: size(m.cell_width, m.line_height),
     };
-    // Focused: solid block in the palette's bright blue (contrasts with
-    // both terminal backgrounds, unlike the theme accent). Unfocused:
-    // full-strength outline over a faint fill so it stays findable.
+    // Focused: solid block BUT translucent — a fully opaque cursor
+    // covers the glyph (and any completion/IME preview) underneath.
+    // 0.62 keeps the cell readable while still reading as a cursor.
+    // Unfocused: full-strength outline over a faint fill so it stays
+    // findable without a solid block.
     if focused {
-        window.paint_quad(fill(bounds, palette.cursor));
+        window.paint_quad(fill(bounds, palette.cursor.opacity(0.62)));
     } else {
-        window.paint_quad(fill(bounds, palette.cursor.opacity(0.15)));
+        window.paint_quad(fill(bounds, palette.cursor.opacity(0.12)));
         window.paint_quad(outline(bounds, palette.cursor, BorderStyle::Solid));
     }
 }

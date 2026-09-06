@@ -33,7 +33,16 @@ gpui_kit::actions!(
         TermBacktab,
         TermPaste,
         TermCopy,
-        CloseSettings
+        CloseSettings,
+        SelectSession1,
+        SelectSession2,
+        SelectSession3,
+        SelectSession4,
+        SelectSession5,
+        SelectSession6,
+        SelectSession7,
+        SelectSession8,
+        SelectSession9
     ]
 );
 
@@ -118,6 +127,17 @@ impl AppView {
             KeyBinding::new("cmd-b", ToggleSessions, None),
             KeyBinding::new("cmd-r", ToggleDiff, None),
             KeyBinding::new("cmd-w", CloseSession, None),
+            // ⌘1..⌘9: select the Nth session in the current project.
+            // Prefixed "cmd" so bare digits keep reaching the PTY.
+            KeyBinding::new("cmd-1", SelectSession1, None),
+            KeyBinding::new("cmd-2", SelectSession2, None),
+            KeyBinding::new("cmd-3", SelectSession3, None),
+            KeyBinding::new("cmd-4", SelectSession4, None),
+            KeyBinding::new("cmd-5", SelectSession5, None),
+            KeyBinding::new("cmd-6", SelectSession6, None),
+            KeyBinding::new("cmd-7", SelectSession7, None),
+            KeyBinding::new("cmd-8", SelectSession8, None),
+            KeyBinding::new("cmd-9", SelectSession9, None),
             // Terminal-scoped: these beat gpui-component Root's global
             // Tab/Shift-Tab focus cycling (deeper key context wins), so
             // the PTY gets real tab/backtab bytes and focus never jumps
@@ -232,44 +252,53 @@ impl AppView {
         this.window_focus.focus(window, cx);
         this.start_diff_poll(cx);
         this.start_ui_tick(cx);
-        // Panel drags: capture the new width into the persisted state
-        // (emit fires once per drag, so no debounce loop needed).
+        // Panel drags: capture the new width into the persisted state.
+        // The handler is deferred a tick — `resize_state.update` during
+        // `set_diff`/`set_sessions` emits this event synchronously, and
+        // a direct `view.update` there would re-enter AppView's own
+        // update (panic: "already being updated").
         let resize = this.resize_state.clone();
-        let view = cx.weak_entity();
         cx.subscribe_in(
             &this.resize_state,
             window,
             move |_, _, _: &ResizablePanelEvent, _, cx| {
-                let _ = view.update(cx, |this, cx| {
-                    let sizes = resize.read(cx).sizes();
-                    // index 0 = sidebar when visible; otherwise the
-                    // center pane. Capture it as the sidebar width only
-                    // when visible so a hidden panel never records.
-                    if this.show_sessions {
-                        this.last_sidebar_size = sizes.first().copied();
-                    }
-                    if this.show_diff {
-                        // diff slot: index 1 with sidebar visible,
-                        // index 0 without (center is always present).
-                        let ix = usize::from(this.show_sessions);
-                        this.last_diff_size = sizes.get(ix).copied();
-                    }
-                    this.persist(cx);
-                });
+                // Deferred: `resize_state.update` during set_diff /
+                // set_sessions emits this event synchronously; updating
+                // AppView right there would re-enter its own update
+                // (panic: "already being updated").
+                let resize = resize.clone();
+                cx.spawn(async move |this, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        let sizes = resize.read(cx).sizes();
+                        if this.show_sessions {
+                            this.last_sidebar_size = sizes.first().copied();
+                        }
+                        if this.show_diff {
+                            // diff slot: index 1 with sidebar visible,
+                            // index 0 without (center is always present).
+                            let ix = usize::from(this.show_sessions);
+                            this.last_diff_size = sizes.get(ix).copied();
+                        }
+                        this.persist(cx);
+                    });
+                })
+                .detach();
             },
         )
         .detach();
         // Tree/content splitter drags: persist the tree pane height and
         // clear the seed so it can't fight a later live resize.
-        let view2 = cx.weak_entity();
         cx.subscribe_in(
             &this.diff_split_state,
             window,
             move |_, _, _: &ResizablePanelEvent, _, cx| {
-                let _ = view2.update(cx, |this, cx| {
-                    this.diff_tree_height_seed = None;
-                    this.persist(cx);
-                });
+                cx.spawn(async move |this, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.diff_tree_height_seed = None;
+                        this.persist(cx);
+                    });
+                })
+                .detach();
             },
         )
         .detach();
@@ -564,6 +593,7 @@ impl AppView {
                 alert
                     .title("Cannot Remove Project")
                     .description("At least one project must stay open.")
+                    .footer(crate::ui::alert_ok_footer())
             });
             return;
         }
@@ -576,6 +606,7 @@ impl AppView {
                 alert
                     .title("Cannot Remove Project")
                     .description("Close its running sessions first.")
+                    .footer(crate::ui::alert_ok_footer())
             });
             return;
         }
@@ -1141,6 +1172,33 @@ impl Render for AppView {
                 }
                 // Same folder-picker flow as the sidebar button.
                 this.add_project(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectSession1, window, cx| {
+                this.select_session(this.current_project, 0, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectSession2, window, cx| {
+                this.select_session(this.current_project, 1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectSession3, window, cx| {
+                this.select_session(this.current_project, 2, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectSession4, window, cx| {
+                this.select_session(this.current_project, 3, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectSession5, window, cx| {
+                this.select_session(this.current_project, 4, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectSession6, window, cx| {
+                this.select_session(this.current_project, 5, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectSession7, window, cx| {
+                this.select_session(this.current_project, 6, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectSession8, window, cx| {
+                this.select_session(this.current_project, 7, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectSession9, window, cx| {
+                this.select_session(this.current_project, 8, window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| {
                 if window.has_active_dialog(cx) {
