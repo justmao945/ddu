@@ -47,4 +47,14 @@ exec "$(dirname "$0")/ddu.bin"
 LAUNCH
 chmod +x "$APP/Contents/MacOS/launch.sh"
 
+# `open` only ACTIVATES an already-running app — without this kill the
+# old binary keeps running and the fresh build never appears.
+pkill -f "$APP/Contents/MacOS/ddu.bin" 2>/dev/null || true
+# Bounded teardown wait (pgrep re-checks; no sleeps).
+n=0
+while pgrep -f "$APP/Contents/MacOS/ddu.bin" >/dev/null 2>&1; do
+  n=$((n + 1))
+  [ "$n" -gt 50 ] && { pkill -9 -f "$APP/Contents/MacOS/ddu.bin"; break; }
+done
+
 DDU_DIR="${DDU_DIR:-$HOME/Code/ddu}" exec open "$@" "$APP"

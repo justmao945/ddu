@@ -202,7 +202,24 @@ impl Element for TerminalElement {
         // Mouse hit-testing maps window points through these bounds.
         session.read(cx).grid_bounds.set(Some(bounds));
 
-        let origin = bounds.origin + point(px(PAD), px(PAD));
+        // Center the grid inside the padded element: the floor()ed
+        // row/col count otherwise leaves up to a full cell of slack
+        // below the last line, which reads as a dead band at the
+        // bottom of the pane. Split the slack evenly on both axes.
+        let (cols, rows) = {
+            let g = term_lock.grid();
+            (g.columns(), g.screen_lines())
+        };
+        let slack_w = (bounds.size.width - px(2. * PAD) - m.cell_width * cols as f32).max(px(0.));
+        let slack_h = (bounds.size.height - px(2. * PAD) - m.line_height * rows as f32).max(px(0.));
+        let origin = bounds.origin + point(px(PAD) + slack_w / 2., px(PAD) + slack_h / 2.);
+        // The content rect the grid actually paints into — selection
+        // and mouse-report hit-testing map points against this, not
+        // the padded element bounds.
+        session.read(cx).content_bounds.set(Some(Bounds {
+            origin,
+            size: size(m.cell_width * cols as f32, m.line_height * rows as f32),
+        }));
         // `display_iter` starts at the topmost visible line (grid line
         // `-display_offset`), so the cursor's screen row is its grid
         // line plus the scroll offset — without this the block cursor

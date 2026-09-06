@@ -9,7 +9,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{AppIcon, PANEL_HEADER_PX, hover_bg, selection_bg, ROW_PX};
+use super::{hover_bg, selection_bg, ROW_PX};
 use crate::app::AppView;
 use crate::session::{AgentSession, AgentStatus};
 
@@ -20,56 +20,14 @@ const SESSION_ROW_PX: f32 = 40.;
 const ACTIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    // No panel header: the project tree fills the column; project
+    // creation lives in the status strip below (see `status_bar`).
     v_flex()
         .h_full()
         .w_full()
         .min_w_0()
         .overflow_hidden()
         .bg(cx.theme().sidebar)
-        .child(
-            div()
-                .h(px(PANEL_HEADER_PX))
-                .flex_shrink_0()
-                .px_2()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(div().w(px(26.)))
-                .child(
-                    // Two-tone SVG wordmark: SF Pro Heavy outlines; "Up"
-                    // in the Claude-orange accent, slightly slanted.
-                    h_flex()
-                        .items_center()
-                        .gap(px(1.))
-                        .child(
-                            svg()
-                                .path("icons/wordmark-day.svg")
-                                .w(px(46.))
-                                .h(px(13.))
-                                .flex_shrink_0()
-                                .text_color(cx.theme().foreground),
-                        )
-                        .child(
-                            svg()
-                                .path("icons/wordmark-up.svg")
-                                .w(px(20.))
-                                .h(px(13.))
-                                .flex_shrink_0()
-                                .text_color(hsla(15. / 360., 0.65, 0.5, 1.)),
-                        ),
-                )
-                .child(
-                    Button::new("add-project")
-                        .icon(AppIcon::FolderPlus)
-                        .ghost()
-                        .small()
-                        .tab_stop(false)
-                        .tooltip("Add project…")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.add_project(window, cx);
-                        })),
-                ),
-        )
         .child(tree(this, cx))
 }
 

@@ -64,6 +64,9 @@ pub struct TermSession {
     /// Terminal element bounds in window coordinates from the last
     /// paint — mouse events map through them into grid cells.
     grid_bounds: Cell<Option<Bounds<Pixels>>>,
+    /// Painted content rect (element bounds minus padding, grid
+    /// centered) — selection and mouse-report cell mapping use this.
+    content_bounds: Cell<Option<Bounds<Pixels>>>,
     /// Scrollbar thumb drag: grab offset (px) below the thumb's top.
     scrollbar_drag: Option<f32>,
     /// Button code held while the child tracks the mouse (xterm 1002
@@ -102,6 +105,7 @@ impl TermSession {
             last_resize: Instant::now(),
             selecting: false,
             grid_bounds: Cell::new(None),
+            content_bounds: Cell::new(None),
             ever_resized: false,
             flush_scheduled: false,
             scroll_remainder: 0.,
@@ -247,9 +251,9 @@ impl TermSession {
         window: &Window,
         cx: &App,
     ) -> Option<(GridPoint, Side)> {
-        let bounds = self.grid_bounds.get()?;
+        let bounds = self.content_bounds.get()?;
         let m = element::Metrics::new(window, cx);
-        let rel = pos - bounds.origin - point(px(element::PAD), px(element::PAD));
+        let rel = pos - bounds.origin;
         let (cols, rows) = self.grid.size();
         let col = (rel.x / m.cell_width).floor().clamp(0., f32::from(cols.saturating_sub(1)));
         let row = (rel.y / m.line_height).floor().clamp(0., f32::from(rows.saturating_sub(1)));
@@ -488,9 +492,9 @@ impl TermSession {
         window: &Window,
         cx: &App,
     ) -> Option<(usize, usize)> {
-        let bounds = self.grid_bounds.get()?;
+        let bounds = self.content_bounds.get()?;
         let m = element::Metrics::new(window, cx);
-        let rel = pos - bounds.origin - point(px(element::PAD), px(element::PAD));
+        let rel = pos - bounds.origin;
         let (cols, rows) = self.grid.size();
         let col = (rel.x / m.cell_width).floor().clamp(0., f32::from(cols.saturating_sub(1)));
         let row = (rel.y / m.line_height).floor().clamp(0., f32::from(rows.saturating_sub(1)));
@@ -744,20 +748,19 @@ mod tests {
 
             cx.update_window(window, |_, window, cx| {
                 session.update(cx, |s, cx| {
-                    // Pretend a paint: element at (100, 50), 80×24 grid.
-                    s.grid_bounds.set(Some(gpui_kit::Bounds {
+                    // Pretend a paint: content rect at (100, 50).
+                    s.content_bounds.set(Some(gpui_kit::Bounds {
                         origin: gpui_kit::point(gpui_kit::px(100.), gpui_kit::px(50.)),
                         size: gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(500.)),
                     }));
                     let m = super::element::Metrics::new(window, cx);
                     let cell_w = f32::from(m.cell_width);
                     let line_h = f32::from(m.line_height);
-                    let pad = super::element::PAD;
 
                     // Center of cell (3, 2) → line 2, column 3.
                     let pos = gpui_kit::point(
-                        gpui_kit::px(100. + pad + 3.5 * cell_w),
-                        gpui_kit::px(50. + pad + 2.5 * line_h),
+                        gpui_kit::px(100. + 3.5 * cell_w),
+                        gpui_kit::px(50. + 2.5 * line_h),
                     );
                     let (cell, _side) = s.cell_at(pos, window, cx).expect("inside bounds");
                     assert_eq!((cell.line.0, cell.column.0), (2, 3));
@@ -782,8 +785,8 @@ mod tests {
                     term.scroll_display(alacritty_terminal::grid::Scroll::Delta(5));
                     drop(term);
                     let pos = gpui_kit::point(
-                        gpui_kit::px(100. + pad + 3.5 * cell_w),
-                        gpui_kit::px(50. + pad + 2.5 * line_h),
+                        gpui_kit::px(100. + 3.5 * cell_w),
+                        gpui_kit::px(50. + 2.5 * line_h),
                     );
                     let (cell, _) = s.cell_at(pos, window, cx).expect("scrolled");
                     assert_eq!((cell.line.0, cell.column.0), (-3, 3));
@@ -944,13 +947,12 @@ mod tests {
             // cols 5→10 (side-aware: 5¼ starts left of col 5, 10¾ ends
             // right of col 10) to window pixels.
             let (down, up) = vcx.update(|window, cx| {
-                let bounds = session.read(cx).grid_bounds.get().expect("painted bounds");
+                let bounds = session.read(cx).content_bounds.get().expect("painted bounds");
                 let m = super::element::Metrics::new(window, cx);
                 let (w, h) = (f32::from(m.cell_width), f32::from(m.line_height));
-                let pad = super::element::PAD;
                 let at = |col: f32| gpui_kit::point(
-                    bounds.origin.x + gpui_kit::px(pad + col * w),
-                    bounds.origin.y + gpui_kit::px(pad + 2.5 * h),
+                    bounds.origin.x + gpui_kit::px(col * w),
+                    bounds.origin.y + gpui_kit::px(2.5 * h),
                 );
                 (at(5.25), at(10.75))
             });

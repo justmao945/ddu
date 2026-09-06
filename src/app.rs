@@ -736,6 +736,16 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &ToggleSessions, _, cx| this.toggle_sessions(cx)))
             .child(ui::title_bar::render(self, cx))
             .child({
+                // Each column owns its status strip, so the resize
+                // dividers run all the way to the window's bottom edge.
+                let column = |content: AnyElement, strip: AnyElement| {
+                    v_flex()
+                        .size_full()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(div().flex_1().min_h_0().min_w_0().child(content))
+                        .child(strip)
+                };
                 let mut group = h_resizable("main").with_state(&self.resize_state);
                 if self.show_sessions {
                     group = group.child(
@@ -743,13 +753,19 @@ impl Render for AppView {
                             .size(px(SIDEBAR_DEFAULT))
                             .flex_none()
                             .size_range(px(SIDEBAR_MIN)..px(SIDEBAR_MAX))
-                            .child(ui::session_panel::render(self, cx)),
+                            .child(column(
+                                ui::session_panel::render(self, cx).into_any_element(),
+                                ui::status_bar::render_sidebar(self, cx).into_any_element(),
+                            )),
                     );
                 }
                 group = group.child(
                     resizable_panel()
                         .size_range(px(CENTER_MIN)..px(f32::MAX))
-                        .child(ui::terminal::render(self, cx)),
+                        .child(column(
+                            ui::terminal::render(self, cx).into_any_element(),
+                            ui::status_bar::render_center(self, cx).into_any_element(),
+                        )),
                 );
                 if self.show_diff {
                     group = group.child(
@@ -757,12 +773,14 @@ impl Render for AppView {
                             .size(px(DIFF_DEFAULT))
                             .flex_none()
                             .size_range(px(DIFF_MIN)..px(DIFF_MAX))
-                            .child(ui::diff_panel::render(self, window, cx)),
+                            .child(column(
+                                ui::diff_panel::render(self, window, cx).into_any_element(),
+                                ui::status_bar::render_diff(self, cx).into_any_element(),
+                            )),
                     );
                 }
                 div().flex_1().min_h_0().overflow_hidden().child(group)
             })
-            .child(ui::status_bar::render(self, cx))
             // Overlay layers (anchored, no layout impact): dialogs opened via
             // window.open_dialog / open_alert_dialog and notifications are
             // hosted here — gpui-kit requires the app to render these layers.
