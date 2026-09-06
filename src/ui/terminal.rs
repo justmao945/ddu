@@ -65,13 +65,19 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
         }))
         .on_scroll_wheel(cx.listener({
             let weak = weak.clone();
-            move |_, event: &ScrollWheelEvent, _, cx| {
+            move |_, event: &ScrollWheelEvent, window, cx| {
                 let lines = match event.delta {
                     ScrollDelta::Lines(p) => p.y,
                     ScrollDelta::Pixels(p) => p.y / px(40.),
                 };
                 if let Some(term) = weak.upgrade() {
-                    term.update(cx, |s, cx| s.scroll_by(lines, cx));
+                    term.update(cx, |s, cx| {
+                        // A mouse-tracking child receives wheel reports
+                        // (buttons 64/65) instead of viewport scrolls.
+                        if !s.mouse_wheel(lines, event.position, &event.modifiers, window, cx) {
+                            s.scroll_by(lines, cx);
+                        }
+                    });
                 }
                 cx.stop_propagation();
             }
@@ -117,12 +123,14 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                 }
             }
         }))
-        // Right-click context menu: copy the selection / paste from the
-        // clipboard. The menu takes focus while open and restores it to
-        // the terminal on dismiss.
         .context_menu({
             let weak = weak.clone();
             move |menu, _window, cx| {
+                // A mouse-tracking child owns right-click — the empty
+                // menu suppresses the popup entirely.
+                if weak.upgrade().is_some_and(|t| t.read(cx).mouse_tracking() != crate::terminal::MouseTracking::None) {
+                    return menu;
+                }
                 let has_selection =
                     weak.upgrade().is_some_and(|t| t.read(cx).has_selection());
                 let can_paste =
@@ -172,6 +180,11 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
             move |_, event: &MouseDownEvent, window, cx| {
                 if let Some(term) = weak.upgrade() {
                     term.update(cx, |s, cx| {
+                        // A mouse-tracking child (TUI) gets the press as
+                        // an escape report instead of text selection.
+                        if s.mouse_button(gpui_kit::MouseButton::Left, true, event.position, &event.modifiers, window, cx) {
+                            return;
+                        }
                         if s.scrollbar_mouse_down(event.position, cx) {
                             return;
                         }
@@ -187,6 +200,9 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
             move |_, event: &MouseMoveEvent, window, cx| {
                 if let Some(term) = weak.upgrade() {
                     term.update(cx, |s, cx| {
+                        if s.mouse_motion(event.position, &event.modifiers, window, cx) {
+                            return;
+                        }
                         if s.scrollbar_mouse_drag(event.position, cx) {
                             return;
                         }
@@ -199,9 +215,12 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
         }))
         .on_mouse_up(gpui_kit::MouseButton::Left, cx.listener({
             let weak = weak.clone();
-            move |_, _, _, cx| {
+            move |_, event: &MouseUpEvent, window, cx| {
                 if let Some(term) = weak.upgrade() {
                     term.update(cx, |s, cx| {
+                        if s.mouse_button(gpui_kit::MouseButton::Left, false, event.position, &event.modifiers, window, cx) {
+                            return;
+                        }
                         s.scrollbar_mouse_up();
                         s.end_selection(cx);
                     });
@@ -210,11 +229,56 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
         }))
         .on_mouse_up_out(gpui_kit::MouseButton::Left, cx.listener({
             let weak = weak.clone();
-            move |_, _, _, cx| {
+            move |_, event: &MouseUpEvent, window, cx| {
                 if let Some(term) = weak.upgrade() {
                     term.update(cx, |s, cx| {
+                        if s.mouse_button(gpui_kit::MouseButton::Left, false, event.position, &event.modifiers, window, cx) {
+                            return;
+                        }
                         s.scrollbar_mouse_up();
                         s.end_selection(cx);
+                    });
+                }
+            }
+        }))
+        // Right/middle buttons exist only for mouse-tracking children —
+        // otherwise right-click opens the context menu and middle is inert.
+        .on_mouse_down(gpui_kit::MouseButton::Right, cx.listener({
+            let weak = weak.clone();
+            move |_, event: &MouseDownEvent, window, cx| {
+                if let Some(term) = weak.upgrade() {
+                    term.update(cx, |s, cx| {
+                        s.mouse_button(gpui_kit::MouseButton::Right, true, event.position, &event.modifiers, window, cx);
+                    });
+                }
+            }
+        }))
+        .on_mouse_up(gpui_kit::MouseButton::Right, cx.listener({
+            let weak = weak.clone();
+            move |_, event: &MouseUpEvent, window, cx| {
+                if let Some(term) = weak.upgrade() {
+                    term.update(cx, |s, cx| {
+                        s.mouse_button(gpui_kit::MouseButton::Right, false, event.position, &event.modifiers, window, cx);
+                    });
+                }
+            }
+        }))
+        .on_mouse_down(gpui_kit::MouseButton::Middle, cx.listener({
+            let weak = weak.clone();
+            move |_, event: &MouseDownEvent, window, cx| {
+                if let Some(term) = weak.upgrade() {
+                    term.update(cx, |s, cx| {
+                        s.mouse_button(gpui_kit::MouseButton::Middle, true, event.position, &event.modifiers, window, cx);
+                    });
+                }
+            }
+        }))
+        .on_mouse_up(gpui_kit::MouseButton::Middle, cx.listener({
+            let weak = weak.clone();
+            move |_, event: &MouseUpEvent, window, cx| {
+                if let Some(term) = weak.upgrade() {
+                    term.update(cx, |s, cx| {
+                        s.mouse_button(gpui_kit::MouseButton::Middle, false, event.position, &event.modifiers, window, cx);
                     });
                 }
             }

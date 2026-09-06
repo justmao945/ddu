@@ -77,7 +77,10 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let radius = cx.theme().radius;
     let hov_bg = hover_bg(cx);
     let fg = cx.theme().foreground;
-
+    // The `+` button spawns the configured default — say which.
+    let cfg = cx.global::<crate::config::Config>();
+    let quick_tooltip: SharedString =
+        format!("New {}", cfg.label_for(&cfg.new_session.kind)).into();
     v_flex()
         .id("project-tree")
         .flex_1()
@@ -149,7 +152,7 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                             .ghost()
                                             .xsmall()
                                             .tab_stop(false)
-                                            .tooltip("New session (default)")
+                                            .tooltip(quick_tooltip.clone())
                                             // gpui synthesizes a click for
                                             // EVERY hitbox under the pointer;
                                             // stopping the click event alone
@@ -366,6 +369,18 @@ fn kind_icon(s: &AgentSession, cx: &Context<AppView>) -> Div {
     )
 }
 
+/// Menu-leading icon for a launcher kind: brand marks for the builtins,
+/// a terminal glyph for shells, a generic bot for custom presets.
+fn kind_menu_icon(kind: &str) -> Icon {
+    match kind {
+        "terminal" => Icon::new(IconName::SquareTerminal),
+        "claude" => Icon::default().path("icons/claude.svg"),
+        "codex" => Icon::default().path("icons/openai.svg"),
+        "omp" => Icon::default().path("icons/omp.svg"),
+        _ => Icon::new(IconName::Bot),
+    }
+}
+
 /// The `...` dropdown on a project row: every launcher plus project ops.
 fn more_menu(this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoElement {
     let can_remove = this.projects.len() > 1;
@@ -382,6 +397,7 @@ fn more_menu(this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoEl
             let view_click = view.clone();
             m = m.item(
                 PopupMenuItem::new(label)
+                    .icon(kind_menu_icon(&kind))
                     .checked(default)
                     .on_click(move |_, window, cx| {
                         let kind = kind_click.clone();
@@ -402,7 +418,7 @@ fn more_menu(this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoEl
             );
         }
         m = m.separator().item(
-            PopupMenuItem::new(if has_running { "Close sessions before removing" } else { "Remove project" }).disabled(!can_remove || has_running).on_click({
+            PopupMenuItem::new(if has_running { "Close sessions before removing" } else { "Remove project" }).icon(Icon::new(IconName::CircleX)).disabled(!can_remove || has_running).on_click({
                 let view = view.clone();
                 move |_, window, cx| {
                     let view = view.clone();

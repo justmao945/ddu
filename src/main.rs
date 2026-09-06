@@ -20,8 +20,9 @@ struct AppAssets;
 impl gpui::AssetSource for AppAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
         match path {
-            "icons/claude.svg" => {
-                Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/claude.svg"))))
+            "icons/claude.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/claude.svg")))),
+            "icons/openai.svg" => {
+                Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/openai.svg"))))
             }
             "icons/wordmark-day.svg" => {
                 Ok(Some(Cow::Borrowed(include_bytes!(

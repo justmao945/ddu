@@ -329,6 +329,8 @@ fn paint_grid(
 
         // Split the row into paintable segments at style boundaries,
         // widening wide-char groups to their two-column footprint.
+        // Box-drawing/block chars paint as vector rects (font glyphs
+        // leave vertical gaps at this line height).
         let mut segs: Vec<Seg> = Vec::new();
         let mut ix = 0;
         while ix < row.len() {
@@ -337,6 +339,15 @@ fn paint_grid(
                 || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
                 || cell.c == '\0'
             {
+                ix += 1;
+                continue;
+            }
+            if super::boxart::is_vector(cell.c) {
+                let key = StyleKey::of(cell, palette);
+                segs.push(Seg::Vector {
+                    c: cell.c,
+                    fg: if key.dim { key.fg.opacity(0.65) } else { key.fg },
+                });
                 ix += 1;
                 continue;
             }
@@ -351,12 +362,13 @@ fn paint_grid(
                     .flags
                     .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
                 && row[run_end].c != '\0'
+                && !super::boxart::is_vector(row[run_end].c)
                 && StyleKey::of(row[run_end], palette) == StyleKey::of(cell, palette)
             {
                 run_end += 1;
             }
             let text: String = row[ix..run_end].iter().map(|c| c.c).collect();
-            segs.push(Seg {
+            segs.push(Seg::Text {
                 text,
                 key: StyleKey::of(cell, palette),
                 // A wide char owns two columns: itself + its spacer.
@@ -367,38 +379,60 @@ fn paint_grid(
         }
         let mut x = origin.x;
         for seg in segs {
-            if seg.text.is_empty() {
-                continue;
+            match seg {
+                Seg::Vector { c, fg } => {
+                    super::boxart::paint(
+                        c,
+                        Bounds {
+                            origin: point(x, y),
+                            size: size(m.cell_width, m.line_height),
+                        },
+                        fg,
+                        window,
+                    );
+                    x += m.cell_width;
+                }
+                Seg::Text { text, key, cols, force_width } => {
+                    if text.is_empty() {
+                        x += px(f32::from(m.cell_width) * cols);
+                        continue;
+                    }
+                    let run = key.into_run(text.len(), &m.font);
+                    let shaped = window.text_system().shape_line(
+                        text.into(),
+                        m.font_size,
+                        &[run],
+                        force_width,
+                    );
+                    // Backgrounds were already painted as merged row runs above.
+                    let _ = shaped.paint(
+                        point(x, y),
+                        m.line_height,
+                        TextAlign::Left,
+                        Some(shaped.width()),
+                        window,
+                        cx,
+                    );
+                    x += px(f32::from(m.cell_width) * cols);
+                }
             }
-            let run = seg.key.into_run(seg.text.len(), &m.font);
-            let shaped = window.text_system().shape_line(
-                seg.text.clone().into(),
-                m.font_size,
-                &[run],
-                seg.force_width,
-            );
-            // Backgrounds were already painted as merged row runs above.
-            let _ = shaped.paint(
-                point(x, y),
-                m.line_height,
-                TextAlign::Left,
-                Some(shaped.width()),
-                window,
-                cx,
-            );
-            x += px(f32::from(m.cell_width) * seg.cols);
         }
     }
 }
 
-/// One paintable run of same-styled cells within a row.
-struct Seg {
-    text: String,
-    key: StyleKey,
-    /// Grid columns this segment covers (wide chars count double).
-    cols: f32,
-    /// `Some(w)` pins shaping to an exact pixel width (wide-char runs).
-    force_width: Option<Pixels>,
+/// One paintable segment within a row.
+enum Seg {
+    /// A run of same-styled cells shaped as text.
+    Text {
+        text: String,
+        key: StyleKey,
+        /// Grid columns this segment covers (wide chars count double).
+        cols: f32,
+        /// `Some(w)` pins shaping to an exact pixel width (wide-char runs).
+        force_width: Option<Pixels>,
+    },
+    /// A single box-drawing/block cell drawn as vector rects.
+    Vector { c: char, fg: Hsla },
 }
 
 
