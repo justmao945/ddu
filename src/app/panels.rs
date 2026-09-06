@@ -52,15 +52,6 @@ impl AppView {
         // Inner splitter slots: the terminal is 0, the diff 1.
         const DIFF_IX: usize = 1;
         self.show_diff = on;
-        // Remember the panel state on the current session: switching
-        // sessions must restore each session's own diff visibility.
-        if let Some(s) = self
-            .projects
-            .get_mut(self.current_project)
-            .and_then(|p| p.sessions.get_mut(self.current_session))
-        {
-            s.show_diff = on;
-        }
         self.persist(cx);
         let restore_w = self.last_diff_w();
         if !on {

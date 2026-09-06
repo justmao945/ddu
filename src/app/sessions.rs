@@ -12,19 +12,11 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let changed_project = self.current_project != project;
-        // Write the outgoing session's diff visibility back onto it:
-        // the panel state is per-session and must survive a switch.
-        let old_show = self.show_diff;
-        if let Some(old) = self
-            .projects
-            .get_mut(self.current_project)
-            .and_then(|p| p.sessions.get_mut(self.current_session))
-        {
-            old.show_diff = old_show;
-        }
+        let from = (self.current_project, self.current_session);
         if changed_project {
             // Save the outgoing project's placement state, then adopt
-            // the incoming one from the global snapshot.
+            // the incoming project's tree-layer height from the global
+            // snapshot (selection/collapse come from the session).
             self.persist(cx);
             let path = self.projects[project].path.to_string_lossy().to_string();
             let entry = cx
@@ -33,8 +25,6 @@ impl AppView {
                 .get(&path)
                 .cloned()
                 .unwrap_or_default();
-            self.diff_seed_path = entry.selected_file.clone();
-            self.diff_tree_closed = entry.closed_dirs.iter().cloned().collect();
             self.diff_tree_height_seed = entry
                 .tree_height
                 .map(gpui::px)
@@ -43,22 +33,9 @@ impl AppView {
         self.current_project = project;
         let n = self.projects[project].sessions.len();
         self.current_session = session.min(n.saturating_sub(1));
-        // Adopt the incoming session's diff visibility. `set_diff`
-        // writes the value back to (now-)current session — the same
-        // value, so the round-trip is idempotent.
-        let adopt = self
-            .projects
-            .get(project)
-            .and_then(|p| p.sessions.get(self.current_session))
-            .map(|s| s.show_diff)
-            .unwrap_or(true);
-        if adopt != self.show_diff {
-            self.set_diff(adopt, cx);
-        }
-        if changed_project {
-            self.reset_diff();
-            self.reload_diff(cx);
-        }
+        // The diff tree is per-session: the outgoing session keeps its
+        // selection/collapse state, the incoming session's is adopted.
+        self.adopt_session_diff(Some(from), cx);
         if let Some(term) = self.current_term() {
             let focus = term.read(cx).focus.clone();
             focus.focus(window, cx);
@@ -101,6 +78,7 @@ impl AppView {
             return;
         };
         let cwd = project.path.clone();
+        let old_session = self.current_session;
         self.session_seq += 1;
         let seq = self.session_seq;
         let title = cmd.basename();
@@ -145,16 +123,67 @@ impl AppView {
                     None
                 },
                 term,
-                // New sessions inherit the panel state of the session
-                // they replace (the common "new terminal, same
-                // workspace" flow) instead of snapping to a default.
-                show_diff: self.show_diff,
+                cwd,
+                diff_selected: None,
+                diff_closed: Default::default(),
             });
             self.current_session = project.sessions.len() - 1;
         }
-        self.diff_file = 0;
-        self.reload_diff(cx);
+        // The new session starts with an empty diff selection (its own
+        // worktree view); the outgoing one keeps its state.
+        self.adopt_session_diff(Some((self.current_project, old_session)), cx);
         cx.notify();
+    }
+
+    /// Re-point the diff state at the current session: the outgoing
+    /// session keeps its selection and collapsed dirs (worktrees mean
+    /// each session's changes are its own), the incoming session's
+    /// state is adopted. `from` is the outgoing `(project, session)`
+    /// slot — `None` when that session was removed (nothing to keep).
+    pub(crate) fn adopt_session_diff(
+        &mut self,
+        from: Option<(usize, usize)>,
+        cx: &mut Context<Self>,
+    ) {
+        let to = (self.current_project, self.current_session);
+        if from.is_some_and(|f| f == to) {
+            return;
+        }
+        if let Some((fp, fs)) = from {
+            if let Some(s) = self
+                .projects
+                .get_mut(fp)
+                .and_then(|p| p.sessions.get_mut(fs))
+            {
+                s.diff_selected = self
+                    .diff
+                    .as_ref()
+                    .and_then(|d| self.diff_file.and_then(|ix| d.files.get(ix)))
+                    .map(|f| f.path.to_string());
+                s.diff_closed = self.diff_tree_closed.clone();
+            }
+        }
+        let (seed, closed) = {
+            let incoming = self.projects.get(to.0).and_then(|p| p.sessions.get(to.1));
+            (
+                incoming.and_then(|s| s.diff_selected.clone()),
+                incoming.map(|s| s.diff_closed.clone()).unwrap_or_default(),
+            )
+        };
+        self.diff_seed_path = seed;
+        self.reset_diff();
+        self.diff_tree_closed = closed;
+        self.reload_diff(cx);
+    }
+
+    /// The working tree the diff poll targets: the current session's
+    /// (worktrees later; today the project root it spawned in).
+    pub(super) fn current_session_cwd(&self) -> std::path::PathBuf {
+        self.projects
+            .get(self.current_project)
+            .and_then(|p| p.sessions.get(self.current_session))
+            .map(|s| s.cwd.clone())
+            .unwrap_or_else(|| self.current_project().path.clone())
     }
 
     /// Exit event from a session's PTY pump: mirror the status and notify.
@@ -163,7 +192,7 @@ impl AppView {
         emitter: Entity<TermSession>,
         code: i32,
         _program: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let status = match code {
@@ -189,11 +218,20 @@ impl AppView {
             // saved right away: a crash or kill -9 must not lose it.
             self.persist(cx);
         }
+        // Shutdown sequencing: every Exit is a candidate for the last
+        // one — when nothing runs anymore, close the window or quit.
+        if self.shutting_down && self.running_terms().is_empty() {
+            self.finish_shutdown(window, cx);
+        }
         cx.notify();
     }
 
-    /// Close (and kill if needed) session `six` of project `p`.
-    /// A closed current session selects the nearest neighbor.
+    /// Close session `six` of project `p`. A live agent is stopped
+    /// gracefully (Ctrl-C into the PTY): the child exits, prints its
+    /// resume banner, the id is captured on the Exit event and saved —
+    /// and the row STAYS as a resumable Done entry. A dead row has
+    /// nothing left to save and is removed outright; removing a
+    /// current session shifts the selection to the nearest neighbor.
     pub(crate) fn close_session(
         &mut self,
         p: usize,
@@ -201,25 +239,34 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(project) = self.projects.get_mut(p) else {
+        let Some(session) = self
+            .projects
+            .get(p)
+            .and_then(|pr| pr.sessions.get(six))
+            .cloned()
+        else {
             return;
         };
-        let Some(six) = (six < project.sessions.len()).then_some(six) else {
+        if let (Some(term), true) = (&session.term, session.status.is_running()) {
+            term.update(cx, |s, _| s.interrupt());
+            // The exit event persists the row with its resume id.
+            cx.notify();
             return;
-        };
+        }
+
+        // Dead row: drop it.
         let was_current = p == self.current_project && six == self.current_session;
         let became_empty;
         {
-            let session = project.sessions.remove(six);
-            if let Some(term) = &session.term {
-                term.update(cx, |s, _| s.kill());
-            }
+            let project = self.projects.get_mut(p).unwrap();
+            project.sessions.remove(six);
             became_empty = project.sessions.is_empty();
         }
         if was_current {
             self.current_session = six.min(self.projects[p].sessions.len().saturating_sub(1));
-            self.diff_file = 0;
-            self.reload_diff(cx);
+            // The closed session's diff state dies with it; the
+            // neighbor now current adopts its own (or starts empty).
+            self.adopt_session_diff(None, cx);
             if let Some(term) = self.current_term() {
                 let focus = term.read(cx).focus.clone();
                 focus.focus(window, cx);
@@ -234,60 +281,95 @@ impl AppView {
                 index_after_removal(self.current_session, six, self.projects[p].sessions.len());
         }
         self.hovered_session = None;
+        self.persist(cx);
         cx.notify();
     }
 
-    /// Confirm closing a running session, else close immediately.
-    pub(crate) fn request_close_session(
-        &mut self,
-        p: usize,
-        six: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(project) = self.projects.get(p) else {
-            return;
-        };
-        let Some(session) = project.sessions.get(six) else {
-            return;
-        };
-        let running = session.status.is_running();
-        let title = session.title.clone();
-        if !running {
-            self.close_session(p, six, window, cx);
-            return;
+    /// Live PTYs of sessions whose status is still Running — the ones a
+    /// shutdown must wait for.
+    pub(crate) fn running_terms(&self) -> Vec<Entity<TermSession>> {
+        self.projects
+            .iter()
+            .flat_map(|p| p.sessions.iter())
+            .filter(|s| s.status.is_running())
+            .filter_map(|s| s.term.clone())
+            .collect()
+    }
+
+    /// Window close (red button): with live agents this becomes a
+    /// graceful shutdown — interrupt every agent, let each exit and
+    /// capture its resume id, persist, then remove the window. Without
+    /// live agents it persists and closes right away.
+    pub(crate) fn request_close(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.running_terms().is_empty() {
+            self.persist(cx);
+            return true;
         }
-        let this = cx.weak_entity();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            alert
-                .title(format!("Close “{title}”?"))
-                .description("The running agent will be stopped.")
-                // Enter confirms, same as the footer button.
-                .on_ok({
-                    let this = this.clone();
-                    move |_, window, cx| {
-                        if let Some(this) = this.upgrade() {
-                            this.update(cx, |v, cx| v.close_session(p, six, window, cx));
-                        }
-                        true
+        if !self.shutting_down {
+            self.shutting_down = true;
+            self.quit_after_shutdown = false;
+            self.begin_shutdown(cx);
+        }
+        // Keep the window until the last agent is out.
+        false
+    }
+
+    /// ⌘Q: same graceful shutdown, ending in a process exit (the
+    /// reliable route here — the platform terminate path never
+    /// completes under this app's setup).
+    pub(crate) fn request_quit(&mut self, cx: &mut Context<Self>) {
+        if self.running_terms().is_empty() {
+            self.persist(cx);
+            std::process::exit(0);
+        }
+        if !self.shutting_down {
+            self.shutting_down = true;
+            self.quit_after_shutdown = true;
+            self.begin_shutdown(cx);
+        }
+    }
+
+    /// Kick off the shutdown sequence: Ctrl-C to every live agent now;
+    /// agents that gate exit behind a second Ctrl-C get one nudge at
+    /// 2s; anything still alive at 6s is killed outright (its Exit
+    /// still fires, the tail may still carry the resume id).
+    fn begin_shutdown(&mut self, cx: &mut Context<Self>) {
+        for term in self.running_terms() {
+            term.update(cx, |s, _| s.interrupt());
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let alive = this.update(cx, |this, cx| {
+                let alive = this.running_terms();
+                for term in &alive {
+                    term.update(cx, |s, _| s.interrupt());
+                }
+                !alive.is_empty()
+            })?;
+            if alive {
+                cx.background_executor().timer(Duration::from_secs(4)).await;
+                this.update(cx, |this, cx| {
+                    for term in this.running_terms() {
+                        term.update(cx, |s, _| s.kill());
                     }
-                })
-                // Shared Cancel + danger-confirm recipe — see
-                // `ui::dialog_footer`.
-                .footer(crate::ui::dialog_footer(
-                    "Close Session",
-                    "confirm-close",
-                    {
-                        let this = this.clone();
-                        move |_, window, cx| {
-                            if let Some(this) = this.upgrade() {
-                                this.update(cx, |v, cx| v.close_session(p, six, window, cx));
-                            }
-                            window.close_dialog(cx);
-                        }
-                    },
-                ))
-        });
+                })?;
+            }
+            anyhow::Ok(())
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The last live agent is out: save everything (resume ids were
+    /// captured on each Exit), then close the window or quit.
+    fn finish_shutdown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.shutting_down = false;
+        self.persist(cx);
+        if self.quit_after_shutdown {
+            std::process::exit(0);
+        } else {
+            window.remove_window();
+        }
     }
 
     /// Restart the current session with the same command in a fresh PTY.
@@ -323,10 +405,10 @@ impl AppView {
         let Some(project) = self.projects.get_mut(self.current_project) else {
             return;
         };
-        let cwd = project.path.clone();
         let Some(session) = project.sessions.get_mut(self.current_session) else {
             return;
         };
+        let cwd = session.cwd.clone();
         let cmd = match resume {
             Some(id) => session.cmd.clone().with_resume(id),
             None => session.cmd.clone(),

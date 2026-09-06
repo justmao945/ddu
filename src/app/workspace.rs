@@ -34,11 +34,11 @@ impl AppView {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| raw.to_string());
+        let from = (self.current_project, self.current_session);
         if let Some(ix) = self.projects.iter().position(|p| p.path == path) {
             self.current_project = ix;
             self.current_session = 0;
-            self.reset_diff();
-            self.reload_diff(cx);
+            self.adopt_session_diff(Some(from), cx);
             cx.notify();
             return;
         }
@@ -50,9 +50,8 @@ impl AppView {
         self.expanded.push(true);
         self.current_project = self.projects.len() - 1;
         self.current_session = 0;
-        self.reset_diff();
+        self.adopt_session_diff(None, cx);
         self.persist(cx);
-        self.reload_diff(cx);
         cx.notify();
     }
 
@@ -113,9 +112,10 @@ impl AppView {
         self.hovered_project = None;
         self.hovered_session = None;
         self.menu_project = None;
-        self.reset_diff();
+        // The removed project's diff dies with it; the project now
+        // current adopts its own session state (or starts empty).
+        self.adopt_session_diff(None, cx);
         self.persist(cx);
-        self.reload_diff(cx);
         cx.notify();
     }
 }

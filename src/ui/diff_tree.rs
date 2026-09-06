@@ -2,13 +2,13 @@
 //! with rolled-up +/− stats, guide-line indentation, and a per-file
 //! context menu. Selecting a file drives the right pane's hunks view.
 
+use super::{PANEL_HEADER_PX, ROW_PX, diff_file_icon, hover_bg, meta_text, selection_bg};
 use gpui_kit::component::menu::{PopupMenuItem, *};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{ROW_PX, diff_file_icon, hover_bg, meta_text, selection_bg};
 use crate::app::AppView;
 use crate::diff::DiffFile;
 
@@ -30,23 +30,47 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         return empty_layer("No changes — working tree clean.", cx).into_any_element();
     }
 
-    let file_ix = this.diff_file.min(diff.files.len() - 1);
+    let selected = this.diff_file.filter(|ix| *ix < diff.files.len());
     let tree = build_tree(&diff.files);
-    div()
-        .relative()
+    let (added, removed) = tree_stats(&tree);
+    v_flex()
         .size_full()
         .min_w_0()
         .overflow_hidden()
+        // Summary strip: what the working tree changes in total.
         .child(
             div()
-                .id("diff-tree-scroll")
-                .size_full()
-                .overflow_y_scroll()
-                .track_scroll(&this.diff_tree_scroll)
-                .p_2()
-                .child(tree_level(&tree, file_ix, 0, &this.diff_tree_closed, cx)),
+                .h(px(PANEL_HEADER_PX))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap_2()
+                .pl(px(4.))
+                .pr_2()
+                .child(meta_text(format!("{} files changed", diff.files.len()), cx))
+                .child(div().flex_1())
+                .child(plus_minus(added, removed, cx)),
         )
-        .vertical_scrollbar(&this.diff_tree_scroll)
+        .child(
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    div()
+                        .id("diff-tree-scroll")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&this.diff_tree_scroll)
+                        // No horizontal padding: hover and selection
+                        // bands run edge-to-edge — window border to
+                        // the divider.
+                        .pt_2()
+                        .pb_2()
+                        .child(tree_level(&tree, selected, 0, &this.diff_tree_closed, cx)),
+                )
+                .vertical_scrollbar(&this.diff_tree_scroll),
+        )
         .into_any_element()
 }
 
@@ -110,16 +134,14 @@ fn tree_stats(node: &TreeNode) -> (usize, usize) {
 
 fn tree_level<'a>(
     tree: &'a TreeNode,
-    selected: usize,
+    selected: Option<usize>,
     depth: usize,
     closed: &'a std::collections::HashSet<String>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement + use<'a> {
-    let radius = cx.theme().radius;
     let active_bg = selection_bg(cx);
     let hov_bg = hover_bg(cx);
     let guide = cx.theme().foreground.opacity(0.12);
-    let radius_f = f32::from(radius);
 
     // Indent comes solely from the nested guide wrappers (+14px per
     // level, border-left as the guide line); rows pad a constant 4px,
@@ -130,8 +152,7 @@ fn tree_level<'a>(
         level = level.child(file_row(
             *ix,
             f,
-            *ix == selected,
-            radius_f,
+            Some(*ix) == selected,
             active_bg,
             hov_bg,
             cx,
@@ -154,7 +175,6 @@ fn tree_level<'a>(
                 .gap_1()
                 .pl(px(4.))
                 .pr_2()
-                .rounded(radius)
                 .cursor_pointer()
                 .hover(move |el| el.bg(hov_bg))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -205,7 +225,6 @@ fn file_row(
     ix: usize,
     f: &DiffFile,
     active: bool,
-    radius: f32,
     active_bg: Hsla,
     hov_bg: Hsla,
     cx: &mut Context<AppView>,
@@ -223,16 +242,22 @@ fn file_row(
         .gap_2()
         .pl(px(4.))
         .pr_2()
-        .rounded(px(radius))
         .cursor_pointer()
         .map(|el| if active { el.bg(active_bg) } else { el })
         .hover(move |el| el.bg(if active { active_bg } else { hov_bg }))
         .on_click(cx.listener(move |this, _, _, cx| {
-            if this.diff_file != ix {
+            // Selecting a file IS opening the right pane: a closed
+            // pane springs open on the first click.
+            let changed = this.diff_file != Some(ix);
+            if changed {
                 this.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
             }
-            this.diff_file = ix;
-            cx.notify();
+            this.diff_file = Some(ix);
+            if !this.show_diff {
+                this.set_diff(true, cx);
+            } else {
+                cx.notify();
+            }
         }))
         .child(
             diff_file_icon(&f.path)

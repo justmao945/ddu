@@ -4,8 +4,8 @@
 //! selection. Diff lines never truncate — long lines scroll
 //! horizontally with a visible scrollbar.
 
+use super::PANEL_HEADER_PX;
 use super::diff_tree::plus_minus;
-use super::{PANEL_HEADER_PX, meta_text};
 use crate::app::AppView;
 use crate::diff::{DiffFile, DiffLine};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
@@ -19,9 +19,12 @@ pub(crate) fn render(
     window: &mut Window,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    // No branch/stat strip when the tree is clean — the body's
-    // "No changes" state carries the panel on its own.
-    let dirty = this.diff.as_ref().is_some_and(|d| !d.is_empty());
+    // The file strip only makes sense with a selected file — without
+    // one the body's empty state carries the panel on its own.
+    let has_file = this
+        .diff
+        .as_ref()
+        .is_some_and(|d| !d.is_empty() && this.diff_file.is_some_and(|ix| ix < d.files.len()));
     v_flex()
         .h_full()
         .w_full()
@@ -34,22 +37,18 @@ pub(crate) fn render(
             MouseButton::Left,
             cx.listener(|this, _, window, cx| this.window_focus.focus(window, cx)),
         )
-        .when(dirty, |el| el.child(header(this, cx)))
+        .when(has_file, |el| el.child(header(this, cx)))
         .child(body(this, window, cx))
 }
 
 fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
-    let diff = this.diff.as_ref();
-    let branch = diff.and_then(|d| d.branch.clone());
-    let (files, added, removed) = diff
-        .map(|d| {
-            (
-                d.files.len(),
-                d.files.iter().map(|f| f.added).sum::<usize>(),
-                d.files.iter().map(|f| f.removed).sum::<usize>(),
-            )
-        })
-        .unwrap_or((0, 0, 0));
+    // The pane shows exactly one file: the tree selection. Its path
+    // leads the header, its +/- figures close the line. The totals
+    // ("N files changed") live atop the tree layer.
+    let file = this
+        .diff
+        .as_ref()
+        .and_then(|d| this.diff_file.and_then(|ix| d.files.get(ix)));
 
     div()
         .h(px(PANEL_HEADER_PX))
@@ -58,7 +57,6 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .flex()
         .items_center()
         .gap_2()
-        // Left: branch, then the file count.
         .child(
             div()
                 .min_w_0()
@@ -68,15 +66,10 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                 .text_sm()
                 .font_medium()
                 .text_color(cx.theme().foreground.opacity(0.9))
-                .child(branch.unwrap_or_else(|| "Changes".into())),
+                .child(file.map(|f| f.path.clone()).unwrap_or_default()),
         )
-        .when(files > 0, |el| {
-            el.child(meta_text(format!("{files} files changed"), cx))
-                // Right-aligned +/- totals.
-                .child(div().flex_1())
-                .child(plus_minus(added, removed, cx))
-        })
-        .when(files == 0, |el| el.child(div().flex_1()))
+        .child(div().flex_1())
+        .when_some(file, |el, f| el.child(plus_minus(f.added, f.removed, cx)))
 }
 
 fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -87,8 +80,12 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
     if diff.is_empty() {
         return empty("No changes — working tree clean.", cx).into_any_element();
     }
+    // No selection, no content: the pane stays empty until a tree
+    // click picks a file.
+    let Some(file_ix) = this.diff_file.filter(|ix| *ix < diff.files.len()) else {
+        return empty("Select a file in the tree.", cx).into_any_element();
+    };
 
-    let file_ix = this.diff_file.min(diff.files.len() - 1);
     div()
         .flex_1()
         .min_h_0()

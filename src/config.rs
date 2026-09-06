@@ -132,6 +132,13 @@ pub struct SavedSession {
     /// Agent session id for `--resume`; `None` for shell rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<String>,
+    /// The file this session had selected in the diff tree (path;
+    /// re-pinned to an index on load).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_file: Option<String>,
+    /// Directories collapsed in this session's diff tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closed_dirs: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -160,13 +167,11 @@ pub struct State {
     /// Restored after restart; clamped to the rows that actually exist.
     #[serde(default)]
     pub current_session: usize,
-    /// Last diff-panel visibility. Per-session in the UI, but only the
-    /// value of the session that was current at save time survives a
-    /// restart — it seeds the restored default.
-    #[serde(default = "default_true")]
+    /// Last diff-panel visibility (⌘R; a tree click opens it too).
+    #[serde(default)]
     pub show_diff: bool,
-    /// Last diff file-tree layer visibility in the sidebar.
-    #[serde(default = "default_true")]
+    /// Last diff file-tree layer visibility in the sidebar (⌘T).
+    #[serde(default)]
     pub show_diff_tree: bool,
     /// Per-project right-pane state: the diff selection, tree collapse
     /// state and tree/content split height are project-local concerns —
@@ -179,12 +184,6 @@ pub struct State {
 /// Per-project runtime state for the diff pane and related viewers.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProjectState {
-    /// Selected file path (stable across reloads, unlike the file index).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_file: Option<String>,
-    /// Directory paths collapsed in the diff file tree.
-    #[serde(default)]
-    pub closed_dirs: Vec<String>,
     /// Height of the tree pane above the content pane (px).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree_height: Option<f32>,

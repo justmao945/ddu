@@ -22,6 +22,7 @@ use crate::ui::diff_tree::{TREE_MAX_H, TREE_MIN_H};
 gpui_kit::actions!(
     ddu,
     [
+        ToggleDiffTree,
         NewSession,
         AddProject,
         ToggleSessions,
@@ -94,7 +95,9 @@ pub struct AppView {
     pub(crate) last_diff_size: Option<Pixels>,
     /// Session row currently under the mouse: reveals its delete button.
     pub(crate) hovered_session: Option<(usize, usize)>,
-    pub(crate) diff_file: usize,
+    /// The tree-selected file driving the right pane; `None` shows the
+    /// pane's empty state. Clicking a file sets this and opens the pane.
+    pub(crate) diff_file: Option<usize>,
     /// Persisted selected-file path, pinned against the first loaded
     /// diff (files move between sessions), then cleared.
     pub(crate) diff_seed_path: Option<String>,
@@ -106,6 +109,11 @@ pub struct AppView {
     pub(crate) diff_error: Option<String>,
     /// Guards against stale poll results overwriting newer ones.
     diff_seq: u64,
+    /// Graceful shutdown in flight: live agents were interrupted; when
+    /// the last one exits, `finish_shutdown` closes the window (or
+    /// exits the process for ⌘Q).
+    pub(crate) shutting_down: bool,
+    pub(crate) quit_after_shutdown: bool,
 }
 
 /// Panel geometry (px): defaults, drag limits and collapse thresholds.
@@ -127,17 +135,17 @@ pub(crate) const WINDOW_MIN_HEIGHT: f32 = 400.;
 
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // Global shortcuts: cmd-t new session, cmd-b sessions, cmd-r diff,
-        // cmd-w close.
+        // Global shortcuts: ⌘N new session, ⌘B sessions, ⌘T file tree,
+        // ⌘R changes, ⌘W close.
         cx.bind_keys([
             KeyBinding::new("cmd-,", OpenSettings, None),
-            // ⌘T spawns the default launcher in the active project
+            // ⌘N spawns the default launcher in the active project
             // (guarded: with no projects there is nothing to spawn
-            // into); ⌘N is the same action for muscle memory. ⌘O adds
-            // a project via the folder picker.
-            KeyBinding::new("cmd-t", NewSession, None),
+            // into); ⌘O adds a project via the folder picker. ⌘T
+            // toggles the diff file tree under the project tree.
             KeyBinding::new("cmd-n", NewSession, None),
             KeyBinding::new("cmd-o", AddProject, None),
+            KeyBinding::new("cmd-t", ToggleDiffTree, None),
             KeyBinding::new("cmd-b", ToggleSessions, None),
             KeyBinding::new("cmd-r", ToggleDiff, None),
             KeyBinding::new("cmd-w", CloseSession, None),
@@ -213,29 +221,36 @@ impl AppView {
             menu_project: None,
             last_sidebar_size: None,
             last_diff_size: None,
-            diff_file: 0,
+            diff_file: None,
             diff_seed_path: None,
             diff_tree_height_seed: None,
             session_seq: 0,
             diff: None,
             diff_error: None,
             diff_seq: 0,
+            shutting_down: false,
+            quit_after_shutdown: false,
         };
         // Restore persisted widths; the raw values are clamped by the
         // panel size_range on render, out-of-range ones fall back to the
         // defaults inside `last_sidebar_w`/`last_diff_w`.
         this.last_sidebar_size = state.sidebar_width.map(gpui::px);
         this.last_diff_size = state.diff_width.map(gpui::px);
-        // The diff itself is loaded asynchronously; remember the
-        // persisted selection until it lands, then `apply_diff` re-pins
-        // by path (files move/rename between sessions).
+        // The diff itself is loaded asynchronously; the restored
+        // current session's selection and collapsed dirs seed it
+        // (per-session state — worktrees can differ). `apply_diff`
+        // re-pins the path to an index once it lands. The tree-layer
+        // height stays project-scoped layout.
+        let restored = this
+            .projects
+            .get(this.current_project)
+            .and_then(|p| p.sessions.first());
+        this.diff_seed_path = restored.and_then(|s| s.diff_selected.clone());
+        this.diff_tree_closed = restored.map(|s| s.diff_closed.clone()).unwrap_or_default();
         let current_path = this.current_project().path.to_string_lossy().to_string();
-        let project_state = state.project_state.get(&current_path);
-        this.diff_seed_path = project_state.and_then(|s| s.selected_file.clone());
-        this.diff_tree_closed = project_state
-            .map(|s| s.closed_dirs.iter().cloned().collect())
-            .unwrap_or_default();
-        this.diff_tree_height_seed = project_state
+        this.diff_tree_height_seed = state
+            .project_state
+            .get(&current_path)
             .and_then(|s| s.tree_height)
             .map(gpui::px)
             .filter(|h| h.as_f32() >= TREE_MIN_H as f32 && h.as_f32() <= TREE_MAX_H as f32);
@@ -295,14 +310,14 @@ impl AppView {
             },
         )
         .detach();
-        // Window close (red button / ⌘W on the window): persist before
-        // the view goes away. The OS-level terminate path (⌘Q via the
-        // app menu) has no hook, hence the `CmdQ` binding above too.
+        // Window close (red button): with live agents this blocks and
+        // starts a graceful shutdown (Ctrl-C → exit → resume ids saved
+        // → window removed); otherwise it persists and closes at once.
         {
             let this = cx.weak_entity();
-            window.on_window_should_close(cx, move |_, cx| {
-                let _ = this.update(cx, |view, cx| view.persist(cx));
-                true
+            window.on_window_should_close(cx, move |window, cx| {
+                this.update(cx, |view, cx| view.request_close(window, cx))
+                    .unwrap_or(true)
             });
         }
         // Restore the persisted session lists (agents as restartable
@@ -367,7 +382,13 @@ impl AppView {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The root tracks the window fallback focus: every pane focuses
+        // this handle on click (so the terminal cursor goes hollow), and
+        // with it in the element tree the global shortcuts (⌘N/⌘T/⌘B/…)
+        // keep a dispatch path no matter what was clicked last.
         v_flex()
+            .id("app-root")
+            .track_focus(&self.window_focus)
             .size_full()
             .bg(cx.theme().background)
             .on_action(cx.listener(|_, _: &OpenSettings, _, cx| ui::settings::open(cx)))
@@ -423,21 +444,15 @@ impl Render for AppView {
                 }
                 let p = this.current_project;
                 let six = this.current_session;
-                this.request_close_session(p, six, window, cx);
+                this.close_session(p, six, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSessions, _, cx| this.toggle_sessions(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, _, cx| this.toggle_diff(cx)))
-            // ⌘Q: save the workspace snapshot, then quit. `persist` runs
-            // before `quit` so state.json reflects the final layout.
-            // `cx.quit()` routes through the platform terminate path,
-            // which macOS AppKit intercepts and (in this app's setup)
-            // never completes; a direct exit is the reliable route.
-            // `on_window_should_close` above already persisted, but the
-            // keybinding is the user-visible path — persist one more time
-            // so panel geometry from the last interaction lands on disk.
+            .on_action(cx.listener(|this, _: &ToggleDiffTree, _, cx| this.toggle_diff_tree(cx)))
+            // ⌘Q: graceful shutdown — live agents get Ctrl-C, their
+            // resume ids land in state.json, then the process exits.
             .on_action(cx.listener(|this, _: &Quit, _, cx| {
-                this.persist(cx);
-                std::process::exit(0);
+                this.request_quit(cx);
             }))
             .child(ui::title_bar::render(self, cx))
             .child({

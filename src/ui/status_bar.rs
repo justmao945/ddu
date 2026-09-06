@@ -95,6 +95,6 @@ fn toggle_diff_tree(this: &AppView, cx: &mut Context<AppView>) -> Button {
         })
         .ghost()
         .small()
-        .tooltip("Toggle file tree")
+        .tooltip("Toggle file tree (⌘T)")
         .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_tree(cx)))
 }

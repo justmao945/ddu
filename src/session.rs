@@ -131,10 +131,13 @@ pub struct AgentSession {
     pub ended: Option<Instant>,
     /// Live terminal; `None` while the process failed to spawn.
     pub term: Option<Entity<TermSession>>,
-    /// This session's diff-panel visibility. Per-session: each session
-    /// remembers whether the changes panel was open when last shown,
-    /// so switching sessions restores that session's own layout.
-    pub show_diff: bool,
+    /// The working tree this session runs in (project root today; a
+    /// per-session worktree later). The diff poll targets this.
+    pub cwd: PathBuf,
+    /// Session-scoped diff tree state: with per-session worktrees each
+    /// session's changes, selection and collapsed dirs are its own.
+    pub diff_selected: Option<String>,
+    pub diff_closed: std::collections::HashSet<String>,
 }
 
 impl AgentSession {

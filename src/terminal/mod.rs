@@ -178,6 +178,16 @@ impl TermSession {
         self.resume_id.as_deref()
     }
 
+    /// Scan the recent output tail for the agent's resume id if not yet
+    /// captured. Agents print it early (banner / "resume this session
+    /// with …"), but only the exit path used to look — closing the
+    /// window mid-run lost it. Persist calls this before reading.
+    pub(crate) fn capture_resume_id(&mut self) {
+        if self.resume_id.is_none() {
+            self.resume_id = grid::extract_resume_id(&self.grid.recent.tail());
+        }
+    }
+
     /// Terminal-set window title (OSC 0), if any.
     pub fn title(&self) -> Option<String> {
         self.grid.meta.lock().title.clone()
@@ -357,6 +367,13 @@ impl TermSession {
             .is_some_and(|s| !s.is_empty())
     }
 
+    /// Overlay scrollbar visibility: macOS-style auto-hide. The thumb
+    /// shows only while scrolled back into history or while a drag is
+    /// active; at the live bottom it stays out of the way.
+    pub(crate) fn scrollbar_visible(&self) -> bool {
+        self.scrollbar_drag.is_some() || self.grid.term.lock().grid().display_offset() > 0
+    }
+
     /// Right-edge scrollbar track+thumb in window coordinates, or None
     /// when there is no scrollback to navigate.
     pub(crate) fn scrollbar_geometry(&self) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
@@ -373,11 +390,16 @@ impl TermSession {
 
     /// Left button down on the scrollbar strip: on the thumb starts a
     /// drag, on the bare track pages up/down. True = event consumed.
+    /// A hidden (auto-hidden) scrollbar never intercepts — the click
+    /// falls through to text selection.
     pub(crate) fn scrollbar_mouse_down(
         &mut self,
         pos: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !self.scrollbar_visible() {
+            return false;
+        }
         let Some((track, thumb)) = self.scrollbar_geometry() else {
             return false;
         };
@@ -568,6 +590,19 @@ impl TermSession {
     pub fn kill(&mut self) {
         if let Some(mut process) = self.process.take() {
             process.kill();
+        }
+    }
+
+    /// Graceful stop: Ctrl-C (0x03) into the PTY — SIGINT to the
+    /// foreground process group. Agents exit and print their resume
+    /// banner on the way out; the Exit path captures the id. No-op on
+    /// an already-exited child.
+    pub(crate) fn interrupt(&self) {
+        if self.exit.is_some() {
+            return;
+        }
+        if let Some(process) = &self.process {
+            process.writer().write(&[0x03]);
         }
     }
 

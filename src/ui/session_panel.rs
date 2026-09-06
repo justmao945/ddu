@@ -76,7 +76,7 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     // its global shortcut.
     let cfg = cx.global::<crate::config::Config>();
     let quick_tooltip: SharedString =
-        format!("New {} (⌘T)", cfg.label_for(&cfg.new_session.kind)).into();
+        format!("New {} (⌘N)", cfg.label_for(&cfg.new_session.kind)).into();
     v_flex()
         .id("project-tree")
         .flex_1()
@@ -289,7 +289,7 @@ fn session_row(
                     // synthesis never sees this press (see quick-add).
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.request_close_session(p, six, window, cx);
+                        this.close_session(p, six, window, cx);
                     })),
             )
         })

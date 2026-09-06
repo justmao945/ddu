@@ -7,7 +7,22 @@ impl AppView {
     /// Write current projects + expanded flags + panel geometry into the
     /// global state snapshot and save to disk. Save errors are reported
     /// (notification or stderr) but never crash the app.
-    pub(crate) fn persist(&self, cx: &mut App) {
+    pub(crate) fn persist(&mut self, cx: &mut App) {
+        // Sync the live diff state onto the current session's slot:
+        // selection and collapsed dirs are per-session (worktrees can
+        // differ), and this slot is what the snapshot serializes.
+        if let Some(s) = self
+            .projects
+            .get_mut(self.current_project)
+            .and_then(|p| p.sessions.get_mut(self.current_session))
+        {
+            s.diff_selected = self
+                .diff
+                .as_ref()
+                .and_then(|d| self.diff_file.and_then(|ix| d.files.get(ix)))
+                .map(|f| f.path.to_string());
+            s.diff_closed = self.diff_tree_closed.clone();
+        }
         let mut snapshot = cx.global::<crate::config::State>().clone();
         snapshot.hidden_sessions = !self.show_sessions;
         snapshot.sidebar_width = self.last_sidebar_size.map(|w| w.as_f32());
@@ -35,8 +50,16 @@ impl AppView {
                         resume: s
                             .term
                             .as_ref()
-                            .and_then(|t| t.read(cx).resume_id().map(String::from))
+                            .and_then(|t| {
+                                // Agents keep running at window close:
+                                // scan the output tail now, or the
+                                // next launch has nothing to resume.
+                                t.update(cx, |term, _| term.capture_resume_id());
+                                t.read(cx).resume_id().map(String::from)
+                            })
                             .or_else(|| s.cmd.resume.clone()),
+                        selected_file: s.diff_selected.clone(),
+                        closed_dirs: s.diff_closed.iter().cloned().collect(),
                     })
                     .collect(),
             })
@@ -46,12 +69,6 @@ impl AppView {
             .project_state
             .entry(path)
             .or_insert_with(crate::config::ProjectState::default);
-        entry.selected_file = self
-            .diff
-            .as_ref()
-            .and_then(|d| d.files.get(self.diff_file))
-            .map(|f| f.path.clone())
-            .or_else(|| self.diff_seed_path.clone());
         // The diff-tree layer is the sidebar splitter's second panel.
         // While the layer is hidden the splitter reports placeholder
         // sizes — keep the last visible height instead.
@@ -106,10 +123,13 @@ impl AppView {
                 };
                 seq += 1;
                 let now = std::time::Instant::now();
+                let cwd = project.path.clone();
+                let selected = s.selected_file.clone();
+                let closed: std::collections::HashSet<String> =
+                    s.closed_dirs.iter().cloned().collect();
                 if s.kind == "terminal" {
                     let live = ix == current;
                     let (status, term) = if live {
-                        let cwd = project.path.clone();
                         match TermSession::spawn(&cmd.spec(&cwd), cx) {
                             Ok(term) => {
                                 let program = cmd.program.clone();
@@ -148,7 +168,9 @@ impl AppView {
                         started: now,
                         ended: if term.is_none() { Some(now) } else { None },
                         term,
-                        show_diff: state.show_diff,
+                        cwd,
+                        diff_selected: selected,
+                        diff_closed: closed,
                     });
                 } else {
                     let cmd = match &s.resume {
@@ -164,7 +186,9 @@ impl AppView {
                         started: now,
                         ended: Some(now),
                         term: None,
-                        show_diff: state.show_diff,
+                        cwd,
+                        diff_selected: selected,
+                        diff_closed: closed,
                     });
                 }
             }
