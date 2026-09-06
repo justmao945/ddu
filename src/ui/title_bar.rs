@@ -26,10 +26,13 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
             div()
                 .flex()
                 .items_center()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
                 .gap_2()
                 .px_2()
                 .text_sm()
-                .child(meta_text(breadcrumb, cx)),
+                .child(meta_text(breadcrumb, cx).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis()),
         )
         .child(
             h_flex()

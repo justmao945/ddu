@@ -22,24 +22,22 @@ pub fn encode(k: &Keystroke) -> Option<Vec<u8>> {
     // Ctrl + printable key → C0 control byte ("space" included → NUL).
     if m.control {
         let key = if k.key == "space" { " " } else { k.key.as_str() };
-        if key.len() == 1 {
-            if let Some(byte) = control_byte(key) {
+        if key.len() == 1
+            && let Some(byte) = control_byte(key) {
                 return Some(vec![byte]);
             }
-        }
     }
 
     // Printable input: `key_char` carries the produced character
     // (respects shift and layouts). Alt prefixes ESC.
-    if let Some(ch) = &k.key_char {
-        if !m.control {
+    if let Some(ch) = &k.key_char
+        && !m.control {
             let mut bytes = ch.as_bytes().to_vec();
             if m.alt {
                 bytes.insert(0, 0x1b);
             }
             return Some(bytes);
         }
-    }
 
     None
 }

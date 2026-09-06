@@ -23,6 +23,8 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
     v_flex()
         .h_full()
         .w_full()
+        .min_w_0()
+        .overflow_hidden()
         .bg(cx.theme().sidebar)
         .child(
             div()
@@ -61,6 +63,7 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                         .icon(AppIcon::FolderPlus)
                         .ghost()
                         .small()
+                        .tab_stop(false)
                         .tooltip("Add project…")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.add_project(window, cx);
@@ -82,27 +85,28 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .overflow_y_scroll()
         .p_2()
         .gap_0p5()
-        .children((0..this.projects.len()).filter_map(move |p| {
+        .children((0..this.projects.len()).map(move |p| {
             let project = &this.projects[p];
             let expanded = this.expanded.get(p).copied().unwrap_or(true);
             let active_project = p == this.current_project;
             let chevron = if expanded { IconName::ChevronDown } else { IconName::ChevronRight };
 
-            Some(
-                v_flex()
+            v_flex()
+                    .flex_shrink_0()
                     .gap_0p5()
                     // ── level 1: project row ──
                     .child(
                         div()
                             .id(("project-row", p))
                             .h(px(ROW_PX))
+                            .flex_shrink_0()
                             .flex()
                             .items_center()
                             .gap_1()
                             .px_2()
                             .rounded(radius)
                             .cursor_pointer()
-                            .hover(move |el| if active_project { el } else { el.bg(hov_bg) })
+                            .hover(move |el| el.bg(hov_bg))
                             .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                                 let next = if *hovering { Some(p) } else { None };
                                 if this.hovered_project != next {
@@ -112,6 +116,7 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                             }))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.expanded[p] = !this.expanded[p];
+                                this.persist(cx);
                                 cx.notify();
                             }))
                             .child(
@@ -143,6 +148,7 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                             .icon(IconName::Plus)
                                             .ghost()
                                             .xsmall()
+                                            .tab_stop(false)
                                             .tooltip("New session (default)")
                                             // gpui synthesizes a click for
                                             // EVERY hitbox under the pointer;
@@ -160,7 +166,7 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                             )
                                             .on_click(cx.listener(
                                                 move |this, _, _window, cx| {
-                                                    this.current_project = p;
+                                                    this.select_session(p, 0, _window, cx);
                                                     this.spawn_session(_window, cx);
                                                 },
                                             )),
@@ -188,8 +194,7 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                 session_row(this, p, six, s, active_project, cx)
                             }))
                         }
-                    }),
-            )
+                    })
         }))
 }
 
@@ -214,11 +219,12 @@ fn session_row(
         && s.term
             .as_ref()
             .is_some_and(|t| t.read(cx).active_within(ACTIVE_WINDOW));
-    let active_hover_bg = hover_bg(cx);
+    let active_hover_bg = super::selection_hover_bg(cx);
     let title = session_title(s, cx);
     div()
         .id(element_id)
         .h(px(SESSION_ROW_PX))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .gap_2()
@@ -260,7 +266,7 @@ fn session_row(
                         .whitespace_nowrap()
                         .text_ellipsis()
                         .map(|el| match &s.status {
-                            AgentStatus::Error(_) => el.text_color(cx.theme().red.opacity(0.8)),
+                            AgentStatus::Error(_) | AgentStatus::Done(1..) => el.text_color(cx.theme().red.opacity(0.8)),
                             _ => el.text_color(fg.opacity(0.45)),
                         })
                         .child(meta_label(s)),
@@ -278,13 +284,14 @@ fn session_row(
             )
         })
         .when(
-            this.hovered_session == Some((p, six)) && !working,
+            this.hovered_session == Some((p, six)),
             |el| {
                 el.child(
                     Button::new(SharedString::from(format!("close-{p}-{six}")))
                         .icon(IconName::Close)
                         .ghost()
                         .xsmall()
+                        .tab_stop(false)
                         .tooltip("Close session")
                         // Stop the mouse-down so the row's own click
                         // synthesis never sees this press (see quick-add).
@@ -303,15 +310,12 @@ fn session_row(
 /// Live row title: agents adopt the PTY's OSC title once they set one;
 /// shells keep their program basename (`zsh`).
 fn session_title(s: &AgentSession, cx: &Context<AppView>) -> String {
-    if s.is_agent() {
-        if let Some(term) = &s.term {
-            if let Some(title) = term.read(cx).title() {
-                if !title.trim().is_empty() {
+    if s.is_agent()
+        && let Some(term) = &s.term
+            && let Some(title) = term.read(cx).title()
+                && !title.trim().is_empty() {
                     return title.trim().to_string();
                 }
-            }
-        }
-    }
     s.title.clone()
 }
 
@@ -319,8 +323,9 @@ fn session_title(s: &AgentSession, cx: &Context<AppView>) -> String {
 fn meta_label(s: &AgentSession) -> String {
     match s.status {
         AgentStatus::Running => s.elapsed_label(),
-        AgentStatus::Done(_) => format!("done · {}", s.elapsed_label()),
-        AgentStatus::Error(_) => format!("failed · {}", s.elapsed_label()),
+        AgentStatus::Done(0) => format!("Finished · {}", s.elapsed_label()),
+        AgentStatus::Done(code) => format!("Exit {code} · {}", s.elapsed_label()),
+        AgentStatus::Error(_) => format!("Failed · {}", s.elapsed_label()),
     }
 }
 
@@ -337,7 +342,7 @@ fn kind_icon(s: &AgentSession, cx: &Context<AppView>) -> Div {
             .justify_center()
             .child(child)
     };
-    if !s.is_agent() {
+    if !s.is_agent() || !matches!(s.kind.as_str(), "claude" | "codex" | "omp") {
         return cell(
             Icon::new(IconName::SquareTerminal)
                 .with_size(gpui_kit::component::Size::Small)
@@ -362,7 +367,9 @@ fn kind_icon(s: &AgentSession, cx: &Context<AppView>) -> Div {
 }
 
 /// The `...` dropdown on a project row: every launcher plus project ops.
-fn more_menu(_this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoElement {
+fn more_menu(this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoElement {
+    let can_remove = this.projects.len() > 1;
+    let has_running = this.projects[p].sessions.iter().any(|s| s.status.is_running());
     let cfg = cx.global::<crate::config::Config>().clone();
     let view = cx.weak_entity();
     let new_session_default = cfg.new_session.kind.clone();
@@ -385,6 +392,7 @@ fn more_menu(_this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoE
                                 let view = view.clone();
                                 async move |cx| {
                                     let _ = view.update_in(cx, |v, window, cx| {
+                                        v.select_session(p, 0, window, cx);
                                         v.spawn_session_of(&kind, window, cx)
                                     });
                                 }
@@ -394,7 +402,7 @@ fn more_menu(_this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoE
             );
         }
         m = m.separator().item(
-            PopupMenuItem::new("Remove project").on_click({
+            PopupMenuItem::new(if has_running { "Close sessions before removing" } else { "Remove project" }).disabled(!can_remove || has_running).on_click({
                 let view = view.clone();
                 move |_, window, cx| {
                     let view = view.clone();
@@ -402,7 +410,10 @@ fn more_menu(_this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoE
                         .spawn(cx, {
                             let view = view.clone();
                             async move |cx| {
-                                let _ = view.update(cx, |v, cx| v.remove_project(p, cx));
+                                let _ = view.update_in(cx, |v, window, cx| {
+                                    v.remove_project(p, cx);
+                                    v.select_session(v.current_project, v.current_session, window, cx);
+                                });
                             }
                         })
                         .detach();
@@ -416,6 +427,7 @@ fn more_menu(_this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoE
         .icon(IconName::Ellipsis)
         .ghost()
         .xsmall()
+        .tab_stop(false)
         .dropdown_menu_with_anchor(Anchor::TopRight, build_menu)
         .on_open_change({
             let view = cx.weak_entity();

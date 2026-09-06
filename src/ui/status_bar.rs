@@ -12,6 +12,7 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         .left(
             h_flex().items_center().px_1().child(
                 Button::new("toggle-sessions")
+                    .tab_stop(false)
                     .icon(if this.show_sessions {
                         IconName::PanelLeftClose
                     } else {
@@ -19,13 +20,14 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                     })
                     .ghost()
                     .small()
-                    .tooltip("Toggle sidebar (⌘\\)")
+                    .tooltip("Toggle sidebar (⌘B)")
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sessions(cx))),
             ),
         )
         .right(
             h_flex().items_center().px_1().child(
                 Button::new("toggle-diff")
+                    .tab_stop(false)
                     .icon(if this.show_diff {
                         IconName::PanelRightClose
                     } else {
@@ -33,7 +35,7 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                     })
                     .ghost()
                     .small()
-                    .tooltip("Toggle changes (⌘B)")
+                    .tooltip("Toggle changes (⌘R)")
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_diff(cx))),
             ),
         )

@@ -8,7 +8,7 @@ use git2::{DiffDelta, Repository};
 
 /// Diff the project against HEAD (staged + unstaged + untracked).
 pub fn head_diff(path: &Path) -> anyhow::Result<GitDiff> {
-    let repo = Repository::open(path)?;
+    let repo = Repository::discover(path)?;
     let branch = repo
         .head()
         .ok()
@@ -24,7 +24,6 @@ pub fn head_diff(path: &Path) -> anyhow::Result<GitDiff> {
     let diff = repo.diff_tree_to_workdir_with_index(tree.as_ref(), Some(&mut opts))?;
 
     let files = RefCell::new(Vec::<DiffFile>::new());
-    let truncated = RefCell::new(false);
     diff.foreach(
         &mut |delta: DiffDelta, _| {
             files.borrow_mut().push(DiffFile {
@@ -41,6 +40,7 @@ pub fn head_diff(path: &Path) -> anyhow::Result<GitDiff> {
         None,
         Some(&mut |_, hunk: git2::DiffHunk| {
             if let Some(file) = files.borrow_mut().last_mut() {
+                if file.lines_total >= MAX_LINES_PER_FILE { return true; }
                 file.hunks.push(DiffHunk {
                     header: String::from_utf8_lossy(hunk.header())
                         .trim_end()
@@ -75,13 +75,12 @@ pub fn head_diff(path: &Path) -> anyhow::Result<GitDiff> {
                 }
                 file.lines_total += 1;
             } else {
-                *truncated.borrow_mut() = true;
+                file.truncated = true;
             }
             true
         }),
     )?;
 
-    let _ = truncated; // stat counts stay full; a notice can use added+removed
     Ok(GitDiff { branch, files: files.into_inner() })
 }
 
@@ -118,7 +117,7 @@ mod tests {
         std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
 
         let diff = head_diff(&dir).expect("head_diff");
-        assert_eq!(diff.branch.as_deref(), Some("master").or(Some("main")));
+        assert_eq!(diff.branch.as_deref(), repo.head().unwrap().shorthand());
 
         let hello = diff.files.iter().find(|f| f.path == "hello.txt").expect("hello.txt");
         assert_eq!((hello.added, hello.removed), (1, 1));
@@ -135,6 +134,15 @@ mod tests {
         assert_eq!(new_file.added, 1);
         assert!(new_file.hunks.iter().any(|h| h.lines.iter().any(|l| l.text == "fresh")));
 
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(head_diff(&nested).unwrap(), diff);
+        std::fs::write(dir.join("large.txt"), "line\n".repeat(MAX_LINES_PER_FILE + 10)).unwrap();
+        let large = head_diff(&dir).unwrap().files.into_iter().find(|f| f.path == "large.txt").unwrap();
+        assert!(large.truncated);
+        assert_eq!(large.lines_total, MAX_LINES_PER_FILE);
+        assert_eq!(large.added, MAX_LINES_PER_FILE + 10);
+        assert_eq!(large.hunks.iter().map(|h| h.lines.len()).sum::<usize>(), MAX_LINES_PER_FILE);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

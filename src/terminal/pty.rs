@@ -49,6 +49,8 @@ pub struct PtyProcess {
     killer: Box<dyn ChildKiller + Send + Sync>,
 }
 
+type SpawnedPty = (PtyProcess, Box<dyn Read + Send>, Box<dyn Child + Send + Sync>);
+
 impl PtyProcess {
     /// Spawn `cmd` in a fresh PTY of `cols`×`rows` cells.
     ///
@@ -58,7 +60,7 @@ impl PtyProcess {
         cmd: &PtySpawn,
         cols: u16,
         rows: u16,
-    ) -> anyhow::Result<(Self, Box<dyn Read + Send>, Box<dyn Child + Send + Sync>)> {
+    ) -> anyhow::Result<SpawnedPty> {
         let pty = native_pty_system();
         let PtyPair { master, slave } =
             pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
@@ -96,6 +98,10 @@ impl PtyProcess {
 
 #[cfg(test)]
 impl PtyWriter {
+    pub(crate) fn test_writer(writer: impl Write + Send + 'static) -> Self {
+        Self::new(Box::new(writer))
+    }
+
     pub(crate) fn for_test() -> Self {
         struct Sink;
         impl std::io::Write for Sink {

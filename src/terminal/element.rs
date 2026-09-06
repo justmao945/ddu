@@ -7,8 +7,8 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 
 use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::vte::ansi::{Color as TermColor, CursorShape, NamedColor};
 use alacritty_terminal::term::RenderableContent;
-use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor};
 
 use super::TermSession;
 
@@ -93,9 +93,11 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.flex_grow = 1.;
-        style.size = size(relative(1.).into(), relative(1.).into());
+        let style = Style {
+            flex_grow: 1.,
+            size: size(relative(1.).into(), relative(1.).into()),
+            ..Default::default()
+        };
         let layout_id = window.request_layout(style, [], cx);
         (layout_id, layout_id)
     }
@@ -142,21 +144,46 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) {
         let Some(session) = self.session.upgrade() else { return };
+        // Register the IME input handler for this frame (a no-op unless
+        // focused): composed input — CJK input methods, long-press
+        // accents, the emoji picker — commits through it into the PTY.
+        window.handle_input(
+            &self.focus,
+            ElementInputHandler::new(bounds, session.clone()),
+            cx,
+        );
         let m = Metrics::new(window, cx);
         let theme = cx.theme();
         let palette = TerminalPalette::new(theme);
+        window.paint_quad(fill(bounds, palette.bg));
         let focused = self.focus.is_focused(window);
 
         // Clone the grid Arc out of the entity borrow so painting can
         // take `&mut App` freely.
+        let marked = session.read(cx).marked_text.clone();
         let term = session.read(cx).grid.term.clone();
         let term_lock = term.lock();
         let mut content = term_lock.renderable_content();
         let cursor = content.cursor;
 
         let origin = bounds.origin + point(px(PAD), px(PAD));
+        // Stash the cursor rect so `bounds_for_range` can anchor the
+        // platform's IME candidate popup at the insertion point.
+        let cursor_bounds = (cursor.shape != CursorShape::Hidden && cursor.point.line.0 >= 0).then(|| {
+            Bounds {
+                origin: point(
+                    origin.x + px(f32::from(m.cell_width) * cursor.point.column.0 as f32),
+                    origin.y + px(f32::from(m.line_height) * cursor.point.line.0 as f32),
+                ),
+                size: size(m.cell_width, m.line_height),
+            }
+        });
+        session.read(cx).ime_cursor_bounds.set(cursor_bounds);
         paint_grid(&mut content, &m, &palette, origin, window, cx);
         paint_cursor(&cursor, &m, origin, focused, window, cx);
+        if let Some(marked) = marked.filter(|t| !t.is_empty()) {
+            paint_marked(&marked, &cursor, &m, &palette, origin, window, cx);
+        }
     }
 }
 
@@ -279,6 +306,54 @@ struct Seg {
     force_width: Option<Pixels>,
 }
 
+
+/// IME preedit ("marked") text: underlined, on a subtle wash, painted
+/// over the cells at the cursor — alacritty-style overlay; the grid
+/// content underneath is left in place since the preedit is not yet
+/// terminal content.
+fn paint_marked(
+    text: &str,
+    cursor: &alacritty_terminal::term::RenderableCursor,
+    m: &Metrics,
+    palette: &TerminalPalette,
+    origin: Point<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if cursor.point.line.0 < 0 {
+        return;
+    }
+    let x = origin.x + px(f32::from(m.cell_width) * cursor.point.column.0 as f32);
+    let y = origin.y + px(f32::from(m.line_height) * cursor.point.line.0 as f32);
+    let run = TextRun {
+        len: text.len(),
+        font: m.font.clone(),
+        color: palette.fg,
+        background_color: None,
+        underline: Some(UnderlineStyle {
+            thickness: px(1.),
+            color: Some(palette.fg),
+            wavy: false,
+        }),
+        strikethrough: None,
+    };
+    let shaped = window
+        .text_system()
+        .shape_line(text.to_string().into(), m.font_size, &[run], None);
+    let bounds = Bounds {
+        origin: point(x, y),
+        size: size(shaped.width(), m.line_height),
+    };
+    window.paint_quad(fill(bounds, palette.fg.opacity(0.12)));
+    let _ = shaped.paint(
+        point(x, y),
+        m.line_height,
+        TextAlign::Left,
+        Some(shaped.width()),
+        window,
+        cx,
+    );
+}
 fn paint_cursor(
     cursor: &alacritty_terminal::term::RenderableCursor,
     m: &Metrics,
@@ -287,6 +362,7 @@ fn paint_cursor(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if cursor.shape == alacritty_terminal::vte::ansi::CursorShape::Hidden || cursor.point.line.0 < 0 { return; }
     let x = origin.x + px(f32::from(m.cell_width) * cursor.point.column.0 as f32);
     let y = origin.y + px(f32::from(m.line_height) * cursor.point.line.0 as f32);
     let bounds = Bounds {
@@ -432,6 +508,14 @@ impl TerminalPalette {
 
 fn dimmed_index(named: NamedColor) -> usize {
     match named {
+        NamedColor::Black => 0,
+        NamedColor::Red => 1,
+        NamedColor::Green => 2,
+        NamedColor::Yellow => 3,
+        NamedColor::Blue => 4,
+        NamedColor::Magenta => 5,
+        NamedColor::Cyan => 6,
+        NamedColor::White => 7,
         NamedColor::BrightBlack => 8,
         NamedColor::BrightRed => 9,
         NamedColor::BrightGreen => 10,
@@ -454,4 +538,19 @@ fn dimmed_index(named: NamedColor) -> usize {
 
 fn rgb_u24(r: u8, g: u8, b: u8) -> Rgba {
     rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32)
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::{dimmed_index, NamedColor};
+    #[test]
+    fn standard_ansi_colors_do_not_fall_back_to_white() {
+        for (color, expected) in [NamedColor::Black, NamedColor::Red, NamedColor::Green,
+            NamedColor::Yellow, NamedColor::Blue, NamedColor::Magenta,
+            NamedColor::Cyan, NamedColor::White].into_iter().zip(0..8) {
+            assert_eq!(dimmed_index(color), expected);
+        }
+        assert_eq!(dimmed_index(NamedColor::BrightRed), 9);
+        assert_eq!(dimmed_index(NamedColor::DimRed), 1);
+    }
 }

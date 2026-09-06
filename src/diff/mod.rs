@@ -19,6 +19,7 @@ pub struct DiffFile {
     pub hunks: Vec<DiffHunk>,
     /// Total lines collected (for the truncation notice).
     pub lines_total: usize,
+    pub truncated: bool,
 }
 
 /// One hunk of a file diff.

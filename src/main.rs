@@ -76,8 +76,10 @@ fn main() {
     app.run(move |cx| {
         // Must be first, before using any component features.
         gpui_kit::init(cx);
-        Theme::change(ThemeMode::Light, None, cx);
-        cx.set_global(config::Config::load());
+        let config = config::Config::load();
+        Theme::change(if config.dark_theme { ThemeMode::Dark } else { ThemeMode::Light }, None, cx);
+        Theme::global_mut(cx).font_size = px(14.);
+        cx.set_global(config);
         // Activate BEFORE the first window exists: the display-link start
         // guard latches on the window's occlusion state at creation, and a
         // background-launched (unactivated) process misses it — the window

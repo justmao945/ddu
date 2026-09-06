@@ -18,7 +18,7 @@ use crate::terminal::{TermEvent, TermSession};
 use crate::ui;
 
 // Global keyboard actions: new session, dock toggles, close session.
-gpui_kit::actions!(ddu, [NewSession, ToggleSessions, ToggleDiff, CloseSession]);
+gpui_kit::actions!(ddu, [NewSession, ToggleSessions, ToggleDiff, CloseSession, OpenSettings, TermTab, TermBacktab, TermPaste, DialogEnterSink]);
 
 /// Seconds between working-tree diff polls.
 const DIFF_POLL_SECS: u64 = 3;
@@ -37,6 +37,8 @@ pub struct AppView {
     /// Owns the three-pane splitter sizes (see `set_sessions`/`set_diff`).
     pub(crate) resize_state: Entity<ResizableState>,
     /// Project row currently under the mouse (hides/reveals its buttons).
+    pub(crate) diff_tree_scroll: ScrollHandle,
+    pub(crate) diff_hunks_scroll: ScrollHandle,
     pub(crate) hovered_project: Option<usize>,
     /// Project whose `...` menu is open: keeps the row's buttons mounted
     /// while the mouse travels into the popup (the popup occludes the
@@ -51,6 +53,7 @@ pub struct AppView {
     pub(crate) diff_file: usize,
     pub(crate) session_seq: usize,
     pub(crate) diff: Option<GitDiff>,
+    pub(crate) diff_error: Option<String>,
     /// Guards against stale poll results overwriting newer ones.
     diff_seq: u64,
 }
@@ -74,13 +77,28 @@ pub(crate) const WINDOW_MIN_HEIGHT: f32 = 400.;
 
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // Global shortcuts: cmd-t new session, cmd-\ sessions, cmd-b diff,
+        // Global shortcuts: cmd-t new session, cmd-b sessions, cmd-r diff,
         // cmd-w close.
         cx.bind_keys([
+            KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-t", NewSession, None),
             KeyBinding::new("cmd-b", ToggleSessions, None),
             KeyBinding::new("cmd-r", ToggleDiff, None),
             KeyBinding::new("cmd-w", CloseSession, None),
+            // Terminal-scoped: these beat gpui-component Root's global
+            // Tab/Shift-Tab focus cycling (deeper key context wins), so
+            // the PTY gets real tab/backtab bytes and focus never jumps
+            // to sidebar buttons mid-session. ⌘V is unbound globally.
+            KeyBinding::new("tab", TermTab, Some("Terminal")),
+            KeyBinding::new("shift-tab", TermBacktab, Some("Terminal")),
+            KeyBinding::new("cmd-v", TermPaste, Some("Terminal")),
+            // Single-line gpui-component Inputs propagate Enter
+            // (`cx.propagate()` on purpose, so forms can submit), and the
+            // Dialog context maps it to Confirm — which CLOSED the
+            // settings dialog on every field commit. Our later binding
+            // wins over the component's, sinking Enter with no listener.
+            // Escape (Cancel) still closes dialogs.
+            KeyBinding::new("enter", DialogEnterSink, Some("Dialog")),
         ]);
 
         let cfg = cx.global::<crate::config::Config>().clone();
@@ -98,16 +116,18 @@ impl AppView {
                 expanded[ix] = p.expanded;
             }
         }
-        let window_focus = cx.focus_handle();
+        let window_focus = cx.focus_handle().tab_stop(false);
         let mut this = Self {
             window_focus,
             projects,
             expanded,
             current_project: 0,
             current_session: 0,
-            show_sessions: true,
-            show_diff: false,
+            show_sessions: !cfg.hidden_sessions,
+            show_diff: cfg.show_diff,
             resize_state: cx.new(|_| ResizableState::default()),
+            diff_tree_scroll: ScrollHandle::new(),
+            diff_hunks_scroll: ScrollHandle::new(),
             hovered_project: None,
             hovered_session: None,
             menu_project: None,
@@ -116,6 +136,7 @@ impl AppView {
             diff_file: 0,
             session_seq: 0,
             diff: None,
+            diff_error: None,
             diff_seq: 0,
         };
         this.window_focus.focus(window, cx);
@@ -146,14 +167,19 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let changed_project = self.current_project != project;
         self.current_project = project;
         let n = self.projects[project].sessions.len();
         self.current_session = session.min(n.saturating_sub(1));
-        self.diff_file = 0;
-        self.reload_diff(cx);
+        if changed_project {
+            self.reset_diff();
+            self.reload_diff(cx);
+        }
         if let Some(term) = self.current_term() {
             let focus = term.read(cx).focus.clone();
             focus.focus(window, cx);
+        } else {
+            self.window_focus.focus(window, cx);
         }
         cx.notify();
     }
@@ -172,12 +198,13 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(cmd) = cx.global::<crate::config::Config>().cmd_for(kind) else {
-            window.push_notification(
-                Notification::error(format!("Unknown session type: {kind}")),
-                cx,
-            );
-            return;
+        let cmd = match cx.global::<crate::config::Config>().cmd_for(kind) {
+            Ok(cmd) => cmd,
+            Err(err) => {
+                self.window_focus.focus(window, cx);
+                window.push_notification(Notification::error(err.to_string()), cx);
+                return;
+            }
         };
         let Some(project) = self.projects.get(self.current_project) else {
             return;
@@ -222,7 +249,7 @@ impl AppView {
                 cmd,
                 kind: kind.to_string(),
                 started: std::time::Instant::now(),
-                ended: None,
+                ended: if term.is_none() { Some(std::time::Instant::now()) } else { None },
                 term,
             });
             self.current_session = project.sessions.len() - 1;
@@ -242,9 +269,10 @@ impl AppView {
                 .pick_folder()
                 .await
                 .map(|handle| handle.path().to_string_lossy().into_owned());
-            let _ = view.update_in(cx, |this, _window, cx| {
+            let _ = view.update_in(cx, |this, window, cx| {
                 if let Some(path) = picked {
                     this.add_project_path(&path, cx);
+                    this.select_session(this.current_project, this.current_session, window, cx);
                 }
             });
         })
@@ -262,14 +290,19 @@ impl AppView {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| raw.to_string());
-        if self.projects.iter().any(|p| p.path == path) {
+        if let Some(ix) = self.projects.iter().position(|p| p.path == path) {
+            self.current_project = ix;
+            self.current_session = 0;
+            self.reset_diff();
+            self.reload_diff(cx);
+            cx.notify();
             return;
         }
         self.projects.push(Project { name, path: path.clone(), sessions: vec![] });
         self.expanded.push(true);
         self.current_project = self.projects.len() - 1;
         self.current_session = 0;
-        self.diff_file = 0;
+        self.reset_diff();
         self.persist(cx);
         self.reload_diff(cx);
         cx.notify();
@@ -279,6 +312,8 @@ impl AppView {
     /// and save to disk.
     pub(crate) fn persist(&self, cx: &mut App) {
         let mut snapshot = cx.global::<crate::config::Config>().clone();
+        snapshot.hidden_sessions = !self.show_sessions;
+        snapshot.show_diff = self.show_diff;
         snapshot.projects = self
             .projects
             .iter()
@@ -298,11 +333,18 @@ impl AppView {
         if project >= self.projects.len() || self.projects.len() == 1 {
             return;
         }
-        self.projects.remove(project);
+        let removed = self.projects.remove(project);
+        for session in removed.sessions {
+            if let Some(term) = session.term { term.update(cx, |s, _| s.kill()); }
+        }
         self.expanded.remove(project);
-        self.current_project = self.current_project.min(self.projects.len() - 1);
-        self.current_session = 0;
-        self.diff_file = 0;
+        let was_current = project == self.current_project;
+        self.current_project = index_after_removal(self.current_project, project, self.projects.len());
+        if was_current { self.current_session = 0; }
+        self.hovered_project = None;
+        self.hovered_session = None;
+        self.menu_project = None;
+        self.reset_diff();
         self.persist(cx);
         self.reload_diff(cx);
         cx.notify();
@@ -322,13 +364,23 @@ impl AppView {
             code => AgentStatus::Error(format!("abnormal exit {code}")),
         };
         let ended = std::time::Instant::now();
-        for session in self.projects[self.current_project]
-            .sessions
-            .iter_mut()
+        let mut matched = false;
+        for session in self.projects.iter_mut().flat_map(|p| p.sessions.iter_mut())
             .filter(|s| s.term.as_ref() == Some(&emitter))
         {
+            matched = true;
             session.status = status.clone();
             session.ended = Some(ended);
+        }
+        if !matched { return; }
+        // Only agents merit a toast: the exit banner already covers the
+        // terminal, and a shell exits every time the user types `exit`.
+        let is_agent = self.projects.iter()
+            .flat_map(|p| p.sessions.iter())
+            .any(|s| s.term.as_ref() == Some(&emitter) && s.is_agent());
+        if !is_agent {
+            cx.notify();
+            return;
         }
         let message = match code {
             0 => format!("{program} finished"),
@@ -373,16 +425,19 @@ impl AppView {
             self.current_session = six.min(self.projects[p].sessions.len().saturating_sub(1));
             self.diff_file = 0;
             self.reload_diff(cx);
-            if became_empty {
+            if let Some(term) = self.current_term() {
+                let focus = term.read(cx).focus.clone();
+                focus.focus(window, cx);
+            } else if became_empty {
                 // Keep global shortcuts alive when the pane empties out.
                 self.window_focus.focus(window, cx);
             }
         } else if p == self.current_project {
             // Keep pointing at the same session when a sibling before it
             // went away.
-            self.current_session =
-                self.current_session.min(self.projects[p].sessions.len().saturating_sub(1));
+            self.current_session = index_after_removal(self.current_session, six, self.projects[p].sessions.len());
         }
+        self.hovered_session = None;
         window.push_notification(Notification::info(format!("Closed “{title}”")), cx);
         cx.notify();
     }
@@ -455,16 +510,22 @@ impl AppView {
                 focus.focus(window, cx);
                 (AgentStatus::Running, Some(term))
             }
-            Err(err) => (AgentStatus::Error(err.to_string()), None),
+            Err(err) => {
+                self.window_focus.focus(window, cx);
+                window.push_notification(Notification::error(format!("Failed to restart: {err}")), cx);
+                (AgentStatus::Error(err.to_string()), None)
+            },
         };
         if let Some(session) = project.sessions.get_mut(self.current_session) {
             session.status = status;
             session.title = cmd.basename();
             session.term = term;
             session.started = std::time::Instant::now();
-            session.ended = None;
+            session.ended = if session.term.is_none() { Some(std::time::Instant::now()) } else { None };
         }
-        window.push_notification(Notification::info(format!("Restarted “{title}”")), cx);
+        if self.current_term().is_some() {
+            window.push_notification(Notification::info(format!("Restarted “{title}”")), cx);
+        }
         cx.notify();
     }
 
@@ -478,6 +539,7 @@ impl AppView {
             return;
         }
         self.show_sessions = on;
+        self.persist(cx);
         let restore_w = self.last_sidebar_w();
         if !on {
             // Capture before removal: after `remove_panel(0)` slot 0 is
@@ -521,6 +583,7 @@ impl AppView {
         }
         let ix = usize::from(self.show_sessions) + 1;
         self.show_diff = on;
+        self.persist(cx);
         let restore_w = self.last_diff_w();
         if !on {
             // Capture before removal: the slot shifts after `remove_panel`.
@@ -529,7 +592,7 @@ impl AppView {
         // Pin the untouched sidebar across the toggle, like `set_sessions`:
         // `insert_panel`/`remove_panel` would otherwise rescale it.
         let sidebar_w = if self.show_sessions {
-            Some(self.resize_state.read(cx).sizes()[0])
+            self.resize_state.read(cx).sizes().first().copied()
         } else {
             None
         };
@@ -574,6 +637,30 @@ impl AppView {
     }
 
 
+    fn reset_diff(&mut self) {
+        self.diff = None;
+        self.diff_error = None;
+        self.diff_file = 0;
+        self.diff_tree_scroll.set_offset(point(px(0.), px(0.)));
+        self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
+    }
+
+    fn apply_diff(&mut self, result: anyhow::Result<GitDiff>) {
+        let selected = self.diff.as_ref().and_then(|d| d.files.get(self.diff_file)).map(|f| f.path.clone());
+        match result {
+            Ok(diff) => {
+                let next = selected.as_ref().and_then(|path| diff.files.iter().position(|f| &f.path == path)).unwrap_or(0);
+                if selected.as_ref() != diff.files.get(next).map(|f| &f.path) {
+                    self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
+                }
+                self.diff_file = next;
+                self.diff = Some(diff);
+                self.diff_error = None;
+            }
+            Err(err) => { self.diff = None; self.diff_error = Some(err.to_string()); }
+        }
+    }
+
     /// Kick off one diff reload; results newer than any in-flight one win.
     pub(crate) fn reload_diff(&mut self, cx: &mut Context<Self>) {
         self.diff_seq += 1;
@@ -585,7 +672,7 @@ impl AppView {
             if let Err(e) = &result { eprintln!("[ddu] diff err: {e:#}"); }
             let _ = this.update(cx, |v, cx| {
                     if v.diff_seq == seq {
-                    v.diff = result.ok();
+                    v.apply_diff(result);
                     cx.notify();
                 }
             });
@@ -603,14 +690,11 @@ impl AppView {
                     .timer(Duration::from_secs(DIFF_POLL_SECS))
                     .await;
                 let Some(view) = this.upgrade() else { break };
-                let path = view.read_with(cx, |v, _| v.current_project().path.clone());
+                let (path, seq) = view.read_with(cx, |v, _| (v.current_project().path.clone(), v.diff_seq));
                 let result = cx.background_spawn(async move { git::head_diff(&path) }).await;
                 this.update(cx, |v, cx| {
-                    let fresh = result.ok();
-                    // No change → no notify: keeps idle frames at zero
-                    // (poll runs even while the diff panel is hidden).
-                    if v.diff != fresh {
-                        v.diff = fresh;
+                    if v.diff_seq == seq {
+                        v.apply_diff(result);
                         cx.notify();
                     }
                 })?;
@@ -625,7 +709,7 @@ impl AppView {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                let _ = this.update(cx, |_, cx| cx.notify());
+                if this.update(cx, |_, cx| cx.notify()).is_err() { break; }
             }
         })
         .detach();
@@ -637,11 +721,14 @@ impl Render for AppView {
         v_flex()
             .size_full()
             .bg(cx.theme().background)
+            .on_action(cx.listener(|_, _: &OpenSettings, window, cx| ui::settings_dialog::open(window, cx)))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {
+                if window.has_active_dialog(cx) { return; }
                 this.spawn_session(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleDiff, _, cx| this.toggle_diff(cx)))
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| {
+                if window.has_active_dialog(cx) { window.close_dialog(cx); return; }
                 let p = this.current_project;
                 let six = this.current_session;
                 this.request_close_session(p, six, window, cx);
@@ -670,10 +757,10 @@ impl Render for AppView {
                             .size(px(DIFF_DEFAULT))
                             .flex_none()
                             .size_range(px(DIFF_MIN)..px(DIFF_MAX))
-                            .child(ui::diff_panel::render(self, cx)),
+                            .child(ui::diff_panel::render(self, window, cx)),
                     );
                 }
-                group
+                div().flex_1().min_h_0().overflow_hidden().child(group)
             })
             .child(ui::status_bar::render(self, cx))
             // Overlay layers (anchored, no layout impact): dialogs opened via
@@ -683,5 +770,22 @@ impl Render for AppView {
             .children(gpui_kit::component::Root::render_notification_layer(
                 window, cx,
             ))
+    }
+}
+
+/// Preserve the selected identity when an earlier sibling is removed.
+fn index_after_removal(selected: usize, removed: usize, remaining: usize) -> usize {
+    selected.saturating_sub(usize::from(removed < selected)).min(remaining.saturating_sub(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::index_after_removal;
+    #[test]
+    fn removal_keeps_selection_or_nearest_neighbor() {
+        assert_eq!(index_after_removal(2, 0, 3), 1);
+        assert_eq!(index_after_removal(1, 2, 3), 1);
+        assert_eq!(index_after_removal(3, 3, 3), 2);
+        assert_eq!(index_after_removal(0, 0, 0), 0);
     }
 }

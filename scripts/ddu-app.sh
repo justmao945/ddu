@@ -47,4 +47,4 @@ exec "$(dirname "$0")/ddu.bin"
 LAUNCH
 chmod +x "$APP/Contents/MacOS/launch.sh"
 
-DDU_DIR="${DDU_DIR:-$HOME/Code/ddu}" exec open "$APP"
+DDU_DIR="${DDU_DIR:-$HOME/Code/ddu}" exec open "$@" "$APP"

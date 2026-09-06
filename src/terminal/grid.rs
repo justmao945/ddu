@@ -3,7 +3,7 @@
 //! bytes into the grid and a waiter that reports the exit status.
 
 use std::io::Read;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use alacritty_terminal::event::{Event, EventListener};
@@ -42,6 +42,7 @@ pub struct EventProxy {
     writer: PtyWriter,
     wake: async_channel::Sender<PumpMsg>,
     meta: Arc<Mutex<TermMeta>>,
+    dark: Arc<AtomicBool>,
 }
 
 impl EventProxy {
@@ -54,16 +55,24 @@ impl EventProxy {
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
+            Event::ColorRequest(index, format) => {
+                if let Some(color) = query_color(index, self.dark.load(Ordering::Relaxed)) {
+                    self.writer.write(format(color).as_bytes());
+                }
+            }
             Event::PtyWrite(text) => self.writer.write(text.as_bytes()),
             Event::Title(title) => {
                 self.meta.lock().title = Some(title);
                 self.wake();
             }
+            Event::ResetTitle => {
+                self.meta.lock().title = None;
+                self.wake();
+            }
             Event::Wakeup
             | Event::Bell
             | Event::MouseCursorDirty
-            | Event::CursorBlinkingChange
-            | Event::ResetTitle => self.wake(),
+            | Event::CursorBlinkingChange => self.wake(),
             // Cell-size (CSI 14t/18t) and clipboard (OSC 52) queries are
             // not answered yet; agent CLIs do not depend on them.
             _ => {}
@@ -99,6 +108,7 @@ pub struct TermGrid {
     pub writer: PtyWriter,
     /// Epoch ms of the last PTY read; drives the "agent is working" spinner.
     pub activity: Arc<AtomicU64>,
+    pub dark: Arc<AtomicBool>,
     cols: u16,
     rows: u16,
 }
@@ -107,13 +117,14 @@ impl TermGrid {
     pub fn new(cols: u16, rows: u16, writer: PtyWriter, wake: async_channel::Sender<PumpMsg>) -> Self {
         let activity = Arc::new(AtomicU64::new(now_ms()));
         let meta = Arc::new(Mutex::new(TermMeta::default()));
-        let proxy = EventProxy { writer: writer.clone(), wake, meta: meta.clone() };
+        let dark = Arc::new(AtomicBool::new(true));
+        let proxy = EventProxy { writer: writer.clone(), wake, meta: meta.clone(), dark: dark.clone() };
         let term = Arc::new(FairMutex::new(Term::new(
             Config::default(),
             &GridDims { cols, rows },
             proxy,
         )));
-        Self { term, meta, writer, activity, cols, rows }
+        Self { term, meta, writer, activity, dark, cols, rows }
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -201,9 +212,11 @@ pub fn spawn_session(
     cols: u16,
     rows: u16,
     wake: async_channel::Sender<PumpMsg>,
+    dark: bool,
 ) -> anyhow::Result<(TermGrid, PtyProcess)> {
     let (process, reader, child) = PtyProcess::spawn(cmd, cols, rows)?;
     let grid = TermGrid::new(cols, rows, process.writer().clone(), wake.clone());
+    grid.dark.store(dark, Ordering::Relaxed);
     spawn_pump(grid.term.clone(), wake, grid.activity.clone(), reader, child);
     Ok((grid, process))
 }
@@ -254,7 +267,7 @@ mod tests {
             args: vec![],
             cwd: std::env::temp_dir(),
         };
-        let (grid, _process) = spawn_session(&cmd, 80, 24, wake).expect("spawn sh");
+        let (grid, _process) = spawn_session(&cmd, 80, 24, wake, true).expect("spawn sh");
 
         assert!(
             wait_until(&grid.term, "$", Duration::from_secs(5)),
@@ -334,4 +347,48 @@ pub(crate) fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// OSC 10/11/12 replies use the same default colors as the painter.
+fn query_color(index: usize, dark: bool) -> Option<alacritty_terminal::vte::ansi::Rgb> {
+    use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
+    let value = if index == NamedColor::Background as usize {
+        if dark { 0x282c34 } else { 0xfafafa }
+    } else if index == NamedColor::Foreground as usize || index == NamedColor::Cursor as usize {
+        if dark { 0xabb2bf } else { 0x2a2c33 }
+    } else { return None; };
+    Some(Rgb { r: (value >> 16) as u8, g: (value >> 8) as u8, b: value as u8 })
+}
+
+#[cfg(test)]
+mod color_query_tests {
+    use super::*;
+
+    #[test]
+    fn osc_queries_reply_and_follow_theme_changes() {
+        #[derive(Clone)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let capture = Capture(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let (wake, _rx) = async_channel::bounded(1);
+        let grid = TermGrid::new(80, 24, PtyWriter::test_writer(capture.clone()), wake);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        for (dark, expected) in [
+            (true, "\x1b]10;rgb:abab/b2b2/bfbf\x1b\\\x1b]11;rgb:2828/2c2c/3434\x1b\\"),
+            (false, "\x1b]10;rgb:2a2a/2c2c/3333\x1b\\\x1b]11;rgb:fafa/fafa/fafa\x1b\\"),
+        ] {
+            grid.dark.store(dark, Ordering::Relaxed);
+            capture.0.lock().unwrap().clear();
+            for byte in b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\" {
+                parser.advance(&mut *grid.term.lock(), *byte);
+            }
+            assert_eq!(&*capture.0.lock().unwrap(), expected.as_bytes());
+        }
+    }
 }

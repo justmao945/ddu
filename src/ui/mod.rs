@@ -51,3 +51,8 @@ pub(crate) fn selection_bg(cx: &App) -> Hsla {
 pub(crate) fn hover_bg(cx: &App) -> Hsla {
     cx.theme().foreground.opacity(0.04)
 }
+
+/// Keep the selected row visibly selected while hovering.
+pub(crate) fn selection_hover_bg(cx: &App) -> Hsla {
+    cx.theme().foreground.opacity(0.16)
+}
