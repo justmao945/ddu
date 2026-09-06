@@ -17,8 +17,11 @@ use crate::session::{AgentSession, AgentStatus};
 const SESSION_ROW_PX: f32 = 40.;
 
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
-    // No panel header: the project tree fills the column; project
-    // creation lives in the status strip below (see `status_bar`).
+    // Two layers split by a draggable divider: the project/session
+    // tree on top (takes the leftover height), the diff file tree
+    // below (capped height, collapsible via the status-strip button).
+    // Project creation lives in the status strip below (see
+    // `status_bar`).
     v_flex()
         .h_full()
         .w_full()
@@ -31,7 +34,38 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
             MouseButton::Left,
             cx.listener(|this, _, window, cx| this.window_focus.focus(window, cx)),
         )
-        .child(tree(this, cx))
+        .child(
+            v_resizable("sidebar-split")
+                .with_state(&this.sidebar_split_state)
+                // Project tree: flexes to whatever the diff-tree layer
+                // leaves.
+                .child(
+                    resizable_panel().child(
+                        div()
+                            .size_full()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(tree(this, cx)),
+                    ),
+                )
+                // Diff tree: sized + `flex_none` so it holds its
+                // height while the tree above absorbs the rest;
+                // `visible` keeps the splitter's panel indices stable
+                // across toggles.
+                .child(
+                    resizable_panel()
+                        .size(
+                            this.diff_tree_height_seed
+                                .unwrap_or(px(super::diff_tree::TREE_DEFAULT_H)),
+                        )
+                        .size_range(
+                            px(super::diff_tree::TREE_MIN_H)..px(super::diff_tree::TREE_MAX_H),
+                        )
+                        .flex_none()
+                        .visible(this.show_diff_tree)
+                        .child(super::diff_tree::render(this, cx)),
+                ),
+        )
 }
 
 fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {

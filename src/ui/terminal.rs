@@ -440,6 +440,7 @@ fn exited_banner(
 /// Empty center pane: no session in this project. Tracks a handle so the
 /// window keeps a focus chain and global shortcuts keep working.
 fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    let has_session = this.current_session().is_some();
     let error = this.current_session().and_then(|s| match &s.status {
         crate::session::AgentStatus::Error(error) => Some(error.clone()),
         _ => None,
@@ -467,6 +468,9 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
             "Unable to start session".to_string()
         } else if can_resume {
             format!("{resumed_label} — resume the conversation?")
+        } else if has_session {
+            // Restored row with no session id to resume — restart it.
+            resumed_label
         } else {
             "No sessions in this project".to_string()
         })
@@ -474,26 +478,23 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
             el.child(div().max_w(px(480.)).child(error))
         })
         .children((0..1).filter_map(move |_| {
-            let label = if error.is_some() {
-                "Retry"
+            let (label, action) = if error.is_some() {
+                ("Retry", 0)
             } else if can_resume {
-                "Resume"
+                ("Resume", 1)
+            } else if has_session {
+                ("Restart", 2)
             } else {
-                "New session"
+                ("New session", 3)
             };
-            let has_error = error.is_some();
             Some(
                 Button::new("empty-session-action")
                     .tab_stop(false)
                     .label(label)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if has_error {
-                            this.restart_current_session(window, cx);
-                        } else if can_resume {
-                            this.resume_current_session(window, cx);
-                        } else {
-                            this.spawn_session(window, cx);
-                        }
+                    .on_click(cx.listener(move |this, _, window, cx| match action {
+                        0 | 2 => this.restart_current_session(window, cx),
+                        1 => this.resume_current_session(window, cx),
+                        _ => this.spawn_session(window, cx),
                     })),
             )
         }))

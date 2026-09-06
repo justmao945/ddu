@@ -19,7 +19,13 @@ use crate::app::AppView;
 
 pub(crate) fn render_sidebar(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     StatusBar::new()
-        .left(h_flex().items_center().child(toggle_sessions(this, cx)))
+        .left(
+            h_flex()
+                .items_center()
+                .gap_0p5()
+                .child(toggle_sessions(this, cx))
+                .child(toggle_diff_tree(this, cx)),
+        )
         .right(
             h_flex().items_center().child(
                 Button::new("add-project")
@@ -39,7 +45,13 @@ pub(crate) fn render_center(this: &AppView, cx: &mut Context<AppView>) -> impl I
     let mut bar = StatusBar::new();
     // A hidden panel's toggle moves here so it stays reachable.
     if !this.show_sessions {
-        bar = bar.left(h_flex().items_center().child(toggle_sessions(this, cx)));
+        bar = bar.left(
+            h_flex()
+                .items_center()
+                .gap_0p5()
+                .child(toggle_sessions(this, cx))
+                .child(toggle_diff_tree(this, cx)),
+        );
     }
     bar.right(h_flex().items_center().child(toggle_diff(this, cx)))
 }
@@ -70,4 +82,19 @@ fn toggle_diff(this: &AppView, cx: &mut Context<AppView>) -> Button {
         .small()
         .tooltip("Toggle changes (⌘R)")
         .on_click(cx.listener(|this, _, _, cx| this.toggle_diff(cx)))
+}
+
+/// Collapse/expand the diff file tree layer under the project tree.
+fn toggle_diff_tree(this: &AppView, cx: &mut Context<AppView>) -> Button {
+    Button::new("toggle-diff-tree")
+        .tab_stop(false)
+        .icon(if this.show_diff_tree {
+            IconName::PanelBottom
+        } else {
+            IconName::PanelBottomOpen
+        })
+        .ghost()
+        .small()
+        .tooltip("Toggle file tree")
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_tree(cx)))
 }

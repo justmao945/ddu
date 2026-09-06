@@ -108,28 +108,30 @@ pub struct Config {
 
 // ── state.json ────────────────────────────────────────────────────────
 
-/// Persisted project entry (sessions themselves are ephemeral).
+/// Persisted project entry: the full session list survives a restart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectConfig {
     pub name: String,
     pub path: PathBuf,
     #[serde(default = "default_true")]
     pub expanded: bool,
-    /// The last agent run's resume hint, restored as a Done session row
-    /// after an app restart so the conversation can be picked up.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_agent: Option<SavedAgent>,
+    /// The project's session rows, in sidebar order. Agents carry a
+    /// resume id so the conversation can be picked up; shell rows
+    /// respawn fresh.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<SavedSession>,
 }
 
-/// Minimal snapshot of a finished agent run, enough to offer Resume.
+/// One restored session row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SavedAgent {
-    /// Launcher kind (`claude`/`codex`/`omp`/custom name).
+pub struct SavedSession {
+    /// Launcher kind (`terminal`/`claude`/`codex`/`omp`/custom name).
     pub kind: String,
-    /// Agent session id for `--resume`.
-    pub resume_id: String,
-    /// Title for the restored row (the command's label).
+    /// Row title (the live OSC title for agents, program name for shells).
     pub title: String,
+    /// Agent session id for `--resume`; `None` for shell rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -163,6 +165,9 @@ pub struct State {
     /// restart — it seeds the restored default.
     #[serde(default = "default_true")]
     pub show_diff: bool,
+    /// Last diff file-tree layer visibility in the sidebar.
+    #[serde(default = "default_true")]
+    pub show_diff_tree: bool,
     /// Per-project right-pane state: the diff selection, tree collapse
     /// state and tree/content split height are project-local concerns —
     /// they mean nothing once the working tree changes or the project

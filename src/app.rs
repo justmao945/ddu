@@ -16,7 +16,7 @@ use crate::diff::{GitDiff, git};
 use crate::session::{AgentStatus, Project, initial_projects};
 use crate::terminal::{TermEvent, TermSession};
 use crate::ui;
-use crate::ui::diff_panel::{FILE_TREE_MAX_H, FILE_TREE_MIN_H};
+use crate::ui::diff_tree::{TREE_MAX_H, TREE_MIN_H};
 
 // Global keyboard actions: new session, dock toggles, close session.
 gpui_kit::actions!(
@@ -68,11 +68,13 @@ pub struct AppView {
     /// [terminal | changes]. It ends above the region's unified status
     /// strip, so this divider never cuts through it (see `set_diff`).
     pub(crate) panes_state: Entity<ResizableState>,
-    /// Project row currently under the mouse (hides/reveals its buttons).
     pub(crate) diff_tree_scroll: ScrollHandle,
     pub(crate) diff_hunks_scroll: ScrollHandle,
-    /// Vertical splitter between the diff tree and the file content.
-    pub(crate) diff_split_state: Entity<ResizableState>,
+    /// The sidebar's vertical split: [project tree | diff tree layer].
+    pub(crate) sidebar_split_state: Entity<ResizableState>,
+    /// Whether the diff file tree layer is shown under the project
+    /// tree in the sidebar.
+    pub(crate) show_diff_tree: bool,
     /// Directory paths collapsed in the diff tree (all default open).
     pub(crate) diff_tree_closed: std::collections::HashSet<String>,
     pub(crate) hovered_project: Option<usize>,
@@ -162,7 +164,7 @@ impl AppView {
 
         let cfg = cx.global::<crate::config::Config>().clone();
         let state = cx.global::<crate::config::State>().clone();
-        let mut projects: Vec<Project> = if state.projects.is_empty() {
+        let projects: Vec<Project> = if state.projects.is_empty() {
             initial_projects()
         } else {
             state
@@ -182,35 +184,6 @@ impl AppView {
             }
         }
         let window_focus = cx.focus_handle().tab_stop(false);
-        // Rebuild each project's finished agent row from the persisted
-        // resume hint: after an app restart the row is a Done session
-        // with no live PTY — clicking its Resume button re-spawns the
-        // agent with `--resume <id>`.
-        for (ix, project) in projects.iter_mut().enumerate() {
-            let Some(saved) = state.projects.get(ix).and_then(|p| p.last_agent.clone()) else {
-                continue;
-            };
-            let saved_kind = saved.kind.clone();
-            let cmd = cx
-                .global::<crate::config::Config>()
-                .cmd_for(&saved_kind)
-                .ok();
-            if let Some(cmd) = cmd {
-                project.sessions.push(crate::session::AgentSession {
-                    id: format!("restored-{ix}"),
-                    title: saved.title.clone(),
-                    status: AgentStatus::Done(0),
-                    cmd: cmd.with_resume(saved.resume_id),
-                    kind: saved_kind,
-                    started: std::time::Instant::now(),
-                    ended: Some(std::time::Instant::now()),
-                    term: None,
-                    // Seed the restored row with the diff visibility
-                    // saved when the previous run quit.
-                    show_diff: state.show_diff,
-                });
-            }
-        }
         let current_project = state.current_project.min(projects.len().saturating_sub(1));
         let mut this = Self {
             window_focus,
@@ -226,7 +199,8 @@ impl AppView {
             panes_state: cx.new(|_| ResizableState::default()),
             diff_tree_scroll: ScrollHandle::new(),
             diff_hunks_scroll: ScrollHandle::new(),
-            diff_split_state: cx.new(|_| ResizableState::default()),
+            sidebar_split_state: cx.new(|_| ResizableState::default()),
+            show_diff_tree: state.show_diff_tree,
             diff_tree_closed: HashSet::new(),
             hovered_project: None,
             hovered_session: None,
@@ -258,9 +232,7 @@ impl AppView {
         this.diff_tree_height_seed = project_state
             .and_then(|s| s.tree_height)
             .map(gpui::px)
-            .filter(|h| {
-                h.as_f32() >= FILE_TREE_MIN_H as f32 && h.as_f32() <= FILE_TREE_MAX_H as f32
-            });
+            .filter(|h| h.as_f32() >= TREE_MIN_H as f32 && h.as_f32() <= TREE_MAX_H as f32);
         this.window_focus.focus(window, cx);
         this.start_diff_poll(cx);
         this.start_ui_tick(cx);
@@ -301,10 +273,10 @@ impl AppView {
             )
             .detach();
         }
-        // Tree/content splitter drags: persist the tree pane height and
-        // clear the seed so it can't fight a later live resize.
+        // Sidebar splitter drags: persist the diff-tree layer height
+        // and clear the seed so it can't fight a later live resize.
         cx.subscribe_in(
-            &this.diff_split_state,
+            &this.sidebar_split_state,
             window,
             move |_, _, _: &ResizablePanelEvent, _, cx| {
                 cx.spawn(async move |this, cx| {
@@ -327,32 +299,35 @@ impl AppView {
                 true
             });
         }
-        // First session for the first project, honoring the configured
-        // default launcher — unless the saved selection is a restored
-        // agent row (Done + a persisted `--resume <id>`): auto-resume
-        // it instead of idling on a Resume button, and skip the extra
-        // default shell so reopening never accumulates stray rows.
-        let restored = this.projects[this.current_project]
-            .sessions
-            .get(state.current_session)
-            .is_some_and(|s| {
-                s.term.is_none()
-                    && s.cmd.resume.is_some()
-                    && matches!(s.status, AgentStatus::Done(_))
-            });
-        if restored {
-            this.current_session = state.current_session;
-            cx.defer_in(window, |this, window, cx| {
-                this.resume_current_session(window, cx);
-            });
+        // Restore the persisted session lists (agents as restartable
+        // Done rows, shells live in the open project); the saved
+        // selection then decides whether the window resumes an agent
+        // or lands on a live shell. With nothing saved, fall back to
+        // the configured default launcher.
+        if state.projects.iter().any(|p| !p.sessions.is_empty()) {
+            this.restore_sessions(&state, window, cx);
+            if this.projects[this.current_project].sessions.is_empty() {
+                this.spawn_session_of(&cfg.new_session.kind, window, cx);
+            } else {
+                let n = this.projects[this.current_project].sessions.len();
+                this.current_session = state.current_session.min(n.saturating_sub(1));
+                let selected = this.current_session().cloned();
+                let resumes = selected.is_some_and(|s| {
+                    s.term.is_none()
+                        && s.cmd.resume.is_some()
+                        && matches!(s.status, AgentStatus::Done(_))
+                });
+                if resumes {
+                    cx.defer_in(window, |this, window, cx| {
+                        this.resume_current_session(window, cx);
+                    });
+                } else if let Some(term) = this.current_term() {
+                    let focus = term.read(cx).focus.clone();
+                    focus.focus(window, cx);
+                }
+            }
         } else {
             this.spawn_session_of(&cfg.new_session.kind, window, cx);
-            // Restore the last-selected session. `spawn_session_of` makes
-            // the fresh session current; if the saved index still exists
-            // in the restored rows, prefer it so the window reopens
-            // where the user left off.
-            let n = this.projects[this.current_project].sessions.len();
-            this.current_session = state.current_session.min(n.saturating_sub(1));
         }
         this
     }
@@ -400,9 +375,10 @@ impl AppView {
                 .unwrap_or_default();
             self.diff_seed_path = entry.selected_file.clone();
             self.diff_tree_closed = entry.closed_dirs.iter().cloned().collect();
-            self.diff_tree_height_seed = entry.tree_height.map(gpui::px).filter(|h| {
-                h.as_f32() >= FILE_TREE_MIN_H as f32 && h.as_f32() <= FILE_TREE_MAX_H as f32
-            });
+            self.diff_tree_height_seed = entry
+                .tree_height
+                .map(gpui::px)
+                .filter(|h| h.as_f32() >= TREE_MIN_H as f32 && h.as_f32() <= TREE_MAX_H as f32);
         }
         self.current_project = project;
         let n = self.projects[project].sessions.len();
@@ -582,9 +558,8 @@ impl AppView {
         snapshot.sidebar_width = self.last_sidebar_size.map(|w| w.as_f32());
         snapshot.diff_width = self.last_diff_size.map(|w| w.as_f32());
         snapshot.current_project = self.current_project;
-        snapshot.current_session = self.current_session;
         snapshot.show_diff = self.show_diff;
-        let old_projects = &snapshot.projects;
+        snapshot.show_diff_tree = self.show_diff_tree;
         snapshot.projects = self
             .projects
             .iter()
@@ -593,12 +568,22 @@ impl AppView {
                 name: p.name.clone(),
                 path: p.path.clone(),
                 expanded: *ex,
-                // Keep the resume hint of a project whose path matches;
-                // it was written when the agent exited.
-                last_agent: old_projects
+                // The whole session list survives the restart. The
+                // resume id comes from the agent's captured output
+                // (the live id beats a stale command hint).
+                sessions: p
+                    .sessions
                     .iter()
-                    .find(|op| op.path == p.path)
-                    .and_then(|op| op.last_agent.clone()),
+                    .map(|s| crate::config::SavedSession {
+                        kind: s.kind.clone(),
+                        title: s.title.clone(),
+                        resume: s
+                            .term
+                            .as_ref()
+                            .and_then(|t| t.read(cx).resume_id().map(String::from))
+                            .or_else(|| s.cmd.resume.clone()),
+                    })
+                    .collect(),
             })
             .collect();
         let path = self.current_project().path.to_string_lossy().to_string();
@@ -612,14 +597,20 @@ impl AppView {
             .and_then(|d| d.files.get(self.diff_file))
             .map(|f| f.path.clone())
             .or_else(|| self.diff_seed_path.clone());
-        entry.closed_dirs = self.diff_tree_closed.iter().cloned().collect();
-        entry.tree_height = self
-            .diff_split_state
-            .read(cx)
-            .sizes()
-            .first()
-            .copied()
-            .map(|h| h.as_f32());
+        // The diff-tree layer is the sidebar splitter's second panel.
+        // While the layer is hidden the splitter reports placeholder
+        // sizes — keep the last visible height instead.
+        entry.tree_height = if self.show_diff_tree {
+            self.sidebar_split_state
+                .read(cx)
+                .sizes()
+                .get(1)
+                .copied()
+                .filter(|h| *h > px(0.))
+                .map(|h| h.as_f32())
+        } else {
+            entry.tree_height
+        };
         // Stale state for removed projects must not accumulate.
         let live: std::collections::BTreeSet<_> = self
             .projects
@@ -631,6 +622,99 @@ impl AppView {
             crate::config::report_error(err, cx);
         }
         cx.set_global(snapshot);
+    }
+
+    /// Rebuild every project's session rows from the persisted
+    /// snapshot. Agents restore as `Done` rows carrying their resume
+    /// id (the selected one auto-resumes from [`Self::new`]); shell
+    /// rows respawn live in the project the window opens on — a shell
+    /// persists nothing but its existence, so a fresh one matches the
+    /// pre-close state — and idle as restartable `Done` rows in the
+    /// other projects. Rows whose launcher kind was removed from the
+    /// settings are dropped; the selection clamps to what remains.
+    fn restore_sessions(
+        &mut self,
+        state: &crate::config::State,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.current_project;
+        let mut seq = self.session_seq;
+        for (ix, project) in self.projects.iter_mut().enumerate() {
+            let Some(saved) = state.projects.get(ix).map(|p| p.sessions.clone()) else {
+                continue;
+            };
+            for s in saved {
+                let cmd = match cx.global::<crate::config::Config>().cmd_for(&s.kind) {
+                    Ok(cmd) => cmd,
+                    Err(_) => continue,
+                };
+                seq += 1;
+                let now = std::time::Instant::now();
+                if s.kind == "terminal" {
+                    let live = ix == current;
+                    let (status, term) = if live {
+                        let cwd = project.path.clone();
+                        match TermSession::spawn(&cmd.spec(&cwd), cx) {
+                            Ok(term) => {
+                                let program = cmd.program.clone();
+                                cx.subscribe_in(
+                                    &term,
+                                    window,
+                                    move |this, emitter, event: &TermEvent, window, cx| match event
+                                    {
+                                        TermEvent::Wakeup => cx.notify(),
+                                        TermEvent::Exit(code) => this.on_session_exit(
+                                            emitter.clone(),
+                                            *code,
+                                            &program,
+                                            window,
+                                            cx,
+                                        ),
+                                    },
+                                )
+                                .detach();
+                                (AgentStatus::Running, Some(term))
+                            }
+                            Err(err) => {
+                                eprintln!("[ddu] Failed to restore {}: {err}", cmd.label());
+                                (AgentStatus::Error(err.to_string()), None)
+                            }
+                        }
+                    } else {
+                        (AgentStatus::Done(0), None)
+                    };
+                    project.sessions.push(crate::session::AgentSession {
+                        id: format!("restored-{ix}-{seq}"),
+                        title: s.title.clone(),
+                        status,
+                        cmd,
+                        kind: s.kind,
+                        started: now,
+                        ended: if term.is_none() { Some(now) } else { None },
+                        term,
+                        show_diff: state.show_diff,
+                    });
+                } else {
+                    let cmd = match &s.resume {
+                        Some(id) => cmd.with_resume(id.clone()),
+                        None => cmd,
+                    };
+                    project.sessions.push(crate::session::AgentSession {
+                        id: format!("restored-{ix}-{seq}"),
+                        title: s.title.clone(),
+                        status: AgentStatus::Done(0),
+                        cmd,
+                        kind: s.kind,
+                        started: now,
+                        ended: Some(now),
+                        term: None,
+                        show_diff: state.show_diff,
+                    });
+                }
+            }
+        }
+        self.session_seq = seq;
     }
 
     /// Menu entry point for removing a project: silent when fine, an
@@ -711,33 +795,21 @@ impl AppView {
         };
         let ended = std::time::Instant::now();
         let mut matched = false;
-        let mut agent_hint: Option<(usize, String, String)> = None; // (project, kind, title)
-        for (p_ix, project) in self.projects.iter_mut().enumerate() {
+        for project in self.projects.iter_mut() {
             for session in project.sessions.iter_mut() {
                 if session.term.as_ref() == Some(&emitter) {
                     matched = true;
                     session.status = status.clone();
                     session.ended = Some(ended);
-                    // Capture the resume hint for the sidebar row and
-                    // the state snapshot (agents only — shells need no
-                    // resume).
-                    if session.is_agent()
-                        && let Some(id) = session
-                            .term
-                            .as_ref()
-                            .and_then(|t| t.read(cx).resume_id().map(String::from))
-                    {
-                        agent_hint = Some((p_ix, session.kind.clone(), id));
-                    }
+                    // The resume id stays on the term; `persist` reads
+                    // it from there when saving the session list.
                 }
             }
         }
-        if !matched {
-            return;
-        }
-        if let Some((p_ix, kind, resume_id)) = agent_hint {
-            let title = format!("{} · finished", kind);
-            self.persist_last_agent(p_ix, kind, resume_id, title, cx);
+        if matched {
+            // The list (including the freshly captured resume id) is
+            // saved right away: a crash or kill -9 must not lose it.
+            self.persist(cx);
         }
         cx.notify();
     }
@@ -922,31 +994,6 @@ impl AppView {
         cx.notify();
     }
 
-    /// Write the finished agent's resume hint into the state snapshot
-    /// (per-project `last_agent`) and save.
-    fn persist_last_agent(
-        &self,
-        project: usize,
-        kind: String,
-        resume_id: String,
-        title: String,
-        cx: &mut App,
-    ) {
-        let mut snapshot = cx.global::<crate::config::State>().clone();
-        let Some(entry) = snapshot.projects.get_mut(project) else {
-            return;
-        };
-        entry.last_agent = Some(crate::config::SavedAgent {
-            kind,
-            resume_id,
-            title,
-        });
-        if let Err(err) = snapshot.save() {
-            crate::config::report_error(err, cx);
-        }
-        cx.set_global(snapshot);
-    }
-
     /// Toggle the sidebar, keeping the splitter slot list in sync.
     pub(crate) fn toggle_sessions(&mut self, cx: &mut Context<Self>) {
         self.set_sessions(!self.show_sessions, cx);
@@ -979,6 +1026,13 @@ impl AppView {
     /// Toggle the diff panel (slot sits after the always-present center).
     pub(crate) fn toggle_diff(&mut self, cx: &mut Context<Self>) {
         self.set_diff(!self.show_diff, cx);
+    }
+
+    /// Toggle the diff file tree layer under the project tree.
+    pub(crate) fn toggle_diff_tree(&mut self, cx: &mut Context<Self>) {
+        self.show_diff_tree = !self.show_diff_tree;
+        self.persist(cx);
+        cx.notify();
     }
 
     pub(crate) fn set_diff(&mut self, on: bool, cx: &mut Context<Self>) {
