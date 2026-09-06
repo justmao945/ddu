@@ -131,6 +131,10 @@ pub struct AgentSession {
     pub ended: Option<Instant>,
     /// Live terminal; `None` while the process failed to spawn.
     pub term: Option<Entity<TermSession>>,
+    /// This session's diff-panel visibility. Per-session: each session
+    /// remembers whether the changes panel was open when last shown,
+    /// so switching sessions restores that session's own layout.
+    pub show_diff: bool,
 }
 
 impl AgentSession {

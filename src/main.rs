@@ -104,7 +104,11 @@ fn main() {
         // Must be first, before using any component features.
         gpui_kit::init(cx);
         let (config, state, warnings) = config::load_all();
-        cx.set_global(config::StartupWarnings(warnings));
+        // Load-time problems (corrupt files, failed backups) go to
+        // stderr: no GUI toast, so this is the durable channel.
+        for w in &warnings {
+            eprintln!("[ddu] {w}");
+        }
         // Keep globals loaded even if no window opens (dock reopen
         // path), so a re-created AppView reads the same settings.
         cx.set_global(config.clone());

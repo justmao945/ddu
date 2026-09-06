@@ -178,16 +178,6 @@ impl TermSession {
         self.resume_id.as_deref()
     }
 
-    /// True when the PTY delivered bytes within `window` — the "agent is
-    /// producing output" signal behind the sidebar spinner.
-    pub fn active_within(&self, window: Duration) -> bool {
-        let last = self
-            .grid
-            .activity
-            .load(std::sync::atomic::Ordering::Relaxed);
-        grid::now_ms().saturating_sub(last) <= window.as_millis() as u64
-    }
-
     /// Terminal-set window title (OSC 0), if any.
     pub fn title(&self) -> Option<String> {
         self.grid.meta.lock().title.clone()

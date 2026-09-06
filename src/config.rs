@@ -145,8 +145,6 @@ pub struct State {
     pub projects: Vec<ProjectConfig>,
     #[serde(default)]
     pub hidden_sessions: bool,
-    #[serde(default)]
-    pub show_diff: bool,
     /// Sidebar width (px), clamped by the panel min/max on restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_width: Option<f32>,
@@ -177,13 +175,6 @@ pub struct ProjectState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree_height: Option<f32>,
 }
-
-/// Load-time persistence warnings, drained by the main view and shown
-/// as notifications once the window exists (load happens before any
-/// window can display anything).
-#[derive(Default)]
-pub struct StartupWarnings(pub Vec<String>);
-impl gpui_kit::Global for StartupWarnings {}
 
 // ── load / save ───────────────────────────────────────────────────────
 
@@ -279,22 +270,11 @@ impl State {
     }
 }
 
-/// Surface a persistence error: always to stderr, and — best effort —
-/// as a notification in the first live window (there may be none, e.g.
-/// while re-opening from the dock).
-pub fn report_error(err: String, cx: &mut gpui_kit::App) {
+/// Surface a persistence error on stderr. There may be no window at
+/// save time (e.g. while re-opening from the dock), so a GUI toast is
+/// not a reliable channel; stderr is the durable one.
+pub fn report_error(err: String, _cx: &mut gpui_kit::App) {
     eprintln!("[ddu] {err}");
-    if let Some(handle) = cx.windows().into_iter().next() {
-        let _ = handle.update(cx, |_, window, cx| {
-            use gpui_kit::component::WindowExt as _;
-            window.push_notification(
-                gpui_kit::component::notification::Notification::error(format!(
-                    "Failed to save: {err}"
-                )),
-                cx,
-            );
-        });
-    }
 }
 
 /// Read and parse a JSON value. A missing file is a normal first run and

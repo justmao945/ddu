@@ -9,7 +9,6 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::*;
 use gpui_kit::*;
 
@@ -199,6 +198,7 @@ impl AppView {
                     started: std::time::Instant::now(),
                     ended: Some(std::time::Instant::now()),
                     term: None,
+                    show_diff: true,
                 });
             }
         }
@@ -210,7 +210,7 @@ impl AppView {
             current_project,
             current_session: 0,
             show_sessions: !state.hidden_sessions,
-            show_diff: state.show_diff,
+            show_diff: true,
             resize_state: cx.new(|_| ResizableState::default()),
             diff_tree_scroll: ScrollHandle::new(),
             diff_hunks_scroll: ScrollHandle::new(),
@@ -302,26 +302,6 @@ impl AppView {
             },
         )
         .detach();
-        // Persistence problems discovered at load (corrupt backup,
-        // migration, save failures): show them once the window exists
-        // AND the Root layer is mounted (push_notification resolves the
-        // Root at call time — AppView::new runs before Root::new).
-        let startup_warnings = cx.global::<crate::config::StartupWarnings>().0.clone();
-        if !startup_warnings.is_empty() {
-            cx.spawn(async move |this, cx| {
-                // A few frames: the window + Root mount happens in the
-                // same tick as AppView::new; this runs after.
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(50))
-                    .await;
-                let _ = this.update_in(cx, |_, window, cx| {
-                    for warning in &startup_warnings {
-                        window.push_notification(Notification::warning(warning.clone()), cx);
-                    }
-                });
-            })
-            .detach();
-        }
         // First session for the first project, honoring the configured
         // default launcher.
         this.spawn_session_of(&cfg.new_session.kind, window, cx);
@@ -348,6 +328,16 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let changed_project = self.current_project != project;
+        // Write the outgoing session's diff visibility back onto it:
+        // the panel state is per-session and must survive a switch.
+        let old_show = self.show_diff;
+        if let Some(old) = self
+            .projects
+            .get_mut(self.current_project)
+            .and_then(|p| p.sessions.get_mut(self.current_session))
+        {
+            old.show_diff = old_show;
+        }
         if changed_project {
             // Save the outgoing project's placement state, then adopt
             // the incoming one from the global snapshot.
@@ -368,6 +358,18 @@ impl AppView {
         self.current_project = project;
         let n = self.projects[project].sessions.len();
         self.current_session = session.min(n.saturating_sub(1));
+        // Adopt the incoming session's diff visibility. `set_diff`
+        // writes the value back to (now-)current session — the same
+        // value, so the round-trip is idempotent.
+        let adopt = self
+            .projects
+            .get(project)
+            .and_then(|p| p.sessions.get(self.current_session))
+            .map(|s| s.show_diff)
+            .unwrap_or(true);
+        if adopt != self.show_diff {
+            self.set_diff(adopt, cx);
+        }
         if changed_project {
             self.reset_diff();
             self.reload_diff(cx);
@@ -403,7 +405,7 @@ impl AppView {
             Ok(cmd) => cmd,
             Err(err) => {
                 self.window_focus.focus(window, cx);
-                window.push_notification(Notification::error(err.to_string()), cx);
+                eprintln!("[ddu] Cannot launch {kind}: {err}");
                 return;
             }
         };
@@ -434,10 +436,7 @@ impl AppView {
                 (AgentStatus::Running, Some(term))
             }
             Err(err) => {
-                window.push_notification(
-                    Notification::error(format!("Failed to start {}: {err}", cmd.label())),
-                    cx,
-                );
+                eprintln!("[ddu] Failed to start {}: {err}", cmd.label());
                 (AgentStatus::Error(err.to_string()), None)
             }
         };
@@ -458,6 +457,10 @@ impl AppView {
                     None
                 },
                 term,
+                // New sessions inherit the panel state of the session
+                // they replace (the common "new terminal, same
+                // workspace" flow) instead of snapping to a default.
+                show_diff: self.show_diff,
             });
             self.current_session = project.sessions.len() - 1;
         }
@@ -524,7 +527,6 @@ impl AppView {
     pub(crate) fn persist(&self, cx: &mut App) {
         let mut snapshot = cx.global::<crate::config::State>().clone();
         snapshot.hidden_sessions = !self.show_sessions;
-        snapshot.show_diff = self.show_diff;
         snapshot.sidebar_width = self.last_sidebar_size.map(|w| w.as_f32());
         snapshot.diff_width = self.last_diff_size.map(|w| w.as_f32());
         snapshot.current_project = self.current_project;
@@ -644,8 +646,8 @@ impl AppView {
         &mut self,
         emitter: Entity<TermSession>,
         code: i32,
-        program: &str,
-        window: &mut Window,
+        _program: &str,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let status = match code {
@@ -683,27 +685,6 @@ impl AppView {
             let title = format!("{} · finished", kind);
             self.persist_last_agent(p_ix, kind, resume_id, title, cx);
         }
-        // Only agents merit a toast: the exit banner already covers the
-        // terminal, and a shell exits every time the user types `exit`.
-        let is_agent = self
-            .projects
-            .iter()
-            .flat_map(|p| p.sessions.iter())
-            .any(|s| s.term.as_ref() == Some(&emitter) && s.is_agent());
-        if !is_agent {
-            cx.notify();
-            return;
-        }
-        let message = match code {
-            0 => format!("{program} finished"),
-            code => format!("{program} exited with code {code}"),
-        };
-        let notification = if code == 0 {
-            Notification::info(message)
-        } else {
-            Notification::warning(message)
-        };
-        window.push_notification(notification, cx);
         cx.notify();
     }
 
@@ -724,14 +705,12 @@ impl AppView {
         };
         let was_current = p == self.current_project && six == self.current_session;
         let became_empty;
-        let title;
         {
             let session = project.sessions.remove(six);
             if let Some(term) = &session.term {
                 term.update(cx, |s, _| s.kill());
             }
             became_empty = project.sessions.is_empty();
-            title = session.title.clone();
         }
         if was_current {
             self.current_session = six.min(self.projects[p].sessions.len().saturating_sub(1));
@@ -751,7 +730,6 @@ impl AppView {
                 index_after_removal(self.current_session, six, self.projects[p].sessions.len());
         }
         self.hovered_session = None;
-        window.push_notification(Notification::info(format!("Closed “{title}”")), cx);
         cx.notify();
     }
 
@@ -824,10 +802,7 @@ impl AppView {
                 .or_else(|| s.cmd.resume.clone())
         });
         let Some(id) = resume_id else {
-            window.push_notification(
-                Notification::warning("No session id found in the last run's output."),
-                cx,
-            );
+            eprintln!("[ddu] No session id found in the last run's output.");
             return;
         };
         self.respawn_current_session(Some(id), window, cx);
@@ -848,8 +823,6 @@ impl AppView {
         let Some(session) = project.sessions.get_mut(self.current_session) else {
             return;
         };
-        let title = session.title.clone();
-        let resumed = resume.is_some();
         let cmd = match resume {
             Some(id) => session.cmd.clone().with_resume(id),
             None => session.cmd.clone(),
@@ -877,10 +850,7 @@ impl AppView {
             }
             Err(err) => {
                 self.window_focus.focus(window, cx);
-                window.push_notification(
-                    Notification::error(format!("Failed to restart: {err}")),
-                    cx,
-                );
+                eprintln!("[ddu] Failed to restart: {err}");
                 (AgentStatus::Error(err.to_string()), None)
             }
         };
@@ -894,16 +864,6 @@ impl AppView {
             } else {
                 None
             };
-        }
-        if self.current_term().is_some() {
-            window.push_notification(
-                Notification::info(if resumed {
-                    format!("Resumed “{title}”")
-                } else {
-                    format!("Restarted “{title}”")
-                }),
-                cx,
-            );
         }
         cx.notify();
     }
@@ -987,6 +947,15 @@ impl AppView {
         }
         let ix = usize::from(self.show_sessions) + 1;
         self.show_diff = on;
+        // Remember the panel state on the current session: switching
+        // sessions must restore each session's own diff visibility.
+        if let Some(s) = self
+            .projects
+            .get_mut(self.current_project)
+            .and_then(|p| p.sessions.get_mut(self.current_session))
+        {
+            s.show_diff = on;
+        }
         self.persist(cx);
         let restore_w = self.last_diff_w();
         if !on {
@@ -1259,12 +1228,9 @@ impl Render for AppView {
                 div().flex_1().min_h_0().overflow_hidden().child(group)
             })
             // Overlay layers (anchored, no layout impact): dialogs opened via
-            // window.open_dialog / open_alert_dialog and notifications are
-            // hosted here — gpui-kit requires the app to render these layers.
+            // window.open_dialog / open_alert_dialog are hosted here —
+            // gpui-kit requires the app to render these layers.
             .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
-            .children(gpui_kit::component::Root::render_notification_layer(
-                window, cx,
-            ))
     }
 }
 

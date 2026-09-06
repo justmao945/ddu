@@ -16,9 +16,6 @@ use crate::session::{AgentSession, AgentStatus};
 /// Height of a two-line session row.
 const SESSION_ROW_PX: f32 = 40.;
 
-/// PTY output within this window ⇒ the agent is actively working.
-const ACTIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
-
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     // No panel header: the project tree fills the column; project
     // creation lives in the status strip below (see `status_bar`).
@@ -179,13 +176,6 @@ fn session_row(
     let fg = cx.theme().foreground;
     let active = active_project && six == this.current_session;
     let element_id = SharedString::from(s.id.clone());
-    // Working state tracks live PTY output, not the (long-lived) process:
-    // an agent idling at its prompt must not look busy.
-    let working = s.status.is_running()
-        && s.is_agent()
-        && s.term
-            .as_ref()
-            .is_some_and(|t| t.read(cx).active_within(ACTIVE_WINDOW));
     let active_hover_bg = super::selection_hover_bg(cx);
     let title = session_title(s, cx);
     div()
@@ -247,17 +237,6 @@ fn session_row(
                         .child(meta_label(s)),
                 ),
         )
-        .when(working && this.hovered_session != Some((p, six)), |el| {
-            // Activity pulse: a small accent dot, Zed-style — the spinner
-            // read as perpetual motion for background work.
-            el.child(
-                div()
-                    .flex_shrink_0()
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(cx.theme().accent),
-            )
-        })
         .when(this.hovered_session == Some((p, six)), |el| {
             el.child(
                 Button::new(SharedString::from(format!("close-{p}-{six}")))

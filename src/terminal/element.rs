@@ -547,12 +547,11 @@ fn paint_cursor(
     // Focused: solid block BUT translucent — a fully opaque cursor
     // covers the glyph (and any completion/IME preview) underneath.
     // 0.62 keeps the cell readable while still reading as a cursor.
-    // Unfocused: full-strength outline over a faint fill so it stays
-    // findable without a solid block.
+    // Unfocused: pure hollow outline, no fill — the cell (and the
+    // glyph under the cursor) stays fully readable.
     if focused {
         window.paint_quad(fill(bounds, palette.cursor.opacity(0.62)));
     } else {
-        window.paint_quad(fill(bounds, palette.cursor.opacity(0.12)));
         window.paint_quad(outline(bounds, palette.cursor, BorderStyle::Solid));
     }
 }

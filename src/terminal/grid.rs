@@ -4,7 +4,7 @@
 
 use std::io::Read;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use alacritty_terminal::event::{Event, EventListener};
 
@@ -219,8 +219,6 @@ pub struct TermGrid {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     pub meta: Arc<Mutex<TermMeta>>,
     pub writer: PtyWriter,
-    /// Epoch ms of the last PTY read; drives the "agent is working" spinner.
-    pub activity: Arc<AtomicU64>,
     pub dark: Arc<AtomicBool>,
     /// Rolling tail of raw PTY output (resume-id extraction at exit).
     pub recent: Arc<RecentOutput>,
@@ -235,7 +233,6 @@ impl TermGrid {
         writer: PtyWriter,
         wake: async_channel::Sender<PumpMsg>,
     ) -> Self {
-        let activity = Arc::new(AtomicU64::new(now_ms()));
         let meta = Arc::new(Mutex::new(TermMeta::default()));
         let dark = Arc::new(AtomicBool::new(true));
         let recent = Arc::new(RecentOutput::new(64 * 1024));
@@ -254,7 +251,6 @@ impl TermGrid {
             term,
             meta,
             writer,
-            activity,
             dark,
             recent,
             cols,
@@ -300,7 +296,6 @@ impl TermGrid {
 pub fn spawn_pump(
     term: Arc<FairMutex<Term<EventProxy>>>,
     wake: async_channel::Sender<PumpMsg>,
-    activity: Arc<AtomicU64>,
     recent: Arc<RecentOutput>,
     mut reader: Box<dyn Read + Send>,
     mut child: Box<dyn Child + Send + Sync>,
@@ -315,7 +310,6 @@ pub fn spawn_pump(
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        activity.store(now_ms(), Ordering::Relaxed);
                         recent.push(&buf[..n]);
                         {
                             let mut term = term.lock();
@@ -354,14 +348,7 @@ pub fn spawn_session(
     let (process, reader, child) = PtyProcess::spawn(cmd, cols, rows)?;
     let grid = TermGrid::new(cols, rows, process.writer().clone(), wake.clone());
     grid.dark.store(dark, Ordering::Relaxed);
-    spawn_pump(
-        grid.term.clone(),
-        wake,
-        grid.activity.clone(),
-        grid.recent.clone(),
-        reader,
-        child,
-    );
+    spawn_pump(grid.term.clone(), wake, grid.recent.clone(), reader, child);
     Ok((grid, process))
 }
 
@@ -520,14 +507,6 @@ mod zsh_probe {
         assert!(t.contains("just@"), "got {t:?}");
     }
 }
-/// Current time as epoch milliseconds (PTY activity stamp).
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// OSC 10/11/12 replies use the same default colors as the painter.
 fn query_color(index: usize, dark: bool) -> Option<alacritty_terminal::vte::ansi::Rgb> {
     use alacritty_terminal::vte::ansi::{NamedColor, Rgb};

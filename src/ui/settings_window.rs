@@ -125,12 +125,9 @@ impl Render for SettingsWindow {
                     ),
             )
             // Overlay layers (anchored, no layout impact): dropdown
-            // menus and any dialog/notification a component raises are
-            // hosted here, same as the main window root.
+            // menus and any dialog a component raises are hosted here,
+            // same as the main window root.
             .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
-            .children(gpui_kit::component::Root::render_notification_layer(
-                window, cx,
-            ))
     }
 }
 
