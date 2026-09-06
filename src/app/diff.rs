@@ -51,11 +51,17 @@ impl AppView {
         self.diff_seed_path = None;
     }
 
-    /// Kick off one diff reload; results newer than any in-flight one win.
+    /// Kick off one diff reload; results newer than any in-flight one
+    /// win. No active session → no diff at all (the panels show their
+    /// "no session" note; a stale project diff must not linger).
     pub(crate) fn reload_diff(&mut self, cx: &mut Context<Self>) {
         self.diff_seq += 1;
         let seq = self.diff_seq;
-        let path = self.current_session_cwd();
+        let Some(path) = self.current_session_cwd() else {
+            self.diff = None;
+            self.diff_error = None;
+            return;
+        };
         let this = cx.weak_entity();
         cx.spawn(async move |_, cx| {
             let result = cx
@@ -85,6 +91,8 @@ impl AppView {
                     .await;
                 let Some(view) = this.upgrade() else { break };
                 let (path, seq) = view.read_with(cx, |v, _| (v.current_session_cwd(), v.diff_seq));
+                // No active session this tick: nothing to poll.
+                let Some(path) = path else { continue };
                 let result = cx
                     .background_spawn(async move { git::head_diff(&path) })
                     .await;

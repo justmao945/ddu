@@ -56,7 +56,9 @@ impl AppView {
     }
 
     /// Menu entry point for removing a project: silent when fine, an
-    /// explanatory dialog when not (running sessions, last project left).
+    /// explanatory dialog when it still has running sessions. Removing
+    /// the last project leaves an empty workspace (persisted as
+    /// `Some([])`, so the cwd project is NOT re-seeded next launch).
     pub(crate) fn request_remove_project(
         &mut self,
         p: usize,
@@ -64,15 +66,6 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         if p >= self.projects.len() {
-            return;
-        }
-        if self.projects.len() == 1 {
-            window.open_alert_dialog(cx, |alert, _, _| {
-                alert
-                    .title("Cannot Remove Project")
-                    .description("At least one project must stay open.")
-                    .footer(crate::ui::alert_ok_footer())
-            });
             return;
         }
         if self.projects[p]
@@ -93,7 +86,7 @@ impl AppView {
 
     /// Remove a project from the sidebar (config persists the change).
     pub(crate) fn remove_project(&mut self, project: usize, cx: &mut Context<Self>) {
-        if project >= self.projects.len() || self.projects.len() == 1 {
+        if project >= self.projects.len() {
             return;
         }
         let removed = self.projects.remove(project);

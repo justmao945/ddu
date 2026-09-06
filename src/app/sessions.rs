@@ -11,25 +11,11 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let changed_project = self.current_project != project;
-        let from = (self.current_project, self.current_session);
-        if changed_project {
-            // Save the outgoing project's placement state, then adopt
-            // the incoming project's tree-layer height from the global
-            // snapshot (selection/collapse come from the session).
-            self.persist(cx);
-            let path = self.projects[project].path.to_string_lossy().to_string();
-            let entry = cx
-                .global::<crate::config::State>()
-                .project_state
-                .get(&path)
-                .cloned()
-                .unwrap_or_default();
-            self.diff_tree_height_seed = entry
-                .tree_height
-                .map(gpui::px)
-                .filter(|h| h.as_f32() >= TREE_MIN_H as f32 && h.as_f32() <= TREE_MAX_H as f32);
+        // Empty workspace (all projects removed): nothing to select.
+        if self.projects.get(project).is_none() {
+            return;
         }
+        let from = (self.current_project, self.current_session);
         self.current_project = project;
         let n = self.projects[project].sessions.len();
         self.current_session = session.min(n.saturating_sub(1));
@@ -126,6 +112,7 @@ impl AppView {
                 cwd,
                 diff_selected: None,
                 diff_closed: Default::default(),
+                diff_tree_height: None,
             });
             self.current_session = project.sessions.len() - 1;
         }
@@ -149,6 +136,9 @@ impl AppView {
         if from.is_some_and(|f| f == to) {
             return;
         }
+        // The splitter under the outgoing session keeps its live
+        // height — read it before borrowing the session slot mutably.
+        let live_h = self.live_tree_height(cx);
         if let Some((fp, fs)) = from {
             if let Some(s) = self
                 .projects
@@ -161,29 +151,47 @@ impl AppView {
                     .and_then(|d| self.diff_file.and_then(|ix| d.files.get(ix)))
                     .map(|f| f.path.to_string());
                 s.diff_closed = self.diff_tree_closed.clone();
+                // Hidden layer reports no live height — keep the stored one.
+                if let Some(h) = live_h {
+                    s.diff_tree_height = Some(h);
+                }
             }
         }
-        let (seed, closed) = {
+        let (seed, closed, height) = {
             let incoming = self.projects.get(to.0).and_then(|p| p.sessions.get(to.1));
             (
                 incoming.and_then(|s| s.diff_selected.clone()),
                 incoming.map(|s| s.diff_closed.clone()).unwrap_or_default(),
+                incoming.and_then(|s| s.diff_tree_height),
             )
         };
         self.diff_seed_path = seed;
+        // The adopted height must beat a pinned drag size on the live
+        // splitter (a bare seed only wins while the panel is unpinned),
+        // so unpin the layer panel and let the next render apply it.
+        self.diff_tree_height_seed = height
+            .map(gpui::px)
+            .filter(|h| h.as_f32() >= TREE_MIN_H as f32 && h.as_f32() <= TREE_MAX_H as f32);
+        if self.diff_tree_height_seed.is_some() && self.show_diff_tree {
+            self.sidebar_split_state.update(cx, |state, cx| {
+                if state.sizes().len() > 1 {
+                    state.reset_panel(1, cx);
+                }
+            });
+        }
         self.reset_diff();
         self.diff_tree_closed = closed;
         self.reload_diff(cx);
     }
 
-    /// The working tree the diff poll targets: the current session's
-    /// (worktrees later; today the project root it spawned in).
-    pub(super) fn current_session_cwd(&self) -> std::path::PathBuf {
+    /// The working tree the diff poll targets: the current session's.
+    /// No active session → `None` — no diff at all (the panels show
+    /// their "no session" note instead of a stale project tree).
+    pub(super) fn current_session_cwd(&self) -> Option<std::path::PathBuf> {
         self.projects
             .get(self.current_project)
             .and_then(|p| p.sessions.get(self.current_session))
             .map(|s| s.cwd.clone())
-            .unwrap_or_else(|| self.current_project().path.clone())
     }
 
     /// Exit event from a session's PTY pump: mirror the status and notify.
@@ -252,7 +260,7 @@ impl AppView {
             alert
                 .title(format!("Close “{title}”?"))
                 .description(
-                    "The running agent will be stopped (Ctrl-C); its session id is saved so the conversation can be resumed.",
+                    "The running agent will be interrupted and stopped; its session id is saved so the conversation can be resumed.",
                 )
                 .on_ok({
                     let this = this.clone();
@@ -276,11 +284,12 @@ impl AppView {
     }
 
     /// Close session `six` of project `p`. A live agent is stopped
-    /// gracefully (Ctrl-C into the PTY): the child exits, prints its
-    /// resume banner, the id is captured on the Exit event and saved —
-    /// and the row STAYS as a resumable Done entry. A dead row has
-    /// nothing left to save and is removed outright; removing a
-    /// current session shifts the selection to the nearest neighbor.
+    /// gracefully: the escalation (Esc → 2×Ctrl-C → 2×Ctrl-D → kill)
+    /// makes the child exit and print its resume banner; the id is
+    /// captured and saved — and the row STAYS as a resumable Done
+    /// entry. A dead row has nothing left to save and is removed
+    /// outright; removing a current session shifts the selection to
+    /// the nearest neighbor.
     pub(crate) fn close_session(
         &mut self,
         p: usize,
@@ -297,8 +306,14 @@ impl AppView {
             return;
         };
         if let (Some(term), true) = (&session.term, session.status.is_running()) {
-            term.update(cx, |s, _| s.interrupt());
-            // The exit event persists the row with its resume id.
+            // Save the resume id BEFORE the stop sequence: if the
+            // agent dies without printing its banner (the kill at the
+            // end of the escalation), the id from its earlier output
+            // is already on disk.
+            term.update(cx, |s, _| s.capture_resume_id());
+            self.persist(cx);
+            // The exit event persists the row again with the banner id.
+            Self::escalate_close(vec![term.clone()], cx);
             cx.notify();
             return;
         }
@@ -345,10 +360,23 @@ impl AppView {
             .collect()
     }
 
-    /// Window close (red button): always confirms first. The confirm
-    /// handler runs the exit process — live agents get Ctrl-C, their
-    /// resume ids land in state.json, then the window goes away.
-    /// Returns false while the dialog or the exit process is live.
+    /// Live PTYs of agent sessions — the only sessions a quit confirm
+    /// protects. Plain shells hold no conversation state, so closing
+    /// them loses nothing and needs no dialog.
+    pub(crate) fn running_agent_terms(&self) -> Vec<Entity<TermSession>> {
+        self.projects
+            .iter()
+            .flat_map(|p| p.sessions.iter())
+            .filter(|s| s.status.is_running() && s.kind != "terminal")
+            .filter_map(|s| s.term.clone())
+            .collect()
+    }
+
+    /// Window close (red button): confirms only when live agent
+    /// sessions are at stake, then runs the exit process — live agents
+    /// get Ctrl-C, their resume ids land in state.json, then the window
+    /// goes away. Returns false while the dialog or the exit process is
+    /// live.
     pub(crate) fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.shutting_down {
             return false;
@@ -369,16 +397,18 @@ impl AppView {
         if self.shutting_down {
             return;
         }
-        let live = self.running_terms().len();
+        let live = self.running_agent_terms().len();
+        if live == 0 {
+            // Only shells (or nothing) live: nothing resumable is at
+            // stake, so skip the dialog and exit straight away.
+            self.begin_exit(quit, window, cx);
+            return;
+        }
         let what = if quit { "Quit" } else { "Close window" };
-        let description = if live > 0 {
-            format!(
-                "{live} session{} running. They will be stopped now and their session ids saved so the conversations can be resumed.",
-                if live == 1 { " is" } else { "s are" }
-            )
-        } else {
-            "The workspace layout is saved; sessions stay resumable.".to_string()
-        };
+        let description = format!(
+            "{live} agent session{} running. They will be stopped now and their session ids saved so the conversations can be resumed.",
+            if live == 1 { " is" } else { "s are" }
+        );
         let this = cx.weak_entity();
         window.open_alert_dialog(cx, move |alert, _, _| {
             alert
@@ -428,36 +458,77 @@ impl AppView {
         self.begin_shutdown(cx);
     }
 
-    /// Kick off the shutdown sequence: Ctrl-C to every live agent now;
-    /// agents that gate exit behind a second Ctrl-C get one nudge at
-    /// 2s; anything still alive at 6s is killed outright (its Exit
-    /// still fires, the tail may still carry the resume id).
+    /// Kick off the shutdown sequence: save every live session's
+    /// resume id first (a later kill must not lose it), then run the
+    /// stop escalation on all of them at once.
     fn begin_shutdown(&mut self, cx: &mut Context<Self>) {
-        crate::config::debug_log("begin_shutdown: interrupt all");
-        for term in self.running_terms() {
-            term.update(cx, |s, _| s.interrupt());
+        crate::config::debug_log("begin_shutdown: capture ids, escalate");
+        let terms = self.running_terms();
+        for term in &terms {
+            term.update(cx, |s, _| s.capture_resume_id());
+        }
+        self.persist(cx);
+        Self::escalate_close(terms, cx);
+        cx.notify();
+    }
+
+    /// Graceful-stop sequence for live terms, shared by single-session
+    /// close and window/app shutdown:
+    ///
+    /// 1. **Esc** — break an ongoing generation/prompt so the agent
+    ///    is back at its input line.
+    /// 2. **2× Ctrl-C**, 400ms apart — agents quit on this (Claude
+    ///    only exits on the second press).
+    /// 3. **2× Ctrl-D** after Ctrl-C had 1.5s to work — EOF on an
+    ///    empty prompt closes omp, codex and plain shells.
+    /// 4. **kill** at ~5s — sweeps whatever ignored all of it. The
+    ///    Exit event still fires, so the tail may still carry the
+    ///    resume id.
+    ///
+    /// Every stage is a no-op for terms that already exited.
+    fn escalate_close(terms: Vec<Entity<TermSession>>, cx: &mut Context<Self>) {
+        crate::config::debug_log(&format!("escalate_close: {} live", terms.len()));
+        for term in &terms {
+            term.update(cx, |s, _| s.ctrl(0x1b));
         }
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(2)).await;
-            let alive = this.update(cx, |this, cx| {
-                let alive = this.running_terms();
-                for term in &alive {
-                    term.update(cx, |s, _| s.interrupt());
-                }
-                !alive.is_empty()
-            })?;
-            if alive {
-                cx.background_executor().timer(Duration::from_secs(4)).await;
-                this.update(cx, |this, cx| {
-                    for term in this.running_terms() {
-                        term.update(cx, |s, _| s.kill());
+            // Two Ctrl-C, spaced like a human double-press.
+            for _ in 0..2 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(400))
+                    .await;
+                this.update(cx, |_, cx| {
+                    for term in &terms {
+                        term.update(cx, |s, _| s.ctrl(0x03));
                     }
                 })?;
             }
+            // Ctrl-C had its chance; two Ctrl-D on the prompt.
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            for _ in 0..2 {
+                this.update(cx, |_, cx| {
+                    for term in &terms {
+                        term.update(cx, |s, _| s.ctrl(0x04));
+                    }
+                })?;
+                cx.background_executor()
+                    .timer(Duration::from_millis(400))
+                    .await;
+            }
+            // Anything still alive at ~5s is killed outright.
+            cx.background_executor()
+                .timer(Duration::from_millis(1600))
+                .await;
+            this.update(cx, |_, cx| {
+                for term in &terms {
+                    term.update(cx, |s, _| s.kill());
+                }
+            })?;
             anyhow::Ok(())
         })
         .detach();
-        cx.notify();
     }
 
     /// The last live agent is out: save everything (resume ids were

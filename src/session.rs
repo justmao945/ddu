@@ -138,6 +138,9 @@ pub struct AgentSession {
     /// session's changes, selection and collapsed dirs are its own.
     pub diff_selected: Option<String>,
     pub diff_closed: std::collections::HashSet<String>,
+    /// This session's sidebar splitter height (diff tree layer, px) —
+    /// per-session layout, restored when the session is selected.
+    pub diff_tree_height: Option<f32>,
 }
 
 impl AgentSession {

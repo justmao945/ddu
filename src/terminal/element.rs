@@ -17,19 +17,30 @@ use super::TermSession;
 pub(crate) const LINE_HEIGHT_FACTOR: f32 = 1.45;
 /// Grid inset inside the panel, all sides.
 pub(crate) const PAD: f32 = 10.;
-/// Right-edge scrollbar strip width.
+/// Right-edge scrollbar strip width — the mouse hit zone only; the
+/// thumb is drawn centered in the 16px bar zone the Base scrollbars
+/// (diff panes) use, so both look identical side by side.
 pub(crate) const SCROLLBAR_W: f32 = 6.;
-/// Minimum thumb height so short scrollback stays grabbable.
-const THUMB_MIN: f32 = 18.;
+/// Minimum thumb height so short scrollback stays grabbable (Base's
+/// `MIN_THUMB_SIZE`).
+const THUMB_MIN: f32 = 48.;
+/// Thumb width at rest / while hovered or dragged, with the
+/// right-edge insets that keep it centered in the 16px bar zone.
+const THUMB_W: f32 = 6.;
+const THUMB_W_ACTIVE: f32 = 8.;
+const THUMB_EDGE_INSET: f32 = 5.;
+const THUMB_EDGE_INSET_ACTIVE: f32 = 4.;
 
 /// Scrollbar track + thumb rects for the grid area, or None when there
-/// is no scrollback. The thumb rides the very right edge of `area`;
-/// `display_offset` 0 pins it to the bottom (live), `history` to the top.
+/// is no scrollback. `engaged` (hover or drag) widens the thumb from
+/// 6px to 8px like the Base scrollbar; `display_offset` 0 pins it to
+/// the bottom (live), `history` to the top.
 pub(crate) fn scrollbar_geometry(
     area: Bounds<Pixels>,
     screen_lines: usize,
     history: usize,
     display_offset: usize,
+    engaged: bool,
 ) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
     if history == 0 {
         return None;
@@ -47,9 +58,14 @@ pub(crate) fn scrollbar_geometry(
     let travel = (f32::from(track.size.height) - thumb_h).max(0.);
     let frac = display_offset.min(history) as f32 / history as f32;
     let top = track.origin.y + px(travel * (1. - frac));
+    let (w, inset) = if engaged {
+        (THUMB_W_ACTIVE, THUMB_EDGE_INSET_ACTIVE)
+    } else {
+        (THUMB_W, THUMB_EDGE_INSET)
+    };
     let thumb = Bounds {
-        origin: point(track.origin.x, top),
-        size: size(px(SCROLLBAR_W), px(thumb_h)),
+        origin: point(area.origin.x + area.size.width - px(inset + w), top),
+        size: size(px(w), px(thumb_h)),
     };
     Some((track, thumb))
 }
@@ -197,7 +213,11 @@ impl Element for TerminalElement {
             cx,
         );
         let m = Metrics::new(window, cx);
-        let scrollbar_thumb = cx.theme().scrollbar_thumb;
+        // Same thumb tokens the Base scrollbar styles resolve to (the
+        // diff panes): resting/hover colors + the theme corner radius.
+        let thumb_rest = cx.theme().tokens.scrollbar_thumb;
+        let thumb_hover = cx.theme().tokens.scrollbar_thumb_hover;
+        let thumb_radius = cx.theme().radius;
         let palette = TerminalPalette::new(cx.theme());
         window.paint_quad(fill(bounds, palette.bg));
         let focused = self.focus.is_focused(window);
@@ -258,12 +278,19 @@ impl Element for TerminalElement {
             let g = term_lock.grid();
             (g.screen_lines(), g.history_size())
         };
-        // Inline the activity test (no term re-lock while held here).
+        // Inline the state reads (no term re-lock while held here).
+        let engaged = session.read(cx).scrollbar_engaged();
         if session.read(cx).scrollbar_activity() || content.display_offset > 0 {
             if let Some((_track, thumb)) =
-                scrollbar_geometry(bounds, rows, history, content.display_offset)
+                scrollbar_geometry(bounds, rows, history, content.display_offset, engaged)
             {
-                window.paint_quad(fill(thumb, scrollbar_thumb));
+                // Rounded ends + the hover color mirror the diff panes'
+                // Base scrollbars; a radius past half the thumb width
+                // is clamped by the renderer, giving capsule ends.
+                let mut quad =
+                    fill(thumb, if engaged { thumb_hover } else { thumb_rest });
+                quad.corner_radii = Corners::all(thumb_radius);
+                window.paint_quad(quad);
             }
         }
         if let Some(marked) = marked.filter(|t| !t.is_empty()) {
@@ -775,27 +802,38 @@ mod scrollbar_tests {
 
     #[test]
     fn no_scrollback_no_scrollbar() {
-        assert!(scrollbar_geometry(area(), 24, 0, 0).is_none());
+        assert!(scrollbar_geometry(area(), 24, 0, 0, false).is_none());
     }
 
     #[test]
     fn thumb_tracks_the_scroll_fraction() {
-        // 24 rows visible, 100 in scrollback: thumb ≈ 240·24/124 ≈ 46.5px.
-        let (_, bottom) = scrollbar_geometry(area(), 24, 100, 0).unwrap();
-        let (_, top) = scrollbar_geometry(area(), 24, 100, 100).unwrap();
+        // 24 rows visible, 60 in scrollback: thumb = 240·24/84 ≈ 68.6px
+        // (history small enough to stay above the 48px minimum).
+        let (track, bottom) = scrollbar_geometry(area(), 24, 60, 0, false).unwrap();
+        let (_, top) = scrollbar_geometry(area(), 24, 60, 60, false).unwrap();
         let thumb_h = f32::from(bottom.size.height);
-        assert!((thumb_h - 240. * 24. / 124.).abs() < 0.5);
+        assert!((thumb_h - 240. * 24. / 84.).abs() < 0.5);
         // Live bottom (offset 0) pins the thumb to the track bottom...
         assert!((f32::from(bottom.origin.y) - (10. + 240. - thumb_h)).abs() < 0.5);
         // ...and full history (offset == history) to the track top.
         assert!((f32::from(top.origin.y) - 10.).abs() < 0.01);
-        // The strip hugs the area's right edge.
-        assert!((f32::from(bottom.origin.x) - (10. + 500. - SCROLLBAR_W)).abs() < 0.01);
+        // The hit-test strip hugs the area's right edge...
+        assert!((f32::from(track.origin.x) - (10. + 500. - SCROLLBAR_W)).abs() < 0.01);
+        // ...while the resting thumb is centered in the 16px bar zone
+        // (6px wide, 5px off the edge).
+        assert!((f32::from(bottom.origin.x) - (10. + 500. - 5. - 6.)).abs() < 0.01);
+    }
+
+    #[test]
+    fn engaged_thumb_widens_toward_the_edge() {
+        let (_, engaged) = scrollbar_geometry(area(), 24, 100, 0, true).unwrap();
+        assert!((f32::from(engaged.size.width) - 8.).abs() < 0.01);
+        assert!((f32::from(engaged.origin.x) - (10. + 500. - 4. - 8.)).abs() < 0.01);
     }
 
     #[test]
     fn huge_scrollback_keeps_grabbable_thumb() {
-        let (_, thumb) = scrollbar_geometry(area(), 24, 100_000, 50_000).unwrap();
-        assert_eq!(f32::from(thumb.size.height), 18.);
+        let (_, thumb) = scrollbar_geometry(area(), 24, 100_000, 50_000, false).unwrap();
+        assert_eq!(f32::from(thumb.size.height), 48.);
     }
 }

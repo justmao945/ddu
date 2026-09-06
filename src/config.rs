@@ -139,6 +139,10 @@ pub struct SavedSession {
     /// Directories collapsed in this session's diff tree.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub closed_dirs: Vec<String>,
+    /// Sidebar splitter height for this session's diff tree (px);
+    /// clamped to the layer's min/max on restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_height: Option<f32>,
 }
 
 fn default_true() -> bool {
@@ -150,8 +154,11 @@ impl gpui_kit::Global for State {}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct State {
-    #[serde(default)]
-    pub projects: Vec<ProjectConfig>,
+    /// `None` = never persisted (first run → seed the cwd project);
+    /// `Some` is authoritative — `Some([])` means the user removed
+    /// every project and the workspace stays empty across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projects: Option<Vec<ProjectConfig>>,
     #[serde(default)]
     pub hidden_sessions: bool,
     /// Sidebar width (px), clamped by the panel min/max on restore.
@@ -173,20 +180,32 @@ pub struct State {
     /// Last diff file-tree layer visibility in the sidebar (⌘T).
     #[serde(default)]
     pub show_diff_tree: bool,
-    /// Per-project right-pane state: the diff selection, tree collapse
-    /// state and tree/content split height are project-local concerns —
-    /// they mean nothing once the working tree changes or the project
-    /// changes.
-    #[serde(default)]
-    pub project_state: BTreeMap<String, ProjectState>,
+    /// Last main-window placement (mode + frame), restored on launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowPlacement>,
 }
 
-/// Per-project runtime state for the diff pane and related viewers.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ProjectState {
-    /// Height of the tree pane above the content pane (px).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tree_height: Option<f32>,
+/// How the main window was last shown. On macOS a zoomed (green-button
+/// "maximized") window reports as `Windowed` with the zoomed frame, so
+/// `Maximized` mainly round-trips cross-platform state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowMode {
+    Windowed,
+    Maximized,
+    Fullscreen,
+}
+
+/// Persisted main-window frame (logical px): the variant plus the
+/// bounds to open with. For `Maximized`/`Fullscreen` the bounds are the
+/// restore (un-maximized) frame, matching gpui's `WindowBounds`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowPlacement {
+    pub mode: WindowMode,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
 // ── load / save ───────────────────────────────────────────────────────
@@ -289,6 +308,13 @@ impl State {
 pub fn report_error(err: String, _cx: &mut gpui_kit::App) {
     eprintln!("[ddu] {err}");
 }
+
+/// Warnings from the startup `load_all`, handed to the first window so
+/// corrupt-file/backup failures surface in a dialog — bundled launches
+/// lose stderr (see `report_error`).
+pub struct LoadWarnings(pub Vec<String>);
+
+impl gpui_kit::Global for LoadWarnings {}
 
 /// Env-gated debug trace (`DDU_DEBUG=1` → /tmp/ddu-debug.log): the
 /// resume-capture chain spans async events and a quit, where stderr
@@ -402,6 +428,57 @@ mod tests {
         let cfg: Config = serde_json::from_str("{}").unwrap();
         assert!(!cfg.dark_theme);
         assert_eq!(cfg.new_session.kind, "terminal");
+    }
+
+    #[test]
+    fn removed_last_project_stays_removed() {
+        // Never persisted (first run) → None → the cwd project is
+        // seeded. An explicit empty list is the user's choice: it must
+        // round-trip as Some([]) and never re-seed.
+        let fresh: State = serde_json::from_str("{}").unwrap();
+        assert_eq!(fresh.projects, None);
+        let emptied: State = serde_json::from_str(r#"{"projects": []}"#).unwrap();
+        assert_eq!(emptied.projects, Some(vec![]));
+        let saved = serde_json::to_string(&emptied).unwrap();
+        let reloaded: State = serde_json::from_str(&saved).unwrap();
+        assert_eq!(reloaded.projects, Some(vec![]));
+    }
+
+    #[test]
+    fn window_placement_and_tree_height_round_trip() {
+        // The window frame and each session's splitter height must
+        // survive state.json; an old file without either still loads.
+        let mut state = State::default();
+        state.window = Some(WindowPlacement {
+            mode: WindowMode::Maximized,
+            x: 12.,
+            y: 24.,
+            w: 960.,
+            h: 680.,
+        });
+        state.projects = Some(vec![ProjectConfig {
+            name: "p".into(),
+            path: "/tmp/p".into(),
+            expanded: true,
+            sessions: vec![SavedSession {
+                kind: "omp".into(),
+                title: "omp".into(),
+                resume: Some("id-1".into()),
+                selected_file: None,
+                closed_dirs: vec![],
+                tree_height: Some(260.),
+            }],
+        }]);
+        let saved = serde_json::to_string(&state).unwrap();
+        let back: State = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back.window, state.window);
+        assert_eq!(
+            back.projects.as_ref().unwrap()[0].sessions[0].tree_height,
+            Some(260.)
+        );
+        // Files from before this feature carry neither key.
+        let old: State = serde_json::from_str(r#"{"projects": []}"#).unwrap();
+        assert_eq!(old.window, None);
     }
 
     #[test]

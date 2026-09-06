@@ -33,8 +33,8 @@ pub use pty::PtySpawn;
 /// Minimum gap between grid+PTY reflows while a drag is resizing.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(140);
 /// How long the overlay thumb stays up after the last scroll/hover
-/// activity (macOS fades at ~1s).
-const SCROLLBAR_IDLE: Duration = Duration::from_millis(900);
+/// activity (same 2s hold the Base scrollbars in the diff panes use).
+const SCROLLBAR_IDLE: Duration = Duration::from_secs(2);
 
 /// Terminal events emitted to subscribers (the app shell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +80,9 @@ pub struct TermSession {
     /// fade out after [`SCROLLBAR_IDLE`].
     scrollbar_hover: bool,
     scrollbar_until: Option<Instant>,
+    /// The one-shot repaint that makes the fade-out actually fire is in
+    /// flight (see [`TermSession::arm_scrollbar_hide`]).
+    scrollbar_hide_armed: bool,
     /// Button code held while the child tracks the mouse (xterm 1002
     /// drag reports); None when no button is down.
     mouse_held: Option<u8>,
@@ -131,6 +134,7 @@ impl TermSession {
                 scrollbar_drag: None,
                 scrollbar_hover: false,
                 scrollbar_until: None,
+                scrollbar_hide_armed: false,
                 mouse_held: None,
                 mouse_cell: (u32::MAX, u32::MAX),
                 wheel_remainder: 0.,
@@ -279,7 +283,7 @@ impl TermSession {
         self.scroll_remainder -= whole as f32;
         // Any wheel traffic counts as scrollbar activity — even a
         // whole==0 trickle must refresh the idle window.
-        self.reveal_scrollbar();
+        self.reveal_scrollbar(cx);
         if whole != 0 {
             self.grid.scroll(whole);
             cx.emit(TermEvent::Wakeup);
@@ -379,13 +383,13 @@ impl TermSession {
             .as_ref()
             .is_some_and(|s| !s.is_empty())
     }
-
     /// Overlay-scrollbar visibility, macOS-style: visible while the
-    /// mouse hovers the right-edge strip, while a drag or recent scroll
-    /// activity is live, or while scrolled back into history. Hidden
-    /// again once the mouse leaves and the idle window closes.
+    /// mouse hovers the right-edge strip or while a drag / recent scroll
+    /// activity is live; fades out once the idle window closes — even
+    /// when the viewport sits in the scrollback (standard overlay
+    /// behavior: position is re-shown by the next scroll tick).
     pub(crate) fn scrollbar_visible(&self) -> bool {
-        self.scrollbar_activity() || self.grid.term.lock().grid().display_offset() > 0
+        self.scrollbar_activity()
     }
 
     /// Hover/drag/recent-scroll part of the visibility test — no term
@@ -398,10 +402,48 @@ impl TermSession {
                 .is_some_and(|until| Instant::now() < until)
     }
 
+
+    /// Hover or drag specifically — the state that widens the thumb.
+    /// The idle timer alone must not (it would stay wide until the
+    /// hold expires).
+    pub(crate) fn scrollbar_engaged(&self) -> bool {
+        self.scrollbar_drag.is_some() || self.scrollbar_hover
+    }
+
     /// Scroll activity happened: keep the thumb up for another idle
     /// window.
-    fn reveal_scrollbar(&mut self) {
+    fn reveal_scrollbar(&mut self, cx: &mut Context<Self>) {
         self.scrollbar_until = Some(Instant::now() + SCROLLBAR_IDLE);
+        self.arm_scrollbar_hide(cx);
+    }
+
+    /// One-shot repaint at the end of the idle window — without it
+    /// nothing re-rendered at the deadline and the thumb lingered until
+    /// an unrelated frame. A reveal during the wait re-arms for the new
+    /// deadline; hover/drag keep re-arming while they last.
+    fn arm_scrollbar_hide(&mut self, cx: &mut Context<Self>) {
+        if self.scrollbar_hide_armed {
+            return;
+        }
+        self.scrollbar_hide_armed = true;
+        let wait = self
+            .scrollbar_until
+            .map(|until| until.saturating_duration_since(Instant::now()))
+            .unwrap_or(SCROLLBAR_IDLE)
+            // A lapsed deadline with the mouse still parked means hover
+            // keeps the bar up: poll again, never busy-loop.
+            .max(Duration::from_millis(250));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |term, cx| {
+                term.scrollbar_hide_armed = false;
+                if term.scrollbar_activity() {
+                    term.arm_scrollbar_hide(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Mouse over the right-edge strip (hover keeps the thumb up).
@@ -418,7 +460,7 @@ impl TermSession {
         let changed = self.scrollbar_hover != hovered;
         self.scrollbar_hover = hovered;
         if hovered {
-            self.reveal_scrollbar();
+            self.reveal_scrollbar(cx);
         }
         if changed {
             cx.notify();
@@ -434,7 +476,7 @@ impl TermSession {
         };
         // Full element height, flush with both ends — same rect the
         // element paints against.
-        element::scrollbar_geometry(bounds, rows as usize, history, offset)
+        element::scrollbar_geometry(bounds, rows as usize, history, offset, self.scrollbar_engaged())
     }
 
     /// Left button down on the scrollbar strip: on the thumb starts a
@@ -452,7 +494,7 @@ impl TermSession {
         let Some((track, thumb)) = self.scrollbar_geometry() else {
             return false;
         };
-        self.reveal_scrollbar();
+        self.reveal_scrollbar(cx);
         if thumb.contains(&pos) {
             self.scrollbar_drag = Some(f32::from(pos.y - thumb.origin.y));
         } else if track.contains(&pos) {
@@ -480,7 +522,7 @@ impl TermSession {
         let Some((track, thumb)) = self.scrollbar_geometry() else {
             return false;
         };
-        self.reveal_scrollbar();
+        self.reveal_scrollbar(cx);
         let travel = f32::from(track.size.height - thumb.size.height);
         let frac = if travel <= 0. {
             0.
@@ -498,9 +540,9 @@ impl TermSession {
     }
 
     /// End any scrollbar drag (mouse up anywhere).
-    pub(crate) fn scrollbar_mouse_up(&mut self) {
+    pub(crate) fn scrollbar_mouse_up(&mut self, cx: &mut Context<Self>) {
         self.scrollbar_drag = None;
-        self.reveal_scrollbar();
+        self.reveal_scrollbar(cx);
     }
 
     /// What mouse traffic the child asked for (xterm 1000/1002/1003).
@@ -645,16 +687,15 @@ impl TermSession {
         }
     }
 
-    /// Graceful stop: Ctrl-C (0x03) into the PTY — SIGINT to the
-    /// foreground process group. Agents exit and print their resume
-    /// banner on the way out; the Exit path captures the id. No-op on
-    /// an already-exited child.
-    pub(crate) fn interrupt(&self) {
+    /// One control byte into the PTY (Esc/^C/^D …): ^C is SIGINT to
+    /// the foreground process group, ^D EOF on the input. No-op on an
+    /// already-exited child.
+    pub(crate) fn ctrl(&self, byte: u8) {
         if self.exit.is_some() {
             return;
         }
         if let Some(process) = &self.process {
-            process.writer().write(&[0x03]);
+            process.writer().write(&[byte]);
         }
     }
 

@@ -251,7 +251,7 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                                     ) {
                                         return;
                                     }
-                                    s.scrollbar_mouse_up();
+                                    s.scrollbar_mouse_up(cx);
                                     s.end_selection(cx);
                                 });
                             }
@@ -275,7 +275,7 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                                     ) {
                                         return;
                                     }
-                                    s.scrollbar_mouse_up();
+                                    s.scrollbar_mouse_up(cx);
                                     s.end_selection(cx);
                                 });
                             }
@@ -449,8 +449,11 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .map(|s| format!("{} · finished", s.kind))
         .unwrap_or_default();
     // With no session anywhere, a New Session button can't know which
-    // project to spawn into — point at the sidebar instead.
+    // project to spawn into — point at the sidebar instead. With no
+    // PROJECT either (the user removed them all), no button: the ⌘O
+    // hint in the text is the whole call to action.
     let nowhere = this.projects.iter().all(|p| p.sessions.is_empty());
+    let no_projects = this.projects.is_empty();
     v_flex()
         .size_full()
         .p_6()
@@ -460,7 +463,9 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .track_focus(&this.window_focus)
         .text_sm()
         .text_color(cx.theme().muted_foreground)
-        .child(if error.is_some() {
+        .child(if no_projects {
+            "No projects — press ⌘O to add one".to_string()
+        } else if error.is_some() {
             "Unable to start session".to_string()
         } else if can_resume {
             format!("{resumed_label} — resume the conversation?")
@@ -476,7 +481,7 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
             el.child(div().max_w(px(480.)).child(error))
         })
         .children((0..1).filter_map(move |_| {
-            if nowhere && error.is_none() && !has_session {
+            if no_projects || (nowhere && error.is_none() && !has_session) {
                 return None;
             }
             let (label, action) = if error.is_some() {

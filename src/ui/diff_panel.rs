@@ -73,6 +73,11 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
 }
 
 fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl IntoElement {
+    // The pane mirrors the tree: no active session → no diff content.
+    if this.current_session().is_none() {
+        return empty("No active session — select one in the project tree.", cx)
+            .into_any_element();
+    }
     let Some(diff) = &this.diff else {
         return empty(this.diff_error.as_deref().unwrap_or("Loading changes…"), cx)
             .into_any_element();

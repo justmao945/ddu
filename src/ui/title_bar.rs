@@ -16,9 +16,11 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
             .unwrap_or_default()
             .or_else(|| Some(s.title.clone()))
     });
-    let breadcrumb = match session_title {
-        Some(title) => format!("{} — {}", project.name, title),
-        None => project.name.clone(),
+    let breadcrumb = match (project, session_title) {
+        (Some(p), Some(title)) => format!("{} — {}", p.name, title),
+        (Some(p), None) => p.name.clone(),
+        // Empty workspace: bare app name.
+        (None, _) => "ddu".to_string(),
     };
 
     TitleBar::new()

@@ -22,13 +22,16 @@ const LEVEL_INDENT: f32 = 14.;
 
 /// The sidebar's lower layer: the working tree's changed files.
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    // The tree answers "this session's changes": with no active
+    // session there is nothing to show, even if the last poll left
+    // a stale project diff behind.
+    if this.current_session().is_none() {
+        return empty_layer("No active session — select one in the project tree.", cx)
+            .into_any_element();
+    }
     let Some(diff) = &this.diff else {
-        // No session under the tree → say so; otherwise show the poll
-        // error (or the initial "loading" note).
-        let note = match this.current_session() {
-            None => "No session — pick one in the project tree.",
-            _ => this.diff_error.as_deref().unwrap_or("Loading changes…"),
-        };
+        // The poll error, or the initial "loading" note.
+        let note = this.diff_error.as_deref().unwrap_or("Loading changes…");
         return empty_layer(note, cx).into_any_element();
     };
     if diff.is_empty() {
@@ -72,24 +75,24 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                         // the divider.
                         .pt_2()
                         .pb_2()
-                        .child(tree_level(&tree, selected, 0, &this.diff_tree_closed, cx)),
+                        .child(tree_rows(&diff.files, &this.diff_tree_closed, &tree, selected, cx)),
                 )
                 .vertical_scrollbar(&this.diff_tree_scroll),
         )
         .into_any_element()
 }
 
-/// Short centered note shown when there is nothing to list.
+/// Short note shown when there is nothing to list. The text wraps
+/// and stays inside the layer however narrow the sidebar gets.
 fn empty_layer(text: &str, cx: &mut Context<AppView>) -> impl IntoElement {
     div()
         .size_full()
+        .overflow_hidden()
         .flex()
         .items_center()
         .justify_center()
         .p_2()
-        // Constrain the block so longer notes wrap into a few centered
-        // lines instead of one clipped strip.
-        .child(meta_text(text.to_string(), cx).max_w(px(160.)))
+        .child(meta_text(text.to_string(), cx).w_full().text_center())
 }
 
 /// One level of the file tree. `files` are entries at this depth,
@@ -139,101 +142,173 @@ fn tree_stats(node: &TreeNode) -> (usize, usize) {
     stats
 }
 
-fn tree_level<'a>(
-    tree: &'a TreeNode,
-    selected: Option<usize>,
+/// One rendered row of the flattened tree. `depth` drives the inner
+/// indent only — rows themselves stay full-width so hover/selection
+/// bands run edge-to-edge (window border to divider).
+enum TreeRow {
+    File {
+        ix: usize,
+        depth: usize,
+    },
+    Dir {
+        path: String,
+        depth: usize,
+        open: bool,
+        added: usize,
+        removed: usize,
+    },
+}
+
+/// Depth-first flatten of the visible tree: files before subdirs,
+/// insertion order kept; collapsed subtrees drop out entirely.
+fn flatten(
+    tree: &TreeNode,
     depth: usize,
-    closed: &'a std::collections::HashSet<String>,
+    closed: &std::collections::HashSet<String>,
+    out: &mut Vec<TreeRow>,
+) {
+    for (ix, _) in &tree.files {
+        out.push(TreeRow::File { ix: *ix, depth });
+    }
+    for (path, sub) in &tree.dirs {
+        let (added, removed) = tree_stats(sub);
+        let open = !closed.contains(path);
+        out.push(TreeRow::Dir {
+            path: path.clone(),
+            depth,
+            open,
+            added,
+            removed,
+        });
+        if open {
+            flatten(sub, depth + 1, closed, out);
+        }
+    }
+}
+
+/// Indent guide stripes: one vertical line per ancestor level, right
+/// where the nested guide borders used to sit. Per-row segments join
+/// into continuous lines across a subtree's rows (no vertical gap
+/// between rows).
+fn guides(depth: usize, color: Hsla) -> Vec<Div> {
+    (1..=depth)
+        .map(|lvl| {
+            div()
+                .absolute()
+                .left(px(LEVEL_INDENT * lvl as f32))
+                .top_0()
+                .bottom_0()
+                .w(px(1.))
+                .bg(color)
+        })
+        .collect()
+}
+
+/// The flattened, full-width row list inside the scroll area.
+fn tree_rows(
+    files: &[DiffFile],
+    closed: &std::collections::HashSet<String>,
+    tree: &TreeNode,
+    selected: Option<usize>,
     cx: &mut Context<AppView>,
-) -> impl IntoElement + use<'a> {
+) -> impl IntoElement {
     let active_bg = selection_bg(cx);
     let hov_bg = hover_bg(cx);
     let guide = cx.theme().foreground.opacity(0.12);
 
-    // Indent comes solely from the nested guide wrappers (+14px per
-    // level, border-left as the guide line); rows pad a constant 4px,
-    // so depth never compounds.
-    let mut level = v_flex().flex_shrink_0().gap_0p5();
+    let mut rows = Vec::new();
+    flatten(tree, 0, closed, &mut rows);
 
-    for (ix, f) in &tree.files {
-        level = level.child(file_row(
-            *ix,
-            f,
-            Some(*ix) == selected,
-            active_bg,
-            hov_bg,
-            cx,
-        ));
-    }
-
-    for (path, sub) in &tree.dirs {
-        let open = !closed.contains(path);
-        let name = path.rsplit('/').next().unwrap_or(path);
-        let (added, removed) = tree_stats(sub);
-        let toggle = path.clone();
-        level = level.child(
-            div()
-                .id(SharedString::from(format!("diff-dir-{path}")))
-                .w_full()
-                .h(px(ROW_PX))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .gap_1()
-                .pl(px(4.))
-                .pr_2()
-                .cursor_pointer()
-                .hover(move |el| el.bg(hov_bg))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    // All-open default: presence in the set = collapsed.
-                    if !this.diff_tree_closed.remove(&toggle) {
-                        this.diff_tree_closed.insert(toggle.clone());
-                    }
-                    cx.notify();
-                }))
-                .child(
-                    Icon::new(if open {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .with_size(gpui_kit::component::Size::XSmall),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_xs()
-                        .font_medium()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_color(cx.theme().foreground.opacity(0.9))
-                        .child(format!("{name}/")),
-                )
-                .child(plus_minus(added, removed, cx)),
-        );
-        if open {
-            level = level.child(
-                // Nested level: vertical indent guide + one step deeper.
-                div()
-                    .ml(px(LEVEL_INDENT))
-                    .border_l_1()
-                    .border_color(guide)
-                    .child(tree_level(sub, selected, depth + 1, closed, cx)),
-            );
+    v_flex().flex_shrink_0().children(rows.into_iter().map(|row| {
+        match row {
+            TreeRow::File { ix, depth } => file_row(
+                ix,
+                &files[ix],
+                Some(ix) == selected,
+                depth,
+                active_bg,
+                hov_bg,
+                guide,
+                cx,
+            )
+            .into_any_element(),
+            TreeRow::Dir {
+                path,
+                depth,
+                open,
+                added,
+                removed,
+            } => dir_row(path, depth, open, added, removed, hov_bg, guide, cx).into_any_element(),
         }
-    }
+    }))
+}
 
-    level
+fn dir_row(
+    path: String,
+    depth: usize,
+    open: bool,
+    added: usize,
+    removed: usize,
+    hov_bg: Hsla,
+    guide: Hsla,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+    let toggle = path.clone();
+    div()
+        .id(SharedString::from(format!("diff-dir-{path}")))
+        .relative()
+        .w_full()
+        .h(px(ROW_PX))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap_1()
+        // Indent is inner padding: the row (and its hover band) spans
+        // the full layer width at every depth.
+        .pl(px(4. + LEVEL_INDENT * depth as f32))
+        .pr_2()
+        .cursor_pointer()
+        .hover(move |el| el.bg(hov_bg))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            // All-open default: presence in the set = collapsed.
+            if !this.diff_tree_closed.remove(&toggle) {
+                this.diff_tree_closed.insert(toggle.clone());
+            }
+            cx.notify();
+        }))
+        .children(guides(depth, guide))
+        .child(
+            Icon::new(if open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .with_size(gpui_kit::component::Size::XSmall),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_xs()
+                .font_medium()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_color(cx.theme().foreground.opacity(0.9))
+                .child(format!("{name}/")),
+        )
+        .child(plus_minus(added, removed, cx))
 }
 
 fn file_row(
     ix: usize,
     f: &DiffFile,
     active: bool,
+    depth: usize,
     active_bg: Hsla,
     hov_bg: Hsla,
+    guide: Hsla,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
@@ -241,13 +316,14 @@ fn file_row(
     let path_copy = f.path.clone();
     div()
         .id(("diff-file", ix))
+        .relative()
         .w_full()
         .h(px(ROW_PX))
         .flex_shrink_0()
         .flex()
         .items_center()
         .gap_2()
-        .pl(px(4.))
+        .pl(px(4. + LEVEL_INDENT * depth as f32))
         .pr_2()
         .cursor_pointer()
         .map(|el| if active { el.bg(active_bg) } else { el })
@@ -266,6 +342,7 @@ fn file_row(
                 cx.notify();
             }
         }))
+        .children(guides(depth, guide))
         .child(
             diff_file_icon(&f.path)
                 .with_size(gpui_kit::component::Size::XSmall)

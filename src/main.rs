@@ -113,6 +113,9 @@ fn main() {
         for w in &warnings {
             eprintln!("[ddu] {w}");
         }
+        // Bundled launches lose stderr — hand the warnings to the
+        // first window, which shows them in an alert dialog once.
+        cx.set_global(config::LoadWarnings(warnings));
         // Keep globals loaded even if no window opens (dock reopen
         // path), so a re-created AppView reads the same settings.
         cx.set_global(config.clone());
@@ -197,8 +200,29 @@ fn open_main_window(cx: &mut gpui_kit::App) {
     if !cx.windows().is_empty() {
         return;
     }
+    // Restore the last window placement when its frame still lands on
+    // a connected display; otherwise fall back to centered (a monitor
+    // may have been unplugged since the save).
+    let saved = cx
+        .try_global::<config::State>()
+        .and_then(|s| s.window)
+        .filter(|p| placement_visible(p, cx));
+    let window_bounds = match saved {
+        Some(p) => {
+            let frame = Bounds {
+                origin: point(px(p.x), px(p.y)),
+                size: size(px(p.w), px(p.h)),
+            };
+            match p.mode {
+                config::WindowMode::Windowed => WindowBounds::Windowed(frame),
+                config::WindowMode::Maximized => WindowBounds::Maximized(frame),
+                config::WindowMode::Fullscreen => WindowBounds::Fullscreen(frame),
+            }
+        }
+        None => WindowBounds::centered(size(px(960.), px(680.)), cx),
+    };
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(size(px(960.), px(680.)), cx)),
+        window_bounds: Some(window_bounds),
         window_min_size: Some(size(px(app::WINDOW_MIN_WIDTH), px(app::WINDOW_MIN_HEIGHT))),
         ..TitleBar::window_options()
     };
@@ -220,4 +244,20 @@ fn open_main_window(cx: &mut gpui_kit::App) {
         }
     })
     .detach();
+}
+
+/// A saved frame counts as restorable only when a connected display
+/// shows enough of it to grab the window (≥100×40 logical px of
+/// overlap) — otherwise the window would reopen off-screen.
+fn placement_visible(p: &config::WindowPlacement, cx: &gpui_kit::App) -> bool {
+    let (l, t) = (p.x, p.y);
+    let (r, b) = (p.x + p.w, p.y + p.h);
+    cx.displays().iter().any(|d| {
+        let db = d.bounds();
+        let (dl, dt) = (db.origin.x.as_f32(), db.origin.y.as_f32());
+        let (dr, dbt) = (dl + db.size.width.as_f32(), dt + db.size.height.as_f32());
+        let overlap_w = (r.min(dr) - l.max(dl)).max(0.);
+        let overlap_h = (b.min(dbt) - t.max(dt)).max(0.);
+        overlap_w >= 100. && overlap_h >= 40.
+    })
 }

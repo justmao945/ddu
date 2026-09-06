@@ -104,8 +104,9 @@ pub struct AppView {
     /// Persisted selected-file path, pinned against the first loaded
     /// diff (files move between sessions), then cleared.
     pub(crate) diff_seed_path: Option<String>,
-    /// Persisted tree-pane height, applied once the diff splitter has
-    /// been laid out (its panels are created at render time).
+    /// The current session's persisted tree-pane height, applied once
+    /// the diff splitter has been laid out (its panels are created at
+    /// render time); refreshed on every session switch.
     pub(crate) diff_tree_height_seed: Option<Pixels>,
     pub(crate) session_seq: usize,
     pub(crate) diff: Option<GitDiff>,
@@ -117,6 +118,12 @@ pub struct AppView {
     /// exits the process for ⌘Q).
     pub(crate) shutting_down: bool,
     pub(crate) quit_after_shutdown: bool,
+    /// Latest window frame (move/resize/zoom/fullscreen), tracked by an
+    /// observer so `persist` can record it; seeded from the snapshot so
+    /// a quit before any frame change keeps the restored placement.
+    pub(crate) window_placement: Option<crate::config::WindowPlacement>,
+    /// Debounce guard for the save scheduled on each frame change.
+    window_geom_seq: u64,
 }
 
 /// Panel geometry (px): defaults, drag limits and collapse thresholds.
@@ -185,21 +192,21 @@ impl AppView {
 
         let cfg = cx.global::<crate::config::Config>().clone();
         let state = cx.global::<crate::config::State>().clone();
-        let projects: Vec<Project> = if state.projects.is_empty() {
-            initial_projects()
-        } else {
-            state
-                .projects
+        // `None` (no state file yet) seeds the cwd project; `Some` —
+        // even an empty vec — is the workspace the user last had.
+        let projects: Vec<Project> = match &state.projects {
+            None => initial_projects(),
+            Some(saved) => saved
                 .iter()
                 .map(|p| Project {
                     name: p.name.clone(),
                     path: p.path.clone(),
                     sessions: vec![],
                 })
-                .collect()
+                .collect(),
         };
         let mut expanded = projects.iter().map(|_| true).collect::<Vec<_>>();
-        for (ix, p) in state.projects.iter().enumerate() {
+        for (ix, p) in state.projects.as_deref().unwrap_or(&[]).iter().enumerate() {
             if ix < expanded.len() {
                 expanded[ix] = p.expanded;
             }
@@ -238,30 +245,17 @@ impl AppView {
             diff_seq: 0,
             shutting_down: false,
             quit_after_shutdown: false,
+            window_placement: state.window,
+            window_geom_seq: 0,
         };
         // Restore persisted widths; the raw values are clamped by the
         // panel size_range on render, out-of-range ones fall back to the
         // defaults inside `last_sidebar_w`/`last_diff_w`.
         this.last_sidebar_size = state.sidebar_width.map(gpui::px);
         this.last_diff_size = state.diff_width.map(gpui::px);
-        // The diff itself is loaded asynchronously; the restored
-        // current session's selection and collapsed dirs seed it
-        // (per-session state — worktrees can differ). `apply_diff`
-        // re-pins the path to an index once it lands. The tree-layer
-        // height stays project-scoped layout.
-        let restored = this
-            .projects
-            .get(this.current_project)
-            .and_then(|p| p.sessions.first());
-        this.diff_seed_path = restored.and_then(|s| s.diff_selected.clone());
-        this.diff_tree_closed = restored.map(|s| s.diff_closed.clone()).unwrap_or_default();
-        let current_path = this.current_project().path.to_string_lossy().to_string();
-        this.diff_tree_height_seed = state
-            .project_state
-            .get(&current_path)
-            .and_then(|s| s.tree_height)
-            .map(gpui::px)
-            .filter(|h| h.as_f32() >= TREE_MIN_H as f32 && h.as_f32() <= TREE_MAX_H as f32);
+        // Per-session diff state (selection, collapsed dirs, tree-layer
+        // height) seeds from the restored current session below — the
+        // rows don't exist until `restore_sessions` runs.
         this.window_focus.focus(window, cx);
         this.start_diff_poll(cx);
         this.start_ui_tick(cx);
@@ -318,6 +312,13 @@ impl AppView {
             },
         )
         .detach();
+        // Record the window frame (move/resize/zoom/fullscreen) as it
+        // changes; `persist` writes it, and a debounced save covers a
+        // crash between the change and the next explicit persist.
+        cx.observe_window_bounds(window, |this, window, cx| {
+            this.note_window_frame(window, cx);
+        })
+        .detach();
         // Window close (red button): with live agents this blocks and
         // starts a graceful shutdown (Ctrl-C → exit → resume ids saved
         // → window removed); otherwise it persists and closes at once.
@@ -333,7 +334,11 @@ impl AppView {
         // selection then decides whether the window resumes an agent
         // or lands on a live shell. With nothing saved, fall back to
         // the configured default launcher.
-        if state.projects.iter().any(|p| !p.sessions.is_empty()) {
+        if state
+            .projects
+            .as_ref()
+            .is_some_and(|ps| ps.iter().any(|p| !p.sessions.is_empty()))
+        {
             this.restore_sessions(&state, window, cx);
             if this.projects[this.current_project].sessions.is_empty() {
                 this.spawn_session_of(&cfg.new_session.kind, window, cx);
@@ -358,15 +363,54 @@ impl AppView {
         } else {
             this.spawn_session_of(&cfg.new_session.kind, window, cx);
         }
+        // Seed the diff pane from the restored current session —
+        // selection, collapsed dirs and the tree-layer height are all
+        // per-session; a fresh spawn carries none (default height).
+        let (seed, closed, height) = match this.current_session() {
+            Some(s) => (
+                s.diff_selected.clone(),
+                s.diff_closed.clone(),
+                s.diff_tree_height,
+            ),
+            None => (None, Default::default(), None),
+        };
+        this.diff_seed_path = seed;
+        this.diff_tree_closed = closed;
+        this.diff_tree_height_seed = height
+            .map(gpui::px)
+            .filter(|h| h.as_f32() >= TREE_MIN_H as f32 && h.as_f32() <= TREE_MAX_H as f32);
+
+        // Surface settings/state load failures once: bundled launches
+        // lose stderr, so corrupt-file/backup warnings would otherwise
+        // be silent. Deferred — the dialog layer needs the window's
+        // Root, built right after this constructor returns.
+        // Set unconditionally at startup, before any window opens.
+        let warnings = std::mem::take(&mut cx.global_mut::<crate::config::LoadWarnings>().0);
+        if !warnings.is_empty() {
+            let message = warnings.join("\n");
+            window
+                .spawn(cx, async move |cx| {
+                    let _ = cx.update(move |window, cx| {
+                        window.open_alert_dialog(cx, move |alert, _, _| {
+                            alert
+                                .title("Couldn't Load Settings or State")
+                                .description(message.clone())
+                                .footer(crate::ui::alert_ok_footer())
+                        });
+                    });
+                })
+                .detach();
+        }
         this
     }
 
-    pub(crate) fn current_project(&self) -> &Project {
-        &self.projects[self.current_project]
+    /// `None` once the user removed the last project (empty workspace).
+    pub(crate) fn current_project(&self) -> Option<&Project> {
+        self.projects.get(self.current_project)
     }
 
     pub(crate) fn current_session(&self) -> Option<&crate::session::AgentSession> {
-        self.current_project().sessions.get(self.current_session)
+        self.current_project()?.sessions.get(self.current_session)
     }
 
     pub(crate) fn current_term(&self) -> Option<Entity<TermSession>> {
@@ -474,6 +518,17 @@ impl Render for AppView {
                 // scales with the viewport (a fixed cap reads cramped
                 // on a big display), floored at DIFF_MAX.
                 let diff_max = (window.viewport_size().width.as_f32() * 0.6).max(DIFF_MAX);
+                // A container (window) resize proportionally rescales
+                // every splitter panel that has a recorded size —
+                // gpui-base's `adjust_to_container_size` bails only
+                // while some panel is unpinned. Keep the region slot
+                // unpinned so the sidebar width survives window
+                // resizes; the region's flex absorbs the whole delta.
+                self.shell_state.update(cx, |state, cx| {
+                    if state.sizes().len() > 1 {
+                        state.reset_panel(1, cx);
+                    }
+                });
                 let mut shell = h_resizable("shell").with_state(&self.shell_state);
                 if self.show_sessions {
                     shell = shell.child(

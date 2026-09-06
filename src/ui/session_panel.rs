@@ -203,6 +203,16 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                     }
                 })
         }))
+        // Empty workspace (every project removed): say how to add one.
+        .when(this.projects.is_empty(), |el| {
+            el.child(
+                div()
+                    .p_2()
+                    .text_xs()
+                    .text_color(fg.opacity(0.35))
+                    .child("No projects — add one with ⌘O or the folder button below."),
+            )
+        })
 }
 
 fn session_row(
