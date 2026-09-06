@@ -26,17 +26,26 @@ impl gpui::AssetSource for AppAssets {
             "icons/openai.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/openai.svg"
             )))),
-            "icons/wordmark-day.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
-                "../assets/icons/wordmark-day.svg"
-            )))),
-            "icons/wordmark-up.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
-                "../assets/icons/wordmark-up.svg"
-            )))),
             "icons/folder-plus.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/folder-plus.svg"
             )))),
             "icons/omp.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/omp.svg"
+            )))),
+            "icons/file-code.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/file-code.svg"
+            )))),
+            "icons/file-config.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/file-config.svg"
+            )))),
+            "icons/file-image.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/file-image.svg"
+            )))),
+            "icons/file-archive.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/file-archive.svg"
+            )))),
+            "icons/file-lock.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/file-lock.svg"
             )))),
             _ => gpui_kit::assets::Assets.load(path),
         }

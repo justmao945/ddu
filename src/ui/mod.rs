@@ -32,14 +32,59 @@ pub(crate) fn meta_text(text: impl Into<SharedString>, cx: &App) -> Div {
 #[derive(Clone, Copy)]
 pub(crate) enum AppIcon {
     FolderPlus,
+    FileCode,
+    FileConfig,
+    FileImage,
+    FileArchive,
+    FileLock,
 }
 
 impl gpui_kit::component::IconNamed for AppIcon {
     fn path(self) -> SharedString {
         match self {
             AppIcon::FolderPlus => "icons/folder-plus.svg".into(),
+            AppIcon::FileCode => "icons/file-code.svg".into(),
+            AppIcon::FileConfig => "icons/file-config.svg".into(),
+            AppIcon::FileImage => "icons/file-image.svg".into(),
+            AppIcon::FileArchive => "icons/file-archive.svg".into(),
+            AppIcon::FileLock => "icons/file-lock.svg".into(),
         }
     }
+}
+
+/// Pick a file-type icon from a path's extension: code / config / image
+/// / archive / lockfile / plain text, falling back to the generic file.
+pub(crate) fn diff_file_icon(path: &str) -> Icon {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    const CODE: &[&str] = &[
+        "rs", "go", "swift", "c", "h", "cpp", "cc", "hpp", "js", "jsx", "ts", "tsx", "py", "rb",
+        "java", "kt", "php", "cs", "lua", "sh", "zsh", "fish", "bash", "sql", "css", "scss",
+        "html", "vue", "svelte", "m", "mm", "zig", "dart", "ex", "exs", "hs", "clj",
+    ];
+    const CONFIG: &[&str] = &["json", "toml", "yaml", "yml", "ini", "cfg", "conf", "plist"];
+    const IMAGE: &[&str] = &[
+        "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "icns", "bmp", "tiff",
+    ];
+    const ARCHIVE: &[&str] = &["zip", "tar", "gz", "bz2", "xz", "zst", "7z", "rar", "jar"];
+    const LOCK: &[&str] = &["lock"];
+    const TEXT: &[&str] = &["md", "txt", "log", "csv", "rst"];
+
+    let icon: Icon = if LOCK.contains(&ext.as_str()) {
+        AppIcon::FileLock.into()
+    } else if IMAGE.contains(&ext.as_str()) {
+        AppIcon::FileImage.into()
+    } else if ARCHIVE.contains(&ext.as_str()) {
+        AppIcon::FileArchive.into()
+    } else if CONFIG.contains(&ext.as_str()) {
+        AppIcon::FileConfig.into()
+    } else if CODE.contains(&ext.as_str()) {
+        AppIcon::FileCode.into()
+    } else if TEXT.contains(&ext.as_str()) {
+        IconName::FileText.into()
+    } else {
+        IconName::File.into()
+    };
+    icon
 }
 
 /// Brand/status icon for a session kind (`terminal`, `claude`, `codex`,
@@ -52,6 +97,35 @@ pub(crate) fn agent_icon(kind: &str) -> Icon {
         "omp" => Icon::default().path("icons/omp.svg"),
         _ => Icon::new(IconName::Bot),
     }
+}
+
+/// The icon tint for a session kind: brand colors for agents, muted
+/// neutrals for shells and unknown customs.
+pub(crate) fn agent_tint(kind: &str, cx: &App) -> Hsla {
+    let fg = cx.theme().foreground;
+    match kind {
+        "claude" => hsla(15. / 360., 0.64, 0.5, 1.),
+        "omp" => hsla(258. / 360., 0.7, 0.55, 1.),
+        "codex" => fg.opacity(0.85),
+        "terminal" => fg.opacity(0.6),
+        _ => fg.opacity(0.55),
+    }
+}
+
+/// A menu-row rendition of an agent: tinted brand mark with a breathing
+/// gap before the label (stock items gap only 4px, too tight for icons).
+pub(crate) fn agent_menu_row(kind: &str, label: impl Into<SharedString>, cx: &App) -> AnyElement {
+    h_flex()
+        .gap_2()
+        .items_center()
+        .child(
+            agent_icon(kind)
+                .xsmall()
+                .text_color(agent_tint(kind, cx))
+                .into_any_element(),
+        )
+        .child(label.into())
+        .into_any_element()
 }
 
 /// Zed reserves accent for activity; list selection is elevated neutral.

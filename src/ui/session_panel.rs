@@ -319,11 +319,11 @@ fn kind_icon(s: &AgentSession, cx: &Context<AppView>) -> Div {
                 .into_any_element(),
         );
     }
-    let (path, tint) = match s.kind.as_str() {
-        "claude" => ("icons/claude.svg", hsla(15. / 360., 0.64, 0.5, 1.)),
-        "codex" => ("icons/openai.svg", fg.opacity(0.85)),
-        "omp" => ("icons/omp.svg", hsla(258. / 360., 0.7, 0.55, 1.)),
-        _ => ("icons/omp.svg", fg.opacity(0.5)),
+    let tint = crate::ui::agent_tint(s.kind.as_str(), cx);
+    let path = match s.kind.as_str() {
+        "claude" => "icons/claude.svg",
+        "codex" => "icons/openai.svg",
+        _ => "icons/omp.svg",
     };
     cell(
         svg()
@@ -336,75 +336,63 @@ fn kind_icon(s: &AgentSession, cx: &Context<AppView>) -> Div {
 }
 
 /// The `...` dropdown on a project row: every launcher plus project ops.
-fn more_menu(this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoElement {
-    let can_remove = this.projects.len() > 1;
-    let has_running = this.projects[p]
-        .sessions
-        .iter()
-        .any(|s| s.status.is_running());
+fn more_menu(_this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoElement {
     let cfg = cx.global::<crate::config::Config>().clone();
     let view = cx.weak_entity();
     let new_session_default = cfg.new_session.kind.clone();
     let build_menu =
         move |menu: PopupMenu, _window: &mut Window, _cx: &mut Context<'_, PopupMenu>| {
-            let mut m = menu.label("New session");
+            // Checkmarks on the right keep the left column free for brand
+            // icons (stock Left side would swap the icon for a check).
+            let mut m = menu.check_side(Side::Right);
             for kind in cfg.agent_menu() {
                 let label = cfg.label_for(&kind);
                 let default = kind == new_session_default;
                 let kind_click = kind.clone();
+                let kind_row = kind.clone();
                 let view_click = view.clone();
                 m = m.item(
-                    PopupMenuItem::new(label)
-                        .icon(super::agent_icon(&kind))
-                        .checked(default)
-                        .on_click(move |_, window, cx| {
-                            let kind = kind_click.clone();
-                            let view = view_click.clone();
-                            window
-                                .spawn(cx, {
-                                    let kind = kind.clone();
-                                    let view = view.clone();
-                                    async move |cx| {
-                                        let _ = view.update_in(cx, |v, window, cx| {
-                                            v.select_session(p, 0, window, cx);
-                                            v.spawn_session_of(&kind, window, cx)
-                                        });
-                                    }
-                                })
-                                .detach();
-                        }),
-                );
-            }
-            m = m.separator().item(
-                PopupMenuItem::new(if has_running {
-                    "Close sessions before removing"
-                } else {
-                    "Remove project"
-                })
-                .icon(Icon::new(IconName::CircleX))
-                .disabled(!can_remove || has_running)
-                .on_click({
-                    let view = view.clone();
-                    move |_, window, cx| {
-                        let view = view.clone();
+                    PopupMenuItem::element(move |_, cx| {
+                        crate::ui::agent_menu_row(&kind_row, label.clone(), cx)
+                    })
+                    .checked(default)
+                    .on_click(move |_, window, cx| {
+                        let kind = kind_click.clone();
+                        let view = view_click.clone();
                         window
                             .spawn(cx, {
+                                let kind = kind.clone();
                                 let view = view.clone();
                                 async move |cx| {
                                     let _ = view.update_in(cx, |v, window, cx| {
-                                        v.remove_project(p, cx);
-                                        v.select_session(
-                                            v.current_project,
-                                            v.current_session,
-                                            window,
-                                            cx,
-                                        );
+                                        v.select_session(p, 0, window, cx);
+                                        v.spawn_session_of(&kind, window, cx)
                                     });
                                 }
                             })
                             .detach();
-                    }
-                }),
+                    }),
+                );
+            }
+            m = m.separator().item(
+                PopupMenuItem::new("Remove Project")
+                    .icon(Icon::new(IconName::CircleX))
+                    .on_click({
+                        let view = view.clone();
+                        move |_, window, cx| {
+                            let view = view.clone();
+                            window
+                                .spawn(cx, {
+                                    let view = view.clone();
+                                    async move |cx| {
+                                        let _ = view.update_in(cx, |v, window, cx| {
+                                            v.request_remove_project(p, window, cx);
+                                        });
+                                    }
+                                })
+                                .detach();
+                        }
+                    }),
             );
             m
         };

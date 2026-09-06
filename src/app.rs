@@ -55,6 +55,10 @@ pub struct AppView {
     /// Project row currently under the mouse (hides/reveals its buttons).
     pub(crate) diff_tree_scroll: ScrollHandle,
     pub(crate) diff_hunks_scroll: ScrollHandle,
+    /// Vertical splitter between the diff tree and the file content.
+    pub(crate) diff_split_state: Entity<ResizableState>,
+    /// Directory paths collapsed in the diff tree (all default open).
+    pub(crate) diff_tree_closed: std::collections::HashSet<String>,
     pub(crate) hovered_project: Option<usize>,
     /// Project whose `...` menu is open: keeps the row's buttons mounted
     /// while the mouse travels into the popup (the popup occludes the
@@ -148,6 +152,8 @@ impl AppView {
             resize_state: cx.new(|_| ResizableState::default()),
             diff_tree_scroll: ScrollHandle::new(),
             diff_hunks_scroll: ScrollHandle::new(),
+            diff_split_state: cx.new(|_| ResizableState::default()),
+            diff_tree_closed: std::collections::HashSet::new(),
             hovered_project: None,
             hovered_session: None,
             menu_project: None,
@@ -359,6 +365,40 @@ impl AppView {
             .collect();
         snapshot.save();
         cx.set_global(snapshot);
+    }
+
+    /// Menu entry point for removing a project: silent when fine, an
+    /// explanatory dialog when not (running sessions, last project left).
+    pub(crate) fn request_remove_project(
+        &mut self,
+        p: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if p >= self.projects.len() {
+            return;
+        }
+        if self.projects.len() == 1 {
+            window.open_alert_dialog(cx, |alert, _, _| {
+                alert
+                    .title("Cannot Remove Project")
+                    .description("At least one project must stay open.")
+            });
+            return;
+        }
+        if self.projects[p]
+            .sessions
+            .iter()
+            .any(|s| s.status.is_running())
+        {
+            window.open_alert_dialog(cx, |alert, _, _| {
+                alert
+                    .title("Cannot Remove Project")
+                    .description("Close its running sessions first.")
+            });
+            return;
+        }
+        self.remove_project(p, cx);
     }
 
     /// Remove a project from the sidebar (config persists the change).
@@ -724,6 +764,7 @@ impl AppView {
         self.diff = None;
         self.diff_error = None;
         self.diff_file = 0;
+        self.diff_tree_closed.clear();
         self.diff_tree_scroll.set_offset(point(px(0.), px(0.)));
         self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
     }

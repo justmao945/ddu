@@ -1,12 +1,15 @@
 //! Settings window: the sidebar-based [`Settings`] surface in its own
 //! native window, opened from the title-bar gear or ⌘,. Appearance
 //! (theme) lives here; future config appends as new pages.
-use gpui_kit::base::h_flex;
+use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::IconName;
+use gpui_kit::component::Side;
 use gpui_kit::component::Sizable as _;
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -89,7 +92,7 @@ impl Render for SettingsWindow {
                                     .item(
                                         SettingItem::new("Args", shell_args_field())
                                             .layout(Axis::Vertical)
-                                            .description("Arguments; quote values containing spaces."),
+                                            .description("Arguments passed to the shell."),
                                     ),
                             )
                             .group(
@@ -302,30 +305,73 @@ fn default_session_field() -> SettingField<SharedString> {
             .with_size(options.size())
             .w(px(170.))
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
-                let mut m = menu.min_w(px(170.));
+                let mut m = menu.min_w(px(170.)).check_side(Side::Right);
                 for kind in cfg.agent_menu() {
                     let label = cfg.label_for(&kind);
                     let checked = kind == current;
                     let k = kind.clone();
-                    m = m.item(PopupMenuItem::new(label).checked(checked).on_click(
-                        move |_, _, cx| {
+                    let k_row = kind.clone();
+                    m = m.item(
+                        PopupMenuItem::element(move |_, cx| {
+                            super::agent_menu_row(&k_row, label.clone(), cx)
+                        })
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
                             let k = k.clone();
                             update_config(|c, _| c.new_session.kind = k, cx);
+                        }),
+                    );
+                }
+                m
+            })
+    })
+}
+/// Common macOS shells for the program dropdown.
+const SHELLS: &[&str] = &[
+    "/bin/zsh",
+    "/bin/bash",
+    "/bin/sh",
+    "/opt/homebrew/bin/fish",
+    "/usr/local/bin/fish",
+    "/opt/homebrew/bin/nu",
+];
+
+/// Login shell picker: a fixed dropdown (there are only a handful of
+/// shells), keeping the trigger and its menu one aligned control.
+fn shell_program_field() -> SettingField<SharedString> {
+    SettingField::<SharedString>::render(|options, _, cx| {
+        let cfg = cx.global::<crate::config::Config>().clone();
+        let current = cfg.shell.program.clone();
+        Button::new("shell-program-select")
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .child(current.clone()),
+            )
+            .dropdown_caret(true)
+            .outline()
+            .disabled(options.is_disabled())
+            .with_size(options.size())
+            .w(px(220.))
+            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                let mut m = menu.min_w(px(220.)).check_side(Side::Right);
+                for shell in SHELLS {
+                    let checked = *shell == current;
+                    let s = (*shell).to_string();
+                    m = m.item(PopupMenuItem::new(*shell).checked(checked).on_click(
+                        move |_, _, cx| {
+                            let s = s.clone();
+                            update_config(|c, _| c.shell.program = s, cx);
                         },
                     ));
                 }
                 m
             })
     })
-}
-
-fn shell_program_field() -> SettingField<SharedString> {
-    commit_text_field(
-        |cx| cx.global::<crate::config::Config>().shell.program.clone(),
-        |value, cx| {
-            update_config(|c, _| c.shell.program = value, cx);
-        },
-    )
 }
 
 fn shell_args_field() -> SettingField<SharedString> {
@@ -448,14 +494,11 @@ fn is_mono_family(family: &str) -> bool {
     f.contains("mono") || MONO_NAME_HINTS.iter().any(|h| f.contains(h))
 }
 
-/// One item per builtin agent: brand icon + the fixed program name in
-/// the mono face, then the args input — the row reads like the command
-/// line it produces.
 fn builtin_agent_groups(cx: &App) -> SettingGroup {
     let cfg = cx.global::<crate::config::Config>().clone();
-    let mut group = SettingGroup::new().title("Built-in agents").description(
-        "Arguments appended to each agent's command; apply on Enter or when the field loses focus.",
-    );
+    let mut group = SettingGroup::new()
+        .title("Built-in agents")
+        .description("Arguments appended to each agent's command.");
     for (label, program) in crate::config::BUILTIN_AGENTS {
         let current = cfg.agent_args.get(*program).cloned().unwrap_or_default();
         let program_key = program.to_string();
@@ -468,39 +511,42 @@ fn builtin_agent_groups(cx: &App) -> SettingGroup {
                 cx,
             );
         });
+        // Custom element: brand-colored icon + name as the row header,
+        // the args input below at full group width (all rows equal).
         group = group.item(
-            SettingItem::new(
-                *label,
-                SettingField::<SharedString>::render(move |options, window, cx| {
-                    let muted = cx.theme().foreground.opacity(0.55);
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            super::agent_icon(program)
-                                .size_3p5()
-                                .flex_none()
-                                .text_color(muted),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_color(muted)
-                                .child(*program),
-                        )
-                        .child(div().flex_1().min_w_0().child(commit_input(
-                            format!("builtin-args-{program}"),
-                            current.clone(),
-                            set.clone(),
-                            options,
-                            window,
-                            cx,
-                        )))
-                }),
-            )
-            .layout(Axis::Vertical),
+            SettingItem::render(move |options, window, cx| {
+                let tint = super::agent_tint(program, cx);
+                v_flex()
+                    .w_full()
+                    .gap_1p5()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                super::agent_icon(program)
+                                    .size_3p5()
+                                    .flex_none()
+                                    .text_color(tint),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(cx.theme().foreground.opacity(0.9))
+                                    .child(*label),
+                            ),
+                    )
+                    .child(commit_input(
+                        format!("builtin-args-{program}"),
+                        current.clone(),
+                        set.clone(),
+                        options,
+                        window,
+                        cx,
+                    ))
+            })
+            .keywords(["Args", *label, *program]),
         );
     }
     group
@@ -512,22 +558,28 @@ fn builtin_agent_groups(cx: &App) -> SettingGroup {
 fn custom_agents_groups(cx: &App) -> Vec<SettingGroup> {
     let cfg = cx.global::<crate::config::Config>().clone();
     let mut groups = Vec::new();
+    // The Add affordance is a single compact `+` button, pinned right.
     groups.push(
         SettingGroup::new()
             .title("Custom agents")
-            .description("Extra launchers for the sidebar menus. Values apply on Enter or when the field loses focus.")
-            .item(SettingItem::new(
-                "Add",
-                SettingField::<SharedString>::render(|options, _, _cx| {
+            .description("Extra launchers for the sidebar menus.")
+            .item(SettingItem::render(|options, _, _| {
+                div().flex().justify_end().child(
                     Button::new("add-agent")
-                        .label("Add custom agent")
+                        .icon(IconName::Plus)
                         .outline()
                         .with_size(options.size())
                         .on_click(|_, _, cx| {
                             update_config(
                                 |c, _| {
                                     let mut number = 1;
-                                    while c.custom_agents.iter().any(|a| a.name == format!("agent-{number}")) { number += 1; }
+                                    while c
+                                        .custom_agents
+                                        .iter()
+                                        .any(|a| a.name == format!("agent-{number}"))
+                                    {
+                                        number += 1;
+                                    }
                                     c.custom_agents.push(crate::config::AgentPreset {
                                         name: format!("agent-{number}"),
                                         program: String::new(),
@@ -536,9 +588,9 @@ fn custom_agents_groups(cx: &App) -> Vec<SettingGroup> {
                                 },
                                 cx,
                             );
-                        })
-                }),
-            )),
+                        }),
+                )
+            })),
     );
     for ix in 0..cfg.custom_agents.len() {
         let a = cfg.custom_agents[ix].clone();
@@ -553,86 +605,130 @@ fn custom_agents_groups(cx: &App) -> Vec<SettingGroup> {
         let group = SettingGroup::new()
             .title(a.name.clone())
             .description(command)
-            .item(SettingItem::new(
-                "Name",
-                commit_text_field(
-                    move |_| name.clone(),
-                    move |value, cx| {
-                        let ix = ix;
-                        update_config(
-                            move |c, _| {
-                                if let Some(agent) = c.custom_agents.get_mut(ix) {
-                                    if c.new_session.kind == agent.name {
-                                        c.new_session.kind = value.clone();
-                                    }
-                                    agent.name = value;
-                                }
-                            },
-                            cx,
-                        );
-                    },
-                ),
-            ))
-            .item(SettingItem::new(
-                "Program",
-                commit_text_field(
-                    move |_| program.clone(),
-                    move |value, cx| {
-                        let ix = ix;
-                        update_config(
-                            move |c, _| {
-                                if let Some(agent) = c.custom_agents.get_mut(ix) {
-                                    agent.program = value;
-                                }
-                            },
-                            cx,
-                        );
-                    },
-                ),
-            ))
-            .item(SettingItem::new(
-                "Args",
-                commit_text_field(
-                    move |_| args.clone(),
-                    move |value, cx| {
-                        let ix = ix;
-                        update_config(
-                            move |c, _| {
-                                if let Some(agent) = c.custom_agents.get_mut(ix) {
-                                    agent.args = value;
-                                }
-                            },
-                            cx,
-                        );
-                    },
-                ),
-            ))
+            // Stacked label-over-input rows: the inputs span the group
+            // width instead of leaving dead space to their right.
             .item(
                 SettingItem::new(
-                    "Remove",
-                    SettingField::<SharedString>::render(move |options, _, _cx| {
-                        let ix = ix;
-                        Button::new(("remove-agent", ix))
-                            .label("Remove this agent")
-                            .danger()
-                            .with_size(options.size())
-                            .on_click(move |_, _, cx| {
-                                update_config(
-                                    move |c, _| {
-                                        if ix < c.custom_agents.len() {
-                                            let removed = c.custom_agents.remove(ix);
-                                            if c.new_session.kind == removed.name {
-                                                c.new_session.kind = "terminal".into();
-                                            }
+                    "Name",
+                    commit_text_field(
+                        move |_| name.clone(),
+                        move |value, cx| {
+                            let ix = ix;
+                            update_config(
+                                move |c, _| {
+                                    if let Some(agent) = c.custom_agents.get_mut(ix) {
+                                        if c.new_session.kind == agent.name {
+                                            c.new_session.kind = value.clone();
                                         }
-                                    },
-                                    cx,
-                                );
-                            })
-                    }),
+                                        agent.name = value;
+                                    }
+                                },
+                                cx,
+                            );
+                        },
+                    ),
                 )
-                .description("Delete this agent from the menus."),
-            );
+                .layout(Axis::Vertical),
+            )
+            .item(
+                SettingItem::new(
+                    "Program",
+                    commit_text_field(
+                        move |_| program.clone(),
+                        move |value, cx| {
+                            let ix = ix;
+                            update_config(
+                                move |c, _| {
+                                    if let Some(agent) = c.custom_agents.get_mut(ix) {
+                                        agent.program = value;
+                                    }
+                                },
+                                cx,
+                            );
+                        },
+                    ),
+                )
+                .layout(Axis::Vertical),
+            )
+            .item(
+                SettingItem::new(
+                    "Args",
+                    commit_text_field(
+                        move |_| args.clone(),
+                        move |value, cx| {
+                            let ix = ix;
+                            update_config(
+                                move |c, _| {
+                                    if let Some(agent) = c.custom_agents.get_mut(ix) {
+                                        agent.args = value;
+                                    }
+                                },
+                                cx,
+                            );
+                        },
+                    ),
+                )
+                .layout(Axis::Vertical),
+            )
+            // A corner × with a confirm dialog — no labeled Remove row.
+            .item(SettingItem::render(move |options, _, _| {
+                let ix = ix;
+                let agent_name = a.name.clone();
+                div().flex().justify_end().child(
+                    Button::new(("remove-agent", ix))
+                        .icon(IconName::Close)
+                        .danger()
+                        .ghost()
+                        .with_size(options.size())
+                        .on_click(move |_, window, cx| {
+                            let ix = ix;
+                            let agent_name = agent_name.clone();
+                            window.open_alert_dialog(cx, move |alert, _, _| {
+                                let ix = ix;
+                                let agent_name = agent_name.clone();
+                                alert
+                                    .title(format!("Remove “{agent_name}”?"))
+                                    .description("The agent disappears from the sidebar menus.")
+                                    .footer(
+                                        DialogFooter::new()
+                                            .child(
+                                                Button::new(("cancel-remove", ix))
+                                                    .label("Cancel")
+                                                    .outline()
+                                                    .small()
+                                                    .on_click(|_, window, cx| {
+                                                        window.close_dialog(cx)
+                                                    }),
+                                            )
+                                            .child(
+                                                Button::new(("confirm-remove", ix))
+                                                    .label("Remove")
+                                                    .danger()
+                                                    .small()
+                                                    .on_click(move |_, window, cx| {
+                                                        window.close_dialog(cx);
+                                                        update_config(
+                                                            move |c, _| {
+                                                                if ix < c.custom_agents.len() {
+                                                                    let removed =
+                                                                        c.custom_agents.remove(ix);
+                                                                    if c.new_session.kind
+                                                                        == removed.name
+                                                                    {
+                                                                        c.new_session.kind =
+                                                                            "terminal".into();
+                                                                    }
+                                                                }
+                                                            },
+                                                            cx,
+                                                        );
+                                                    }),
+                                            ),
+                                    )
+                            });
+                        }),
+                )
+            }));
         groups.push(group);
     }
     groups

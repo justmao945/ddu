@@ -4,17 +4,19 @@
 //! in both axes with visible scrollbars; diff lines never truncate —
 //! long lines scroll horizontally.
 
+use super::{PANEL_HEADER_PX, ROW_PX, diff_file_icon, hover_bg, meta_text, selection_bg};
+use crate::app::AppView;
+use crate::diff::{DiffFile, DiffLine};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{PANEL_HEADER_PX, ROW_PX, hover_bg, meta_text, selection_bg};
-use crate::app::AppView;
-use crate::diff::{DiffFile, DiffLine};
-
-/// Cap on the file-tree height; the tree scrolls beyond it.
-const FILE_TREE_MAX_H: f32 = 220.;
+/// Tree pane height bounds and default for the vertical splitter.
+const FILE_TREE_DEFAULT_H: f32 = 220.;
+const FILE_TREE_MIN_H: f32 = 80.;
+const FILE_TREE_MAX_H: f32 = 480.;
 
 pub(crate) fn render(
     this: &AppView,
@@ -34,7 +36,6 @@ pub(crate) fn render(
         .child(body(this, window, cx))
 }
 
-/// Panel header: branch + `N files · +A −R` (hidden entirely when clean).
 fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let diff = this.diff.as_ref();
     let branch = diff.and_then(|d| d.branch.clone());
@@ -47,7 +48,6 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
             )
         })
         .unwrap_or((0, 0, 0));
-    let mono = cx.theme().mono_font_family.clone();
 
     div()
         .h(px(PANEL_HEADER_PX))
@@ -56,44 +56,25 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .flex()
         .items_center()
         .gap_2()
-        .when_some(
-            Some(branch.unwrap_or_else(|| "Changes".into())),
-            |el, branch| {
-                el.child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_sm()
-                        .font_medium()
-                        .text_color(cx.theme().foreground.opacity(0.9))
-                        .child(branch),
-                )
-            },
+        // Left: branch, then the file count.
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_sm()
+                .font_medium()
+                .text_color(cx.theme().foreground.opacity(0.9))
+                .child(branch.unwrap_or_else(|| "Changes".into())),
         )
         .when(files > 0, |el| {
-            el.child(
-                h_flex()
-                    .items_center()
-                    .flex_shrink_0()
-                    .gap_2()
-                    .font_family(mono)
-                    .text_xs()
-                    .child(
-                        div()
-                            .text_color(cx.theme().green)
-                            .child(format!("+{added}")),
-                    )
-                    .child(
-                        div()
-                            .text_color(cx.theme().red)
-                            .child(format!("−{removed}")),
-                    )
-                    .child(meta_text(format!("{files} files"), cx)),
-            )
+            el.child(meta_text(format!("{files} files changed"), cx))
+                // Right-aligned +/- totals.
+                .child(div().flex_1())
+                .child(plus_minus(added, removed, cx))
         })
-        .child(div().flex_1())
+        .when(files == 0, |el| el.child(div().flex_1()))
 }
 
 fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -107,99 +88,157 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
 
     let file_ix = this.diff_file.min(diff.files.len() - 1);
 
+    let tree = build_tree(&diff.files);
     div()
         .flex_1()
         .min_h_0()
         .min_w_0()
-        .flex()
-        .flex_col()
-        // Scrollbars are siblings of the scroll area so they stay pinned
-        // to its viewport while content moves underneath.
-        .child({
-            let tree = build_tree(&diff.files);
-            let rows = diff.files.len() + tree.dirs.len();
-            div()
-                .relative()
-                .h(px((rows as f32 * (ROW_PX + 2.) + 16.).min(FILE_TREE_MAX_H)))
-                .flex_shrink_0()
-                .min_w_0()
-                .overflow_hidden()
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .child(
-                    div()
-                        .id("diff-tree-scroll")
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&this.diff_tree_scroll)
-                        .p_2()
-                        .child(tree_level(&tree, file_ix, 0, cx)),
-                )
-                .vertical_scrollbar(&this.diff_tree_scroll)
-        })
         .child(
-            div()
-                .relative()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
-                .overflow_hidden()
+            v_resizable("diff-split")
+                .with_state(&this.diff_split_state)
+                // Tree pane: draggable height between the header and the content.
                 .child(
-                    div()
-                        .id("diff-hunks")
-                        .size_full()
-                        // Cross-axis alignment: default stretch would clamp the
-                        // content column to the viewport width, so taffy would
-                        // report content_size == viewport and the horizontal
-                        // scrollbar would never get a range.
-                        .items_start()
-                        .overflow_scroll()
-                        .track_scroll(&this.diff_hunks_scroll)
-                        .p_2()
-                        .child(file_diff(&diff.files[file_ix], window, cx)),
+                    resizable_panel()
+                        .size(px(FILE_TREE_DEFAULT_H))
+                        .size_range(px(FILE_TREE_MIN_H)..px(FILE_TREE_MAX_H))
+                        .child(
+                            div()
+                                .relative()
+                                .size_full()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .id("diff-tree-scroll")
+                                        .size_full()
+                                        .overflow_y_scroll()
+                                        .track_scroll(&this.diff_tree_scroll)
+                                        .p_2()
+                                        .child(tree_level(
+                                            &tree,
+                                            file_ix,
+                                            0,
+                                            &this.diff_tree_closed,
+                                            cx,
+                                        )),
+                                )
+                                .vertical_scrollbar(&this.diff_tree_scroll),
+                        ),
                 )
-                .scrollbar(&this.diff_hunks_scroll, scroll::ScrollbarAxis::Both),
+                // Content pane: whatever height the splitter leaves.
+                .child(
+                    resizable_panel().size_range(px(120.)..px(f32::MAX)).child(
+                        div()
+                            .relative()
+                            .size_full()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .id("diff-hunks")
+                                    .size_full()
+                                    // Cross-axis alignment: default stretch would clamp the
+                                    // content column to the viewport width, so taffy would
+                                    // report content_size == viewport and the horizontal
+                                    // scrollbar would never get a range.
+                                    .items_start()
+                                    .overflow_scroll()
+                                    .track_scroll(&this.diff_hunks_scroll)
+                                    .p_2()
+                                    .child(file_diff(&diff.files[file_ix], window, cx)),
+                            )
+                            .scrollbar(&this.diff_hunks_scroll, scroll::ScrollbarAxis::Both)
+                            .context_menu({
+                                let path = diff.files[file_ix].path.clone();
+                                let lines = diff.files[file_ix]
+                                    .hunks
+                                    .iter()
+                                    .flat_map(|h| h.lines.iter())
+                                    .filter(|l| l.kind != '-')
+                                    .map(|l| l.text.clone())
+                                    .collect::<Vec<_>>();
+                                move |menu, _, _| {
+                                    let path = path.clone();
+                                    let contents = lines.join("\n");
+                                    menu.item(
+                                        PopupMenuItem::new("Copy File Path")
+                                            .icon(Icon::new(IconName::Copy))
+                                            .on_click(move |_, _, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    path.clone(),
+                                                ));
+                                            }),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new("Copy File Contents")
+                                            .icon(Icon::new(IconName::Copy))
+                                            .on_click(move |_, _, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    contents.clone(),
+                                                ));
+                                            }),
+                                    )
+                                }
+                            }),
+                    ),
+                ),
         )
         .into_any_element()
 }
 
 /// One level of the file tree. `files` are entries at this depth,
-/// `dirs` maps directory names to their nested entries. Owns clones so
-/// the built tree outlives the borrow of the source slice.
-#[derive(Clone)]
+/// `dirs` maps full directory paths to their nested subtrees (insertion
+/// order preserved). Owns clones so the built tree outlives the borrow
+/// of the source slice.
+#[derive(Clone, Default)]
 struct TreeNode {
     files: Vec<(usize, DiffFile)>,
-    dirs: Vec<(String, Vec<(usize, DiffFile)>)>,
+    dirs: Vec<(String, TreeNode)>,
 }
 
-/// Group flat file rows into directory tree nodes.
+/// Group flat file rows into a nested directory tree keyed by full dir
+/// path (unique expansion keys, any nesting depth).
 fn build_tree(files: &[DiffFile]) -> TreeNode {
-    let mut top: Vec<(usize, DiffFile)> = Vec::new();
-    let mut dirs: Vec<(String, Vec<(usize, DiffFile)>)> = Vec::new();
+    let mut root = TreeNode::default();
     for (ix, f) in files.iter().enumerate() {
-        match f.path.split_once('/') {
-            Some((dir, _rest)) => {
-                let key = dir.to_string();
-                if let Some(slot) = dirs.iter_mut().find(|(d, _)| *d == key) {
-                    slot.1.push((ix, f.clone()));
-                } else {
-                    dirs.push((key, vec![(ix, f.clone())]));
+        let parts: Vec<&str> = f.path.split('/').collect();
+        let mut node = &mut root;
+        for (depth, _) in parts.iter().enumerate().take(parts.len() - 1) {
+            let full = parts[..=depth].join("/");
+            let pos = match node.dirs.iter().position(|(p, _)| *p == full) {
+                Some(p) => p,
+                None => {
+                    node.dirs.push((full, TreeNode::default()));
+                    node.dirs.len() - 1
                 }
-            }
-            None => top.push((ix, f.clone())),
+            };
+            node = &mut node.dirs[pos].1;
         }
+        node.files.push((ix, f.clone()));
     }
-    TreeNode { files: top, dirs }
+    root
 }
 
-/// Render one depth level: files first, then dirs with an indent
-/// guide line running down their children.
-fn tree_level(
-    tree: &TreeNode,
+/// Recursive +/− totals for a subtree (dir rows show rolled-up stats).
+fn tree_stats(node: &TreeNode) -> (usize, usize) {
+    let mut stats = (
+        node.files.iter().map(|(_, f)| f.added).sum::<usize>(),
+        node.files.iter().map(|(_, f)| f.removed).sum::<usize>(),
+    );
+    for (_, sub) in &node.dirs {
+        let (a, r) = tree_stats(sub);
+        stats.0 += a;
+        stats.1 += r;
+    }
+    stats
+}
+fn tree_level<'a>(
+    tree: &'a TreeNode,
     selected: usize,
     depth: usize,
+    closed: &'a std::collections::HashSet<String>,
     cx: &mut Context<AppView>,
-) -> impl IntoElement {
+) -> impl IntoElement + use<'a> {
     let radius = cx.theme().radius;
     let active_bg = selection_bg(cx);
     let hov_bg = hover_bg(cx);
@@ -222,49 +261,62 @@ fn tree_level(
         ));
     }
 
-    for (dir, children) in &tree.dirs {
-        let sub = TreeNode {
-            files: children.clone(),
-            dirs: vec![],
-        };
-        let added: usize = children.iter().map(|(_, f)| f.added).sum();
-        let removed: usize = children.iter().map(|(_, f)| f.removed).sum();
-        level = level
-            .child(
-                div()
-                    .h(px(ROW_PX))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .pl(px(indent + 4.))
-                    .pr_2()
-                    .rounded(radius)
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .with_size(gpui_kit::component::Size::XSmall),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_xs()
-                            .font_medium()
-                            .whitespace_nowrap()
-                            .text_color(cx.theme().foreground.opacity(0.9))
-                            .child(format!("{dir}/")),
-                    )
-                    .child(div().flex_1())
-                    .child(plus_minus(added, removed, cx)),
-            )
-            // Nested level: vertical indent guide + deeper indent.
-            .child(
+    for (path, sub) in &tree.dirs {
+        let open = !closed.contains(path);
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let (added, removed) = tree_stats(sub);
+        let toggle = path.clone();
+        level = level.child(
+            div()
+                .id(SharedString::from(format!("diff-dir-{path}")))
+                .h(px(ROW_PX))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap_1()
+                .pl(px(indent + 4.))
+                .pr_2()
+                .rounded(radius)
+                .cursor_pointer()
+                .hover(move |el| el.bg(hov_bg))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    // All-open default: presence in the set = collapsed.
+                    if !this.diff_tree_closed.remove(&toggle) {
+                        this.diff_tree_closed.insert(toggle.clone());
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    Icon::new(if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .with_size(gpui_kit::component::Size::XSmall),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .font_medium()
+                        .whitespace_nowrap()
+                        .text_color(cx.theme().foreground.opacity(0.9))
+                        .child(format!("{name}/")),
+                )
+                .child(div().flex_1())
+                .child(plus_minus(added, removed, cx)),
+        );
+        if open {
+            level = level.child(
+                // Nested level: vertical indent guide + deeper indent.
                 div()
                     .ml(px(indent + 7.))
                     .pl(px(indent + 8.))
                     .border_l_1()
                     .border_color(guide)
-                    .child(tree_level(&sub, selected, depth + 1, cx)),
+                    .child(tree_level(sub, selected, depth + 1, closed, cx)),
             );
+        }
     }
 
     level
@@ -282,6 +334,8 @@ fn file_row(
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
+    let name_copy = name.clone();
+    let path_copy = f.path.clone();
     // Full width so the `+N −N` stats pin to the panel's right edge
     // (items_stretch on the parent) instead of trailing the filename.
     div()
@@ -305,7 +359,11 @@ fn file_row(
             this.diff_file = ix;
             cx.notify();
         }))
-        .child(Icon::new(IconName::File).with_size(gpui_kit::component::Size::XSmall))
+        .child(
+            diff_file_icon(&f.path)
+                .with_size(gpui_kit::component::Size::XSmall)
+                .text_color(cx.theme().foreground.opacity(0.6)),
+        )
         .child(
             div()
                 .flex_1()
@@ -317,6 +375,24 @@ fn file_row(
                 .child(name),
         )
         .child(plus_minus(f.added, f.removed, cx))
+        .context_menu(move |menu, _, _| {
+            let name_copy = name_copy.clone();
+            let path_copy = path_copy.clone();
+            menu.item(
+                PopupMenuItem::new("Copy File Name")
+                    .icon(Icon::new(IconName::Copy))
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(name_copy.clone()));
+                    }),
+            )
+            .item(
+                PopupMenuItem::new("Copy Path")
+                    .icon(Icon::new(IconName::Copy))
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(path_copy.clone()));
+                    }),
+            )
+        })
 }
 
 fn plus_minus(added: usize, removed: usize, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -367,12 +443,15 @@ fn file_diff(file: &DiffFile, window: &mut Window, cx: &mut Context<AppView>) ->
             cx,
         ));
     }
+    let mut line_no = 0usize;
     for hunk in &file.hunks {
         let mut h = v_flex()
             .items_start()
             .child(hunk_header(hunk.header.clone(), cx));
         for line in &hunk.lines {
-            h = h.child(diff_line(line, cx));
+            let id = line_no;
+            line_no += 1;
+            h = h.child(diff_line(id, line, cx));
         }
         hunks = hunks.child(h);
     }
@@ -383,6 +462,60 @@ fn file_diff(file: &DiffFile, window: &mut Window, cx: &mut Context<AppView>) ->
         ));
     }
     hunks
+}
+
+/// Width the content column needs so the longest line never clips.
+/// Candidates are ranked by a display-cell estimate (non-ASCII ~2 cells),
+fn diff_line(id: usize, line: &DiffLine, cx: &mut Context<AppView>) -> impl IntoElement {
+    let (old, new) = (
+        line.old_no.map(|n| n.to_string()).unwrap_or_default(),
+        line.new_no.map(|n| n.to_string()).unwrap_or_default(),
+    );
+    let tint = match line.kind {
+        '+' => Some(cx.theme().green.opacity(0.12)),
+        '-' => Some(cx.theme().red.opacity(0.12)),
+        _ => None,
+    };
+    let mono = cx.theme().mono_font_family.clone();
+    let sign_color = match line.kind {
+        '+' => cx.theme().green,
+        '-' => cx.theme().red,
+        _ => cx.theme().foreground.opacity(0.0),
+    };
+    let text = line.text.clone();
+
+    div()
+        .id(("diff-line", id))
+        .flex()
+        .items_start()
+        .min_w_full()
+        .font_family(mono)
+        .text_xs()
+        .when_some(tint, |el, tint| el.bg(tint))
+        // Double-click copies the raw line (no gutter chrome).
+        .on_click(move |ev, _, cx| {
+            if ev.click_count() == 2 {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            }
+        })
+        .child(gutter(old, cx))
+        .child(gutter(new, cx))
+        .child(
+            div()
+                .w(px(14.))
+                .flex_shrink_0()
+                .text_color(sign_color)
+                .child(line.kind.to_string()),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .pl_2()
+                .pr_3()
+                .whitespace_nowrap()
+                .text_color(cx.theme().foreground.opacity(0.85))
+                .child(line.text.clone()),
+        )
 }
 
 /// Width the content column needs so the longest line never clips.
@@ -446,50 +579,6 @@ fn hunk_header(header: String, cx: &mut Context<AppView>) -> impl IntoElement {
         .font_family(cx.theme().mono_font_family.clone())
         .text_color(cx.theme().foreground.opacity(0.5))
         .child(header)
-}
-
-fn diff_line(line: &DiffLine, cx: &mut Context<AppView>) -> impl IntoElement {
-    let (old, new) = (
-        line.old_no.map(|n| n.to_string()).unwrap_or_default(),
-        line.new_no.map(|n| n.to_string()).unwrap_or_default(),
-    );
-    let tint = match line.kind {
-        '+' => Some(cx.theme().green.opacity(0.12)),
-        '-' => Some(cx.theme().red.opacity(0.12)),
-        _ => None,
-    };
-    let mono = cx.theme().mono_font_family.clone();
-    let sign_color = match line.kind {
-        '+' => cx.theme().green,
-        '-' => cx.theme().red,
-        _ => cx.theme().foreground.opacity(0.0),
-    };
-
-    div()
-        .flex()
-        .items_start()
-        .min_w_full()
-        .font_family(mono)
-        .text_xs()
-        .when_some(tint, |el, tint| el.bg(tint))
-        .child(gutter(old, cx))
-        .child(gutter(new, cx))
-        .child(
-            div()
-                .w(px(14.))
-                .flex_shrink_0()
-                .text_color(sign_color)
-                .child(line.kind.to_string()),
-        )
-        .child(
-            div()
-                .flex_shrink_0()
-                .pl_2()
-                .pr_3()
-                .whitespace_nowrap()
-                .text_color(cx.theme().foreground.opacity(0.85))
-                .child(line.text.clone()),
-        )
 }
 
 fn gutter(no: String, cx: &mut Context<AppView>) -> impl IntoElement {
