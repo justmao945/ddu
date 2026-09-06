@@ -66,6 +66,10 @@ borrowed` crash.
   granted here; synthetic clicks are NOT — no accessibility). Prove liveness
   by state change: edit a tracked file → right diff panel must show it within
   ~3 s; compare screenshot hashes across the change.
+- Settings window: `DDU_VERIFY_SETTINGS=<page_ix> bash scripts/ddu-app.sh`
+  bakes the flag into the bundle launcher; the app then auto-opens the
+  Settings window on that page (0-based) for screenshots. Relaunch without
+  the env var to regenerate a clean launcher.
 
 ## Conventions
 

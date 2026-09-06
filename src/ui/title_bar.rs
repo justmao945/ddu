@@ -1,8 +1,8 @@
 //! Slim title bar: app name + project breadcrumb.
 
 use gpui_kit::component::TitleBar;
-use gpui_kit::*;
 use gpui_kit::component::*;
+use gpui_kit::*;
 
 use super::meta_text;
 use crate::app::AppView;
@@ -32,7 +32,13 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                 .gap_2()
                 .px_2()
                 .text_sm()
-                .child(meta_text(breadcrumb, cx).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis()),
+                .child(
+                    meta_text(breadcrumb, cx)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis(),
+                ),
         )
         .child(
             h_flex()

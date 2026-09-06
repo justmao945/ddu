@@ -52,7 +52,9 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
             let weak = weak.clone();
             move |_, event: &KeyDownEvent, _, cx| {
                 // ⌘-chords stay reserved for app actions.
-                let Some(bytes) = TermSession::encode_keystroke(&event.keystroke) else { return };
+                let Some(bytes) = TermSession::encode_keystroke(&event.keystroke) else {
+                    return;
+                };
                 if let Some(term) = weak.upgrade() {
                     term.update(cx, |s, cx| {
                         s.write(&bytes);
@@ -128,31 +130,33 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
             move |menu, _window, cx| {
                 // A mouse-tracking child owns right-click — the empty
                 // menu suppresses the popup entirely.
-                if weak.upgrade().is_some_and(|t| t.read(cx).mouse_tracking() != crate::terminal::MouseTracking::None) {
+                if weak.upgrade().is_some_and(|t| {
+                    t.read(cx).mouse_tracking() != crate::terminal::MouseTracking::None
+                }) {
                     return menu;
                 }
-                let has_selection =
-                    weak.upgrade().is_some_and(|t| t.read(cx).has_selection());
-                let can_paste =
-                    cx.read_from_clipboard().is_some_and(|item| item.text().is_some());
+                let has_selection = weak.upgrade().is_some_and(|t| t.read(cx).has_selection());
+                let can_paste = cx
+                    .read_from_clipboard()
+                    .is_some_and(|item| item.text().is_some());
                 let copy_term = weak.clone();
                 let paste_term = weak.clone();
                 menu.item(
-                    PopupMenuItem::new("Copy").disabled(!has_selection).on_click(
-                        move |_, _, cx| {
+                    PopupMenuItem::new("Copy")
+                        .disabled(!has_selection)
+                        .on_click(move |_, _, cx| {
                             if let Some(t) = copy_term.upgrade() {
                                 t.update(cx, |s, cx| {
                                     s.copy_selection(cx);
                                 });
                             }
-                        },
-                    ),
+                        }),
                 )
                 .item(
-                    PopupMenuItem::new("Paste").disabled(!can_paste).on_click(
-                        move |_, _, cx| {
-                            let Some(text) =
-                                cx.read_from_clipboard().and_then(|item| item.text())
+                    PopupMenuItem::new("Paste")
+                        .disabled(!can_paste)
+                        .on_click(move |_, _, cx| {
+                            let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
                             else {
                                 return;
                             };
@@ -162,137 +166,208 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                                     cx.emit(crate::terminal::TermEvent::Wakeup);
                                 });
                             }
-                        },
-                    ),
+                        }),
                 )
             }
         })
         .child(
             div()
                 .h_full()
-        // Mouse text selection: down starts (double-click = semantic
-        // word), move grows while the button is held, up settles — a
-        // plain click collapses to nothing and clears the wash. The
-        // right-edge scrollbar strip intercepts first: thumb drag or
-        // track paging instead of selecting.
-        .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener({
-            let weak = weak.clone();
-            move |_, event: &MouseDownEvent, window, cx| {
-                if let Some(term) = weak.upgrade() {
-                    term.update(cx, |s, cx| {
-                        // A mouse-tracking child (TUI) gets the press as
-                        // an escape report instead of text selection.
-                        if s.mouse_button(gpui_kit::MouseButton::Left, true, event.position, &event.modifiers, window, cx) {
-                            return;
+                // Mouse text selection: down starts (double-click = semantic
+                // word), move grows while the button is held, up settles — a
+                // plain click collapses to nothing and clears the wash. The
+                // right-edge scrollbar strip intercepts first: thumb drag or
+                // track paging instead of selecting.
+                .on_mouse_down(
+                    gpui_kit::MouseButton::Left,
+                    cx.listener({
+                        let weak = weak.clone();
+                        move |_, event: &MouseDownEvent, window, cx| {
+                            if let Some(term) = weak.upgrade() {
+                                term.update(cx, |s, cx| {
+                                    // A mouse-tracking child (TUI) gets the press as
+                                    // an escape report instead of text selection.
+                                    if s.mouse_button(
+                                        gpui_kit::MouseButton::Left,
+                                        true,
+                                        event.position,
+                                        &event.modifiers,
+                                        window,
+                                        cx,
+                                    ) {
+                                        return;
+                                    }
+                                    if s.scrollbar_mouse_down(event.position, cx) {
+                                        return;
+                                    }
+                                    if let Some((cell, side)) =
+                                        s.cell_at(event.position, window, cx)
+                                    {
+                                        s.begin_selection(cell, side, event.click_count, cx);
+                                    }
+                                });
+                            }
                         }
-                        if s.scrollbar_mouse_down(event.position, cx) {
-                            return;
+                    }),
+                )
+                .on_mouse_move(cx.listener({
+                    let weak = weak.clone();
+                    move |_, event: &MouseMoveEvent, window, cx| {
+                        if let Some(term) = weak.upgrade() {
+                            term.update(cx, |s, cx| {
+                                if s.mouse_motion(event.position, &event.modifiers, window, cx) {
+                                    return;
+                                }
+                                if s.scrollbar_mouse_drag(event.position, cx) {
+                                    return;
+                                }
+                                if let Some((cell, side)) = s.cell_at(event.position, window, cx) {
+                                    s.grow_selection(cell, side, cx);
+                                }
+                            });
                         }
-                        if let Some((cell, side)) = s.cell_at(event.position, window, cx) {
-                            s.begin_selection(cell, side, event.click_count, cx);
-                        }
-                    });
-                }
-            }
-        }))
-        .on_mouse_move(cx.listener({
-            let weak = weak.clone();
-            move |_, event: &MouseMoveEvent, window, cx| {
-                if let Some(term) = weak.upgrade() {
-                    term.update(cx, |s, cx| {
-                        if s.mouse_motion(event.position, &event.modifiers, window, cx) {
-                            return;
-                        }
-                        if s.scrollbar_mouse_drag(event.position, cx) {
-                            return;
-                        }
-                        if let Some((cell, side)) = s.cell_at(event.position, window, cx) {
-                            s.grow_selection(cell, side, cx);
-                        }
-                    });
-                }
-            }
-        }))
-        .on_mouse_up(gpui_kit::MouseButton::Left, cx.listener({
-            let weak = weak.clone();
-            move |_, event: &MouseUpEvent, window, cx| {
-                if let Some(term) = weak.upgrade() {
-                    term.update(cx, |s, cx| {
-                        if s.mouse_button(gpui_kit::MouseButton::Left, false, event.position, &event.modifiers, window, cx) {
-                            return;
-                        }
-                        s.scrollbar_mouse_up();
-                        s.end_selection(cx);
-                    });
-                }
-            }
-        }))
-        .on_mouse_up_out(gpui_kit::MouseButton::Left, cx.listener({
-            let weak = weak.clone();
-            move |_, event: &MouseUpEvent, window, cx| {
-                if let Some(term) = weak.upgrade() {
-                    term.update(cx, |s, cx| {
-                        if s.mouse_button(gpui_kit::MouseButton::Left, false, event.position, &event.modifiers, window, cx) {
-                            return;
-                        }
-                        s.scrollbar_mouse_up();
-                        s.end_selection(cx);
-                    });
-                }
-            }
-        }))
-        // Right/middle buttons exist only for mouse-tracking children —
-        // otherwise right-click opens the context menu and middle is inert.
-        .on_mouse_down(gpui_kit::MouseButton::Right, cx.listener({
-            let weak = weak.clone();
-            move |_, event: &MouseDownEvent, window, cx| {
-                if let Some(term) = weak.upgrade() {
-                    term.update(cx, |s, cx| {
-                        s.mouse_button(gpui_kit::MouseButton::Right, true, event.position, &event.modifiers, window, cx);
-                    });
-                }
-            }
-        }))
-        .on_mouse_up(gpui_kit::MouseButton::Right, cx.listener({
-            let weak = weak.clone();
-            move |_, event: &MouseUpEvent, window, cx| {
-                if let Some(term) = weak.upgrade() {
-                    term.update(cx, |s, cx| {
-                        s.mouse_button(gpui_kit::MouseButton::Right, false, event.position, &event.modifiers, window, cx);
-                    });
-                }
-            }
-        }))
-        .on_mouse_down(gpui_kit::MouseButton::Middle, cx.listener({
-            let weak = weak.clone();
-            move |_, event: &MouseDownEvent, window, cx| {
-                if let Some(term) = weak.upgrade() {
-                    term.update(cx, |s, cx| {
-                        s.mouse_button(gpui_kit::MouseButton::Middle, true, event.position, &event.modifiers, window, cx);
-                    });
-                }
-            }
-        }))
-        .on_mouse_up(gpui_kit::MouseButton::Middle, cx.listener({
-            let weak = weak.clone();
-            move |_, event: &MouseUpEvent, window, cx| {
-                if let Some(term) = weak.upgrade() {
-                    term.update(cx, |s, cx| {
-                        s.mouse_button(gpui_kit::MouseButton::Middle, false, event.position, &event.modifiers, window, cx);
-                    });
-                }
-            }
-        }))
-        .on_action(cx.listener({
-            let weak = weak.clone();
-            move |_, _: &TermCopy, _, cx| {
-                if let Some(term) = weak.upgrade() {
-                    if term.update(cx, |s, cx| s.copy_selection(cx)) {
-                        cx.stop_propagation();
                     }
-                }
-            }
-        }))
+                }))
+                .on_mouse_up(
+                    gpui_kit::MouseButton::Left,
+                    cx.listener({
+                        let weak = weak.clone();
+                        move |_, event: &MouseUpEvent, window, cx| {
+                            if let Some(term) = weak.upgrade() {
+                                term.update(cx, |s, cx| {
+                                    if s.mouse_button(
+                                        gpui_kit::MouseButton::Left,
+                                        false,
+                                        event.position,
+                                        &event.modifiers,
+                                        window,
+                                        cx,
+                                    ) {
+                                        return;
+                                    }
+                                    s.scrollbar_mouse_up();
+                                    s.end_selection(cx);
+                                });
+                            }
+                        }
+                    }),
+                )
+                .on_mouse_up_out(
+                    gpui_kit::MouseButton::Left,
+                    cx.listener({
+                        let weak = weak.clone();
+                        move |_, event: &MouseUpEvent, window, cx| {
+                            if let Some(term) = weak.upgrade() {
+                                term.update(cx, |s, cx| {
+                                    if s.mouse_button(
+                                        gpui_kit::MouseButton::Left,
+                                        false,
+                                        event.position,
+                                        &event.modifiers,
+                                        window,
+                                        cx,
+                                    ) {
+                                        return;
+                                    }
+                                    s.scrollbar_mouse_up();
+                                    s.end_selection(cx);
+                                });
+                            }
+                        }
+                    }),
+                )
+                // Right/middle buttons exist only for mouse-tracking children —
+                // otherwise right-click opens the context menu and middle is inert.
+                .on_mouse_down(
+                    gpui_kit::MouseButton::Right,
+                    cx.listener({
+                        let weak = weak.clone();
+                        move |_, event: &MouseDownEvent, window, cx| {
+                            if let Some(term) = weak.upgrade() {
+                                term.update(cx, |s, cx| {
+                                    s.mouse_button(
+                                        gpui_kit::MouseButton::Right,
+                                        true,
+                                        event.position,
+                                        &event.modifiers,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }
+                    }),
+                )
+                .on_mouse_up(
+                    gpui_kit::MouseButton::Right,
+                    cx.listener({
+                        let weak = weak.clone();
+                        move |_, event: &MouseUpEvent, window, cx| {
+                            if let Some(term) = weak.upgrade() {
+                                term.update(cx, |s, cx| {
+                                    s.mouse_button(
+                                        gpui_kit::MouseButton::Right,
+                                        false,
+                                        event.position,
+                                        &event.modifiers,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }
+                    }),
+                )
+                .on_mouse_down(
+                    gpui_kit::MouseButton::Middle,
+                    cx.listener({
+                        let weak = weak.clone();
+                        move |_, event: &MouseDownEvent, window, cx| {
+                            if let Some(term) = weak.upgrade() {
+                                term.update(cx, |s, cx| {
+                                    s.mouse_button(
+                                        gpui_kit::MouseButton::Middle,
+                                        true,
+                                        event.position,
+                                        &event.modifiers,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }
+                    }),
+                )
+                .on_mouse_up(
+                    gpui_kit::MouseButton::Middle,
+                    cx.listener({
+                        let weak = weak.clone();
+                        move |_, event: &MouseUpEvent, window, cx| {
+                            if let Some(term) = weak.upgrade() {
+                                term.update(cx, |s, cx| {
+                                    s.mouse_button(
+                                        gpui_kit::MouseButton::Middle,
+                                        false,
+                                        event.position,
+                                        &event.modifiers,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }
+                    }),
+                )
+                .on_action(cx.listener({
+                    let weak = weak.clone();
+                    move |_, _: &TermCopy, _, cx| {
+                        if let Some(term) = weak.upgrade() {
+                            if term.update(cx, |s, cx| s.copy_selection(cx)) {
+                                cx.stop_propagation();
+                            }
+                        }
+                    }
+                }))
                 .flex_1()
                 .min_h_0()
                 .min_w_0()
@@ -351,13 +426,28 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .track_focus(&this.window_focus)
         .text_sm()
         .text_color(cx.theme().muted_foreground)
-        .child(if error.is_some() { "Unable to start session" } else { "No sessions in this project" })
-        .when_some(error.clone(), |el, error| el.child(div().max_w(px(480.)).child(error)))
-        .child(Button::new("empty-session-action")
-            .tab_stop(false)
-            .label(if error.is_some() { "Retry" } else { "New session" })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if error.is_some() { this.restart_current_session(window, cx); }
-                else { this.spawn_session(window, cx); }
-            })))
+        .child(if error.is_some() {
+            "Unable to start session"
+        } else {
+            "No sessions in this project"
+        })
+        .when_some(error.clone(), |el, error| {
+            el.child(div().max_w(px(480.)).child(error))
+        })
+        .child(
+            Button::new("empty-session-action")
+                .tab_stop(false)
+                .label(if error.is_some() {
+                    "Retry"
+                } else {
+                    "New session"
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if error.is_some() {
+                        this.restart_current_session(window, cx);
+                    } else {
+                        this.spawn_session(window, cx);
+                    }
+                })),
+        )
 }

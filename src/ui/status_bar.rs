@@ -8,8 +8,8 @@
 //! * [`render_diff`] — under the changes panel: diff toggle at the
 //!   right.
 
-use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::*;
 use gpui_kit::*;
 
@@ -19,17 +19,19 @@ use crate::app::AppView;
 pub(crate) fn render_sidebar(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     StatusBar::new()
         .left(h_flex().items_center().child(toggle_sessions(this, cx)))
-        .right(h_flex().items_center().child(
-            Button::new("add-project")
-                .icon(AppIcon::FolderPlus)
-                .ghost()
-                .small()
-                .tab_stop(false)
-                .tooltip("Add project…")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.add_project(window, cx);
-                })),
-        ))
+        .right(
+            h_flex().items_center().child(
+                Button::new("add-project")
+                    .icon(AppIcon::FolderPlus)
+                    .ghost()
+                    .small()
+                    .tab_stop(false)
+                    .tooltip("Add project…")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.add_project(window, cx);
+                    })),
+            ),
+        )
 }
 
 pub(crate) fn render_center(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {

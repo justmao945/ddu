@@ -8,17 +8,33 @@
 
 use std::time::Duration;
 
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::*;
 use gpui_kit::*;
 
-use crate::diff::{git, GitDiff};
-use crate::session::{initial_projects, AgentStatus, Project};
+use crate::diff::{GitDiff, git};
+use crate::session::{AgentStatus, Project, initial_projects};
 use crate::terminal::{TermEvent, TermSession};
 use crate::ui;
 
 // Global keyboard actions: new session, dock toggles, close session.
-gpui_kit::actions!(ddu, [NewSession, ToggleSessions, ToggleDiff, CloseSession, OpenSettings, TermTab, TermBacktab, TermPaste, TermCopy, CloseSettings]);
+gpui_kit::actions!(
+    ddu,
+    [
+        NewSession,
+        ToggleSessions,
+        ToggleDiff,
+        CloseSession,
+        OpenSettings,
+        TermTab,
+        TermBacktab,
+        TermPaste,
+        TermCopy,
+        CloseSettings
+    ]
+);
 
 /// Seconds between working-tree diff polls.
 const DIFF_POLL_SECS: u64 = 3;
@@ -107,7 +123,11 @@ impl AppView {
         } else {
             cfg.projects
                 .iter()
-                .map(|p| Project { name: p.name.clone(), path: p.path.clone(), sessions: vec![] })
+                .map(|p| Project {
+                    name: p.name.clone(),
+                    path: p.path.clone(),
+                    sessions: vec![],
+                })
                 .collect()
         };
         let mut expanded = projects.iter().map(|_| true).collect::<Vec<_>>();
@@ -186,7 +206,11 @@ impl AppView {
 
     /// Create a session with the default launcher and focus it.
     pub(crate) fn spawn_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let kind = cx.global::<crate::config::Config>().new_session.kind.clone();
+        let kind = cx
+            .global::<crate::config::Config>()
+            .new_session
+            .kind
+            .clone();
         self.spawn_session_of(&kind, window, cx);
     }
 
@@ -217,14 +241,16 @@ impl AppView {
         let (status, term) = match TermSession::spawn(&cmd.spec(&cwd), cx) {
             Ok(term) => {
                 let program = cmd.program.clone();
-                cx.subscribe_in(&term, window, move |this, emitter, event: &TermEvent, window, cx| {
-                    match event {
+                cx.subscribe_in(
+                    &term,
+                    window,
+                    move |this, emitter, event: &TermEvent, window, cx| match event {
                         TermEvent::Wakeup => cx.notify(),
                         TermEvent::Exit(code) => {
                             this.on_session_exit(emitter.clone(), *code, &program, window, cx)
                         }
-                    }
-                })
+                    },
+                )
                 .detach();
                 let focus = term.read(cx).focus.clone();
                 focus.focus(window, cx);
@@ -249,7 +275,11 @@ impl AppView {
                 cmd,
                 kind: kind.to_string(),
                 started: std::time::Instant::now(),
-                ended: if term.is_none() { Some(std::time::Instant::now()) } else { None },
+                ended: if term.is_none() {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                },
                 term,
             });
             self.current_session = project.sessions.len() - 1;
@@ -263,23 +293,22 @@ impl AppView {
     /// the sync picker runs a nested modal runloop inside the click
     pub(crate) fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.weak_entity();
-        window.spawn(cx, async move |cx| {
-            let picked = rfd::AsyncFileDialog::new()
-                .set_title("Choose a project folder")
-                .pick_folder()
-                .await
-                .map(|handle| handle.path().to_string_lossy().into_owned());
-            let _ = view.update_in(cx, |this, window, cx| {
-                if let Some(path) = picked {
-                    this.add_project_path(&path, cx);
-                    this.select_session(this.current_project, this.current_session, window, cx);
-                }
-            });
-        })
-        .detach();
+        window
+            .spawn(cx, async move |cx| {
+                let picked = rfd::AsyncFileDialog::new()
+                    .set_title("Choose a project folder")
+                    .pick_folder()
+                    .await
+                    .map(|handle| handle.path().to_string_lossy().into_owned());
+                let _ = view.update_in(cx, |this, window, cx| {
+                    if let Some(path) = picked {
+                        this.add_project_path(&path, cx);
+                        this.select_session(this.current_project, this.current_session, window, cx);
+                    }
+                });
+            })
+            .detach();
     }
-
-
 
     pub(crate) fn add_project_path(&mut self, raw: &str, cx: &mut Context<Self>) {
         let path = std::path::PathBuf::from(raw);
@@ -298,7 +327,11 @@ impl AppView {
             cx.notify();
             return;
         }
-        self.projects.push(Project { name, path: path.clone(), sessions: vec![] });
+        self.projects.push(Project {
+            name,
+            path: path.clone(),
+            sessions: vec![],
+        });
         self.expanded.push(true);
         self.current_project = self.projects.len() - 1;
         self.current_session = 0;
@@ -335,12 +368,17 @@ impl AppView {
         }
         let removed = self.projects.remove(project);
         for session in removed.sessions {
-            if let Some(term) = session.term { term.update(cx, |s, _| s.kill()); }
+            if let Some(term) = session.term {
+                term.update(cx, |s, _| s.kill());
+            }
         }
         self.expanded.remove(project);
         let was_current = project == self.current_project;
-        self.current_project = index_after_removal(self.current_project, project, self.projects.len());
-        if was_current { self.current_session = 0; }
+        self.current_project =
+            index_after_removal(self.current_project, project, self.projects.len());
+        if was_current {
+            self.current_session = 0;
+        }
         self.hovered_project = None;
         self.hovered_session = None;
         self.menu_project = None;
@@ -365,17 +403,24 @@ impl AppView {
         };
         let ended = std::time::Instant::now();
         let mut matched = false;
-        for session in self.projects.iter_mut().flat_map(|p| p.sessions.iter_mut())
+        for session in self
+            .projects
+            .iter_mut()
+            .flat_map(|p| p.sessions.iter_mut())
             .filter(|s| s.term.as_ref() == Some(&emitter))
         {
             matched = true;
             session.status = status.clone();
             session.ended = Some(ended);
         }
-        if !matched { return; }
+        if !matched {
+            return;
+        }
         // Only agents merit a toast: the exit banner already covers the
         // terminal, and a shell exits every time the user types `exit`.
-        let is_agent = self.projects.iter()
+        let is_agent = self
+            .projects
+            .iter()
             .flat_map(|p| p.sessions.iter())
             .any(|s| s.term.as_ref() == Some(&emitter) && s.is_agent());
         if !is_agent {
@@ -435,7 +480,8 @@ impl AppView {
         } else if p == self.current_project {
             // Keep pointing at the same session when a sibling before it
             // went away.
-            self.current_session = index_after_removal(self.current_session, six, self.projects[p].sessions.len());
+            self.current_session =
+                index_after_removal(self.current_session, six, self.projects[p].sessions.len());
         }
         self.hovered_session = None;
         window.push_notification(Notification::info(format!("Closed “{title}”")), cx);
@@ -467,7 +513,7 @@ impl AppView {
             alert
                 .title(format!("Close “{title}”?"))
                 .description("The running agent will be stopped.")
-                .show_cancel(true)
+                // Enter confirms, same as the footer button.
                 .on_ok({
                     let this = this.clone();
                     move |_, window, cx| {
@@ -477,6 +523,35 @@ impl AppView {
                         true
                     }
                 })
+                // Custom footer: the app's compact button recipe instead
+                // of the stock large OK/Cancel pair.
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("cancel-close")
+                                .label("Cancel")
+                                .outline()
+                                .small()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("confirm-close")
+                                .label("Close Session")
+                                .danger()
+                                .small()
+                                .on_click({
+                                    let this = this.clone();
+                                    move |_, window, cx| {
+                                        if let Some(this) = this.upgrade() {
+                                            this.update(cx, |v, cx| {
+                                                v.close_session(p, six, window, cx)
+                                            });
+                                        }
+                                        window.close_dialog(cx);
+                                    }
+                                }),
+                        ),
+                )
         });
     }
 
@@ -497,14 +572,16 @@ impl AppView {
         let (status, term) = match TermSession::spawn(&cmd.spec(&cwd), cx) {
             Ok(term) => {
                 let program = cmd.program.clone();
-                cx.subscribe_in(&term, window, move |this, emitter, event: &TermEvent, window, cx| {
-                    match event {
+                cx.subscribe_in(
+                    &term,
+                    window,
+                    move |this, emitter, event: &TermEvent, window, cx| match event {
                         TermEvent::Wakeup => cx.notify(),
                         TermEvent::Exit(code) => {
                             this.on_session_exit(emitter.clone(), *code, &program, window, cx)
                         }
-                    }
-                })
+                    },
+                )
                 .detach();
                 let focus = term.read(cx).focus.clone();
                 focus.focus(window, cx);
@@ -512,16 +589,23 @@ impl AppView {
             }
             Err(err) => {
                 self.window_focus.focus(window, cx);
-                window.push_notification(Notification::error(format!("Failed to restart: {err}")), cx);
+                window.push_notification(
+                    Notification::error(format!("Failed to restart: {err}")),
+                    cx,
+                );
                 (AgentStatus::Error(err.to_string()), None)
-            },
+            }
         };
         if let Some(session) = project.sessions.get_mut(self.current_session) {
             session.status = status;
             session.title = cmd.basename();
             session.term = term;
             session.started = std::time::Instant::now();
-            session.ended = if session.term.is_none() { Some(std::time::Instant::now()) } else { None };
+            session.ended = if session.term.is_none() {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
         }
         if self.current_term().is_some() {
             window.push_notification(Notification::info(format!("Restarted “{title}”")), cx);
@@ -636,7 +720,6 @@ impl AppView {
             .unwrap_or(px(DIFF_DEFAULT))
     }
 
-
     fn reset_diff(&mut self) {
         self.diff = None;
         self.diff_error = None;
@@ -646,10 +729,17 @@ impl AppView {
     }
 
     fn apply_diff(&mut self, result: anyhow::Result<GitDiff>) {
-        let selected = self.diff.as_ref().and_then(|d| d.files.get(self.diff_file)).map(|f| f.path.clone());
+        let selected = self
+            .diff
+            .as_ref()
+            .and_then(|d| d.files.get(self.diff_file))
+            .map(|f| f.path.clone());
         match result {
             Ok(diff) => {
-                let next = selected.as_ref().and_then(|path| diff.files.iter().position(|f| &f.path == path)).unwrap_or(0);
+                let next = selected
+                    .as_ref()
+                    .and_then(|path| diff.files.iter().position(|f| &f.path == path))
+                    .unwrap_or(0);
                 if selected.as_ref() != diff.files.get(next).map(|f| &f.path) {
                     self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
                 }
@@ -657,7 +747,10 @@ impl AppView {
                 self.diff = Some(diff);
                 self.diff_error = None;
             }
-            Err(err) => { self.diff = None; self.diff_error = Some(err.to_string()); }
+            Err(err) => {
+                self.diff = None;
+                self.diff_error = Some(err.to_string());
+            }
         }
     }
 
@@ -668,10 +761,14 @@ impl AppView {
         let path = self.current_project().path.clone();
         let this = cx.weak_entity();
         cx.spawn(async move |_, cx| {
-            let result = cx.background_spawn(async move { git::head_diff(&path) }).await;
-            if let Err(e) = &result { eprintln!("[ddu] diff err: {e:#}"); }
+            let result = cx
+                .background_spawn(async move { git::head_diff(&path) })
+                .await;
+            if let Err(e) = &result {
+                eprintln!("[ddu] diff err: {e:#}");
+            }
             let _ = this.update(cx, |v, cx| {
-                    if v.diff_seq == seq {
+                if v.diff_seq == seq {
                     v.apply_diff(result);
                     cx.notify();
                 }
@@ -690,8 +787,11 @@ impl AppView {
                     .timer(Duration::from_secs(DIFF_POLL_SECS))
                     .await;
                 let Some(view) = this.upgrade() else { break };
-                let (path, seq) = view.read_with(cx, |v, _| (v.current_project().path.clone(), v.diff_seq));
-                let result = cx.background_spawn(async move { git::head_diff(&path) }).await;
+                let (path, seq) =
+                    view.read_with(cx, |v, _| (v.current_project().path.clone(), v.diff_seq));
+                let result = cx
+                    .background_spawn(async move { git::head_diff(&path) })
+                    .await;
                 this.update(cx, |v, cx| {
                     if v.diff_seq == seq {
                         v.apply_diff(result);
@@ -709,7 +809,9 @@ impl AppView {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() { break; }
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
             }
         })
         .detach();
@@ -723,12 +825,17 @@ impl Render for AppView {
             .bg(cx.theme().background)
             .on_action(cx.listener(|_, _: &OpenSettings, _, cx| ui::settings_window::open(cx)))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {
-                if window.has_active_dialog(cx) { return; }
+                if window.has_active_dialog(cx) {
+                    return;
+                }
                 this.spawn_session(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleDiff, _, cx| this.toggle_diff(cx)))
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| {
-                if window.has_active_dialog(cx) { window.close_dialog(cx); return; }
+                if window.has_active_dialog(cx) {
+                    window.close_dialog(cx);
+                    return;
+                }
                 let p = this.current_project;
                 let six = this.current_session;
                 this.request_close_session(p, six, window, cx);
@@ -793,7 +900,9 @@ impl Render for AppView {
 
 /// Preserve the selected identity when an earlier sibling is removed.
 fn index_after_removal(selected: usize, removed: usize, remaining: usize) -> usize {
-    selected.saturating_sub(usize::from(removed < selected)).min(remaining.saturating_sub(1))
+    selected
+        .saturating_sub(usize::from(removed < selected))
+        .min(remaining.saturating_sub(1))
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{hover_bg, selection_bg, ROW_PX};
+use super::{ROW_PX, hover_bg, selection_bg};
 use crate::app::AppView;
 use crate::session::{AgentSession, AgentStatus};
 
@@ -50,112 +50,117 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
             let project = &this.projects[p];
             let expanded = this.expanded.get(p).copied().unwrap_or(true);
             let active_project = p == this.current_project;
-            let chevron = if expanded { IconName::ChevronDown } else { IconName::ChevronRight };
+            let chevron = if expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            };
 
             v_flex()
-                    .flex_shrink_0()
-                    .gap_0p5()
-                    // ── level 1: project row ──
-                    .child(
-                        div()
-                            .id(("project-row", p))
-                            .h(px(ROW_PX))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .px_2()
-                            .rounded(radius)
-                            .cursor_pointer()
-                            .hover(move |el| el.bg(hov_bg))
-                            .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
-                                let next = if *hovering { Some(p) } else { None };
-                                if this.hovered_project != next {
-                                    this.hovered_project = next;
-                                    cx.notify();
-                                }
-                            }))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.expanded[p] = !this.expanded[p];
-                                this.persist(cx);
+                .flex_shrink_0()
+                .gap_0p5()
+                // ── level 1: project row ──
+                .child(
+                    div()
+                        .id(("project-row", p))
+                        .h(px(ROW_PX))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .rounded(radius)
+                        .cursor_pointer()
+                        .hover(move |el| el.bg(hov_bg))
+                        .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+                            let next = if *hovering { Some(p) } else { None };
+                            if this.hovered_project != next {
+                                this.hovered_project = next;
                                 cx.notify();
-                            }))
-                            .child(
-                                Icon::new(chevron)
-                                    .with_size(gpui_kit::component::Size::XSmall)
-                                    .text_color(fg.opacity(0.55)),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_sm()
-                                    .font_medium()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_color(if active_project { fg } else { fg.opacity(0.85) })
-                                    .child(project.name.clone()),
-                            )
-                            // Ops appear while the row is hovered — or while
-                            // this row's `...` menu is open: the popup
-                            // occludes the row, so hover would drop and
-                            // unmount the trigger mid-interaction.
-                            .when(
-                                this.hovered_project == Some(p) || this.menu_project == Some(p),
-                                |el| {
-                                    el.child(
-                                        Button::new(("quick-add", p))
-                                            .icon(IconName::Plus)
-                                            .ghost()
-                                            .xsmall()
-                                            .tab_stop(false)
-                                            .tooltip(quick_tooltip.clone())
-                                            // gpui synthesizes a click for
-                                            // EVERY hitbox under the pointer;
-                                            // stopping the click event alone
-                                            // doesn't stop the row's own click
-                                            // synthesis. Kill the mouse-down
-                                            // instead, like BasePopover
-                                            // triggers do, so the row never
-                                            // records a press and its
-                                            // expand/collapse on_click stays
-                                            // quiet.
-                                            .on_mouse_down(
-                                                gpui::MouseButton::Left,
-                                                |_, _, cx| cx.stop_propagation(),
-                                            )
-                                            .on_click(cx.listener(
-                                                move |this, _, _window, cx| {
-                                                    this.select_session(p, 0, _window, cx);
-                                                    this.spawn_session(_window, cx);
-                                                },
-                                            )),
-                                    )
-                                    .child(more_menu(this, p, cx))
-                                },
-                            ),
-                    )
-                    // ── level 2: session rows ──
-                    .when(expanded, |el| {
-                        if project.sessions.is_empty() {
-                            el.child(
-                                div()
-                                    .h(px(ROW_PX))
-                                    .flex()
-                                    .items_center()
-                                    .pl(px(18.))
-                                    .ml_1()
-                                    .text_xs()
-                                    .text_color(fg.opacity(0.35))
-                                    .child("No session yet"),
-                            )
-                        } else {
-                            el.children(project.sessions.iter().enumerate().map(|(six, s)| {
-                                session_row(this, p, six, s, active_project, cx)
-                            }))
-                        }
-                    })
+                            }
+                        }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.expanded[p] = !this.expanded[p];
+                            this.persist(cx);
+                            cx.notify();
+                        }))
+                        .child(
+                            Icon::new(chevron)
+                                .with_size(gpui_kit::component::Size::XSmall)
+                                .text_color(fg.opacity(0.55)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .font_medium()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_color(if active_project { fg } else { fg.opacity(0.85) })
+                                .child(project.name.clone()),
+                        )
+                        // Ops appear while the row is hovered — or while
+                        // this row's `...` menu is open: the popup
+                        // occludes the row, so hover would drop and
+                        // unmount the trigger mid-interaction.
+                        .when(
+                            this.hovered_project == Some(p) || this.menu_project == Some(p),
+                            |el| {
+                                el.child(
+                                    Button::new(("quick-add", p))
+                                        .icon(IconName::Plus)
+                                        .ghost()
+                                        .xsmall()
+                                        .tab_stop(false)
+                                        .tooltip(quick_tooltip.clone())
+                                        // gpui synthesizes a click for
+                                        // EVERY hitbox under the pointer;
+                                        // stopping the click event alone
+                                        // doesn't stop the row's own click
+                                        // synthesis. Kill the mouse-down
+                                        // instead, like BasePopover
+                                        // triggers do, so the row never
+                                        // records a press and its
+                                        // expand/collapse on_click stays
+                                        // quiet.
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            this.select_session(p, 0, _window, cx);
+                                            this.spawn_session(_window, cx);
+                                        })),
+                                )
+                                .child(more_menu(this, p, cx))
+                            },
+                        ),
+                )
+                // ── level 2: session rows ──
+                .when(expanded, |el| {
+                    if project.sessions.is_empty() {
+                        el.child(
+                            div()
+                                .h(px(ROW_PX))
+                                .flex()
+                                .items_center()
+                                .pl(px(18.))
+                                .ml_1()
+                                .text_xs()
+                                .text_color(fg.opacity(0.35))
+                                .child("No session yet"),
+                        )
+                    } else {
+                        el.children(
+                            project
+                                .sessions
+                                .iter()
+                                .enumerate()
+                                .map(|(six, s)| session_row(this, p, six, s, active_project, cx)),
+                        )
+                    }
+                })
         }))
 }
 
@@ -195,7 +200,13 @@ fn session_row(
         .rounded(radius)
         .cursor_pointer()
         .map(|el| if active { el.bg(active_bg) } else { el })
-        .hover(move |el| if active { el.bg(active_hover_bg) } else { el.bg(hov_bg) })
+        .hover(move |el| {
+            if active {
+                el.bg(active_hover_bg)
+            } else {
+                el.bg(hov_bg)
+            }
+        })
         .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
             let next = if *hovering { Some((p, six)) } else { None };
             if this.hovered_session != next {
@@ -218,7 +229,7 @@ fn session_row(
                         .whitespace_nowrap()
                         .text_ellipsis()
                         .text_color(if active { fg } else { fg.opacity(0.85) })
-                        .child(title.clone())
+                        .child(title.clone()),
                 )
                 .child(
                     div()
@@ -227,7 +238,9 @@ fn session_row(
                         .whitespace_nowrap()
                         .text_ellipsis()
                         .map(|el| match &s.status {
-                            AgentStatus::Error(_) | AgentStatus::Done(1..) => el.text_color(cx.theme().red.opacity(0.8)),
+                            AgentStatus::Error(_) | AgentStatus::Done(1..) => {
+                                el.text_color(cx.theme().red.opacity(0.8))
+                            }
                             _ => el.text_color(fg.opacity(0.45)),
                         })
                         .child(meta_label(s)),
@@ -244,28 +257,22 @@ fn session_row(
                     .bg(cx.theme().accent),
             )
         })
-        .when(
-            this.hovered_session == Some((p, six)),
-            |el| {
-                el.child(
-                    Button::new(SharedString::from(format!("close-{p}-{six}")))
-                        .icon(IconName::Close)
-                        .ghost()
-                        .xsmall()
-                        .tab_stop(false)
-                        .tooltip("Close session")
-                        // Stop the mouse-down so the row's own click
-                        // synthesis never sees this press (see quick-add).
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            |_, _, cx| cx.stop_propagation(),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.request_close_session(p, six, window, cx);
-                        })),
-                )
-            },
-        )
+        .when(this.hovered_session == Some((p, six)), |el| {
+            el.child(
+                Button::new(SharedString::from(format!("close-{p}-{six}")))
+                    .icon(IconName::Close)
+                    .ghost()
+                    .xsmall()
+                    .tab_stop(false)
+                    .tooltip("Close session")
+                    // Stop the mouse-down so the row's own click
+                    // synthesis never sees this press (see quick-add).
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.request_close_session(p, six, window, cx);
+                    })),
+            )
+        })
 }
 
 /// Live row title: agents adopt the PTY's OSC title once they set one;
@@ -273,10 +280,11 @@ fn session_row(
 fn session_title(s: &AgentSession, cx: &Context<AppView>) -> String {
     if s.is_agent()
         && let Some(term) = &s.term
-            && let Some(title) = term.read(cx).title()
-                && !title.trim().is_empty() {
-                    return title.trim().to_string();
-                }
+        && let Some(title) = term.read(cx).title()
+        && !title.trim().is_empty()
+    {
+        return title.trim().to_string();
+    }
     s.title.clone()
 }
 
@@ -327,75 +335,79 @@ fn kind_icon(s: &AgentSession, cx: &Context<AppView>) -> Div {
     )
 }
 
-/// Menu-leading icon for a launcher kind: brand marks for the builtins,
-/// a terminal glyph for shells, a generic bot for custom presets.
-fn kind_menu_icon(kind: &str) -> Icon {
-    match kind {
-        "terminal" => Icon::new(IconName::SquareTerminal),
-        "claude" => Icon::default().path("icons/claude.svg"),
-        "codex" => Icon::default().path("icons/openai.svg"),
-        "omp" => Icon::default().path("icons/omp.svg"),
-        _ => Icon::new(IconName::Bot),
-    }
-}
-
 /// The `...` dropdown on a project row: every launcher plus project ops.
 fn more_menu(this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoElement {
     let can_remove = this.projects.len() > 1;
-    let has_running = this.projects[p].sessions.iter().any(|s| s.status.is_running());
+    let has_running = this.projects[p]
+        .sessions
+        .iter()
+        .any(|s| s.status.is_running());
     let cfg = cx.global::<crate::config::Config>().clone();
     let view = cx.weak_entity();
     let new_session_default = cfg.new_session.kind.clone();
-    let build_menu = move |menu: PopupMenu, _window: &mut Window, _cx: &mut Context<'_, PopupMenu>| {
-        let mut m = menu.label("New session");
-        for kind in cfg.agent_menu() {
-            let label = cfg.label_for(&kind);
-            let default = kind == new_session_default;
-            let kind_click = kind.clone();
-            let view_click = view.clone();
-            m = m.item(
-                PopupMenuItem::new(label)
-                    .icon(kind_menu_icon(&kind))
-                    .checked(default)
-                    .on_click(move |_, window, cx| {
-                        let kind = kind_click.clone();
-                        let view = view_click.clone();
+    let build_menu =
+        move |menu: PopupMenu, _window: &mut Window, _cx: &mut Context<'_, PopupMenu>| {
+            let mut m = menu.label("New session");
+            for kind in cfg.agent_menu() {
+                let label = cfg.label_for(&kind);
+                let default = kind == new_session_default;
+                let kind_click = kind.clone();
+                let view_click = view.clone();
+                m = m.item(
+                    PopupMenuItem::new(label)
+                        .icon(super::agent_icon(&kind))
+                        .checked(default)
+                        .on_click(move |_, window, cx| {
+                            let kind = kind_click.clone();
+                            let view = view_click.clone();
+                            window
+                                .spawn(cx, {
+                                    let kind = kind.clone();
+                                    let view = view.clone();
+                                    async move |cx| {
+                                        let _ = view.update_in(cx, |v, window, cx| {
+                                            v.select_session(p, 0, window, cx);
+                                            v.spawn_session_of(&kind, window, cx)
+                                        });
+                                    }
+                                })
+                                .detach();
+                        }),
+                );
+            }
+            m = m.separator().item(
+                PopupMenuItem::new(if has_running {
+                    "Close sessions before removing"
+                } else {
+                    "Remove project"
+                })
+                .icon(Icon::new(IconName::CircleX))
+                .disabled(!can_remove || has_running)
+                .on_click({
+                    let view = view.clone();
+                    move |_, window, cx| {
+                        let view = view.clone();
                         window
                             .spawn(cx, {
-                                let kind = kind.clone();
                                 let view = view.clone();
                                 async move |cx| {
                                     let _ = view.update_in(cx, |v, window, cx| {
-                                        v.select_session(p, 0, window, cx);
-                                        v.spawn_session_of(&kind, window, cx)
+                                        v.remove_project(p, cx);
+                                        v.select_session(
+                                            v.current_project,
+                                            v.current_session,
+                                            window,
+                                            cx,
+                                        );
                                     });
                                 }
                             })
                             .detach();
-                    }),
+                    }
+                }),
             );
-        }
-        m = m.separator().item(
-            PopupMenuItem::new(if has_running { "Close sessions before removing" } else { "Remove project" }).icon(Icon::new(IconName::CircleX)).disabled(!can_remove || has_running).on_click({
-                let view = view.clone();
-                move |_, window, cx| {
-                    let view = view.clone();
-                    window
-                        .spawn(cx, {
-                            let view = view.clone();
-                            async move |cx| {
-                                let _ = view.update_in(cx, |v, window, cx| {
-                                    v.remove_project(p, cx);
-                                    v.select_session(v.current_project, v.current_session, window, cx);
-                                });
-                            }
-                        })
-                        .detach();
-                }
-            }),
-        );
-        m
-    };
+            m
+        };
 
     Button::new(("more", p))
         .icon(IconName::Ellipsis)

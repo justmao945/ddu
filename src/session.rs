@@ -1,9 +1,9 @@
 //! Session domain model: projects, agent sessions and the command
 //! presets used to spawn them (DESIGN.md §5, §9).
 
+use gpui_kit::Entity;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use gpui_kit::Entity;
 
 use crate::terminal::{PtySpawn, TermSession};
 
@@ -40,12 +40,20 @@ impl AgentCmd {
 
     /// Basename of the program (`/bin/zsh` → `zsh`); the sidebar title.
     pub fn basename(&self) -> String {
-        self.program.rsplit('/').next().unwrap_or(&self.program).to_string()
+        self.program
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.program)
+            .to_string()
     }
 
     /// Build the PTY spawn spec with `cwd` as the working directory.
     pub fn spec(&self, cwd: &Path) -> PtySpawn {
-        PtySpawn { program: self.program.clone(), args: self.args.clone(), cwd: cwd.into() }
+        PtySpawn {
+            program: self.program.clone(),
+            args: self.args.clone(),
+            cwd: cwd.into(),
+        }
     }
 }
 
@@ -107,5 +115,9 @@ pub fn initial_projects() -> Vec<Project> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| cwd.to_string_lossy().into_owned());
-    vec![Project { name, path: cwd, sessions: vec![] }]
+    vec![Project {
+        name,
+        path: cwd,
+        sessions: vec![],
+    }]
 }

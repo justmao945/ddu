@@ -14,11 +14,12 @@ use crate::session::AgentCmd;
 /// Where the state file lives: `~/Library/Application Support/ddu/` on
 /// macOS, `~/.config/ddu/` elsewhere.
 pub fn state_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("DDU_STATE_PATH") { return PathBuf::from(path); }
+    if let Some(path) = std::env::var_os("DDU_STATE_PATH") {
+        return PathBuf::from(path);
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     if cfg!(target_os = "macos") {
-        PathBuf::from(home)
-            .join("Library/Application Support/ddu/state.json")
+        PathBuf::from(home).join("Library/Application Support/ddu/state.json")
     } else {
         PathBuf::from(home).join(".config/ddu/state.json")
     }
@@ -43,7 +44,6 @@ pub struct ShellConfig {
     pub args: String,
 }
 
-
 impl Default for ShellConfig {
     fn default() -> Self {
         Self {
@@ -63,7 +63,9 @@ pub struct NewSessionDefault {
 
 impl Default for NewSessionDefault {
     fn default() -> Self {
-        Self { kind: "terminal".into() }
+        Self {
+            kind: "terminal".into(),
+        }
     }
 }
 
@@ -106,7 +108,11 @@ pub struct Config {
 }
 
 /// The three builtin agent launchers, in menu order.
-pub const BUILTIN_AGENTS: &[(&str, &str)] = &[("Claude", "claude"), ("Codex", "codex"), ("Oh My Pi", "omp")];
+pub const BUILTIN_AGENTS: &[(&str, &str)] = &[
+    ("Claude", "claude"),
+    ("Codex", "codex"),
+    ("Oh My Pi", "omp"),
+];
 
 impl Config {
     pub fn load() -> Self {
@@ -125,9 +131,10 @@ impl Config {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
             if std::fs::write(&temporary, json).is_ok()
-                && let Err(err) = std::fs::rename(&temporary, &path) {
-                    eprintln!("[ddu] saving settings: {err}");
-                    let _ = std::fs::remove_file(temporary);
+                && let Err(err) = std::fs::rename(&temporary, &path)
+            {
+                eprintln!("[ddu] saving settings: {err}");
+                let _ = std::fs::remove_file(temporary);
             }
         }
     }
@@ -146,15 +153,29 @@ impl Config {
         let (program, args) = if kind == "terminal" {
             (self.shell.program.as_str(), self.shell.args.as_str())
         } else if BUILTIN_AGENTS.iter().any(|(_, p)| *p == kind) {
-            (kind, self.agent_args.get(kind).map(String::as_str).unwrap_or(""))
+            (
+                kind,
+                self.agent_args.get(kind).map(String::as_str).unwrap_or(""),
+            )
         } else {
-            let agent = self.custom_agents.iter().find(|a| a.name == kind)
+            let agent = self
+                .custom_agents
+                .iter()
+                .find(|a| a.name == kind)
                 .ok_or_else(|| anyhow::anyhow!("Unknown session type: {kind}"))?;
             (agent.program.as_str(), agent.args.as_str())
         };
-        anyhow::ensure!(!program.trim().is_empty(), "Set a program for {kind} in Settings.");
-        let args = shlex::split(args).ok_or_else(|| anyhow::anyhow!("Unclosed quote in arguments for {kind}. Check Settings."))?;
-        Ok(AgentCmd { program: program.trim().into(), args })
+        anyhow::ensure!(
+            !program.trim().is_empty(),
+            "Set a program for {kind} in Settings."
+        );
+        let args = shlex::split(args).ok_or_else(|| {
+            anyhow::anyhow!("Unclosed quote in arguments for {kind}. Check Settings.")
+        })?;
+        Ok(AgentCmd {
+            program: program.trim().into(),
+            args,
+        })
     }
 
     /// Human label for a kind key.
@@ -165,7 +186,12 @@ impl Config {
                 .iter()
                 .find(|(_, p)| *p == other)
                 .map(|(l, _)| l.to_string())
-                .or_else(|| self.custom_agents.iter().find(|a| a.name == other).map(|a| a.name.clone()))
+                .or_else(|| {
+                    self.custom_agents
+                        .iter()
+                        .find(|a| a.name == other)
+                        .map(|a| a.name.clone())
+                })
                 .unwrap_or_else(|| other.to_string()),
         }
     }
@@ -178,7 +204,10 @@ mod tests {
     fn quoted_arguments_keep_spaces_and_empty_values() {
         let mut cfg = Config::default();
         cfg.shell.args = "--name 'two words' \"\" path\\ with\\ spaces".into();
-        assert_eq!(cfg.cmd_for("terminal").unwrap().args, ["--name", "two words", "", "path with spaces"]);
+        assert_eq!(
+            cfg.cmd_for("terminal").unwrap().args,
+            ["--name", "two words", "", "path with spaces"]
+        );
         cfg.shell.args = "'unfinished".into();
         assert!(cfg.cmd_for("terminal").is_err());
     }

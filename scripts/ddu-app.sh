@@ -40,10 +40,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 cp "$BIN" "$APP/Contents/MacOS/ddu.bin"
-cat > "$APP/Contents/MacOS/launch.sh" <<'LAUNCH'
+cat > "$APP/Contents/MacOS/launch.sh" <<LAUNCH
 #!/bin/sh
-cd "${DDU_DIR:-$HOME/Code/ddu}" || exit 1
-exec "$(dirname "$0")/ddu.bin"
+cd "\${DDU_DIR:-\$HOME/Code/ddu}" || exit 1
+# Dev hook baked at bundle time (see main.rs): auto-open Settings.
+export DDU_VERIFY_SETTINGS="${DDU_VERIFY_SETTINGS:-}"
+exec "\$(dirname "\$0")/ddu.bin"
 LAUNCH
 chmod +x "$APP/Contents/MacOS/launch.sh"
 

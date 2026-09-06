@@ -2,14 +2,14 @@
 //! window of the alacritty grid as shaped mono lines and owns the
 //! grid↔panel resize handshake.
 
-use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::*;
 
 use alacritty_terminal::grid::Dimensions as _;
+use alacritty_terminal::term::RenderableContent;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color as TermColor, CursorShape, NamedColor};
-use alacritty_terminal::term::RenderableContent;
 
 use super::TermSession;
 
@@ -35,7 +35,10 @@ pub(crate) fn scrollbar_geometry(
         return None;
     }
     let track = Bounds {
-        origin: point(area.origin.x + area.size.width - px(SCROLLBAR_W), area.origin.y),
+        origin: point(
+            area.origin.x + area.size.width - px(SCROLLBAR_W),
+            area.origin.y,
+        ),
         size: size(px(SCROLLBAR_W), area.size.height),
     };
     let thumb_h = (f32::from(track.size.height) * screen_lines as f32
@@ -96,7 +99,12 @@ impl Metrics {
             .shape_line("M".into(), font_size, &[run], None)
             .width()
             .max(px(1.));
-        Self { line_height, cell_width, font, font_size }
+        Self {
+            line_height,
+            cell_width,
+            font,
+            font_size,
+        }
     }
 }
 
@@ -177,7 +185,9 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let Some(session) = self.session.upgrade() else { return };
+        let Some(session) = self.session.upgrade() else {
+            return;
+        };
         // Register the IME input handler for this frame (a no-op unless
         // focused): composed input — CJK input methods, long-press
         // accents, the emoji picker — commits through it into the PTY.
@@ -227,18 +237,19 @@ impl Element for TerminalElement {
         let cursor_row = cursor.point.line.0 + content.display_offset as i32;
         // Stash the cursor rect so `bounds_for_range` can anchor the
         // platform's IME candidate popup at the insertion point.
-        let cursor_bounds = (cursor.shape != CursorShape::Hidden && cursor_row >= 0).then(|| {
-            Bounds {
+        let cursor_bounds =
+            (cursor.shape != CursorShape::Hidden && cursor_row >= 0).then(|| Bounds {
                 origin: point(
                     origin.x + px(f32::from(m.cell_width) * cursor.point.column.0 as f32),
                     origin.y + px(f32::from(m.line_height) * cursor_row as f32),
                 ),
                 size: size(m.cell_width, m.line_height),
-            }
-        });
+            });
         session.read(cx).ime_cursor_bounds.set(cursor_bounds);
         paint_grid(&mut content, &m, &palette, origin, window, cx);
-        paint_cursor(&cursor, cursor_row, &m, &palette, origin, focused, window, cx);
+        paint_cursor(
+            &cursor, cursor_row, &m, &palette, origin, focused, window, cx,
+        );
         // Right-edge scrollbar thumb once scrollback exists — same
         // geometry the mouse handlers hit-test against. The track spans
         // the element's full height, flush with both ends.
@@ -246,12 +257,15 @@ impl Element for TerminalElement {
             let g = term_lock.grid();
             (g.screen_lines(), g.history_size())
         };
-        if let Some((_track, thumb)) = scrollbar_geometry(bounds, rows, history, content.display_offset)
+        if let Some((_track, thumb)) =
+            scrollbar_geometry(bounds, rows, history, content.display_offset)
         {
             window.paint_quad(fill(thumb, scrollbar_thumb));
         }
         if let Some(marked) = marked.filter(|t| !t.is_empty()) {
-            paint_marked(&marked, &cursor, cursor_row, &m, &palette, origin, window, cx);
+            paint_marked(
+                &marked, &cursor, cursor_row, &m, &palette, origin, window, cx,
+            );
         }
     }
 }
@@ -285,7 +299,11 @@ fn paint_grid(
             line_starts.push(cells.len());
             last_line = Some(indexed.point.line.0);
         }
-        selected.push(selection.as_ref().is_some_and(|s| s.contains(indexed.point)));
+        selected.push(
+            selection
+                .as_ref()
+                .is_some_and(|s| s.contains(indexed.point)),
+        );
         cells.push(indexed.cell);
     }
     line_starts.push(cells.len());
@@ -330,10 +348,7 @@ fn paint_grid(
             }
             window.paint_quad(fill(
                 Bounds {
-                    origin: point(
-                        origin.x + m.cell_width * start as f32,
-                        y,
-                    ),
+                    origin: point(origin.x + m.cell_width * start as f32, y),
                     size: size(m.cell_width * (col - start) as f32, m.line_height),
                 },
                 palette.selection,
@@ -363,7 +378,11 @@ fn paint_grid(
                 let key = StyleKey::of(cell, palette);
                 segs.push(Seg::Vector {
                     c: cell.c,
-                    fg: if key.dim { key.fg.opacity(0.65) } else { key.fg },
+                    fg: if key.dim {
+                        key.fg.opacity(0.65)
+                    } else {
+                        key.fg
+                    },
                 });
                 ix += 1;
                 continue;
@@ -409,7 +428,12 @@ fn paint_grid(
                     );
                     x += m.cell_width;
                 }
-                Seg::Text { text, key, cols, force_width } => {
+                Seg::Text {
+                    text,
+                    key,
+                    cols,
+                    force_width,
+                } => {
                     if text.is_empty() {
                         x += px(f32::from(m.cell_width) * cols);
                         continue;
@@ -452,7 +476,6 @@ enum Seg {
     Vector { c: char, fg: Hsla },
 }
 
-
 /// IME preedit ("marked") text: underlined, on a subtle wash, painted
 /// over the cells at the cursor — alacritty-style overlay; the grid
 /// content underneath is left in place since the preedit is not yet
@@ -484,9 +507,10 @@ fn paint_marked(
         }),
         strikethrough: None,
     };
-    let shaped = window
-        .text_system()
-        .shape_line(text.to_string().into(), m.font_size, &[run], None);
+    let shaped =
+        window
+            .text_system()
+            .shape_line(text.to_string().into(), m.font_size, &[run], None);
     let bounds = Bounds {
         origin: point(x, y),
         size: size(shaped.width(), m.line_height),
@@ -511,7 +535,9 @@ fn paint_cursor(
     window: &mut Window,
     _cx: &mut App,
 ) {
-    if cursor.shape == alacritty_terminal::vte::ansi::CursorShape::Hidden || cursor_row < 0 { return; }
+    if cursor.shape == alacritty_terminal::vte::ansi::CursorShape::Hidden || cursor_row < 0 {
+        return;
+    }
     let x = origin.x + px(f32::from(m.cell_width) * cursor.point.column.0 as f32);
     let y = origin.y + px(f32::from(m.line_height) * cursor_row as f32);
     let bounds = Bounds {
@@ -567,7 +593,11 @@ impl StyleKey {
         if self.italic {
             font.style = FontStyle::Italic;
         }
-        let color = if self.dim { self.fg.opacity(0.65) } else { self.fg };
+        let color = if self.dim {
+            self.fg.opacity(0.65)
+        } else {
+            self.fg
+        };
         TextRun {
             len,
             font,
@@ -702,12 +732,22 @@ fn rgb_u24(r: u8, g: u8, b: u8) -> Rgba {
 
 #[cfg(test)]
 mod palette_tests {
-    use super::{dimmed_index, NamedColor};
+    use super::{NamedColor, dimmed_index};
     #[test]
     fn standard_ansi_colors_do_not_fall_back_to_white() {
-        for (color, expected) in [NamedColor::Black, NamedColor::Red, NamedColor::Green,
-            NamedColor::Yellow, NamedColor::Blue, NamedColor::Magenta,
-            NamedColor::Cyan, NamedColor::White].into_iter().zip(0..8) {
+        for (color, expected) in [
+            NamedColor::Black,
+            NamedColor::Red,
+            NamedColor::Green,
+            NamedColor::Yellow,
+            NamedColor::Blue,
+            NamedColor::Magenta,
+            NamedColor::Cyan,
+            NamedColor::White,
+        ]
+        .into_iter()
+        .zip(0..8)
+        {
             assert_eq!(dimmed_index(color), expected);
         }
         assert_eq!(dimmed_index(NamedColor::BrightRed), 9);
@@ -717,11 +757,14 @@ mod palette_tests {
 
 #[cfg(test)]
 mod scrollbar_tests {
-    use super::{scrollbar_geometry, SCROLLBAR_W};
-    use gpui_kit::{point, px, size, Bounds};
+    use super::{SCROLLBAR_W, scrollbar_geometry};
+    use gpui_kit::{Bounds, point, px, size};
 
     fn area() -> Bounds<gpui_kit::Pixels> {
-        Bounds { origin: point(px(10.), px(10.)), size: size(px(500.), px(240.)) }
+        Bounds {
+            origin: point(px(10.), px(10.)),
+            size: size(px(500.), px(240.)),
+        }
     }
 
     #[test]

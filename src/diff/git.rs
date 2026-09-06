@@ -40,11 +40,11 @@ pub fn head_diff(path: &Path) -> anyhow::Result<GitDiff> {
         None,
         Some(&mut |_, hunk: git2::DiffHunk| {
             if let Some(file) = files.borrow_mut().last_mut() {
-                if file.lines_total >= MAX_LINES_PER_FILE { return true; }
+                if file.lines_total >= MAX_LINES_PER_FILE {
+                    return true;
+                }
                 file.hunks.push(DiffHunk {
-                    header: String::from_utf8_lossy(hunk.header())
-                        .trim_end()
-                        .to_owned(),
+                    header: String::from_utf8_lossy(hunk.header()).trim_end().to_owned(),
                     lines: vec![],
                 });
             }
@@ -52,7 +52,9 @@ pub fn head_diff(path: &Path) -> anyhow::Result<GitDiff> {
         }),
         Some(&mut |_, _hunk, line: git2::DiffLine| {
             let mut guard = files.borrow_mut();
-            let Some(file) = guard.last_mut() else { return true };
+            let Some(file) = guard.last_mut() else {
+                return true;
+            };
             let origin = line.origin();
             if !matches!(origin, '+' | '-' | ' ') {
                 return true;
@@ -81,15 +83,16 @@ pub fn head_diff(path: &Path) -> anyhow::Result<GitDiff> {
         }),
     )?;
 
-    Ok(GitDiff { branch, files: files.into_inner() })
+    Ok(GitDiff {
+        branch,
+        files: files.into_inner(),
+    })
 }
-
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use git2::{Signature, RepositoryInitOptions};
+    use git2::{RepositoryInitOptions, Signature};
 
     /// M3 data layer, hermetic: temp repo → commit → modify + untracked
     /// → head_diff must see both, with correct hunk lines and numbers.
@@ -111,7 +114,8 @@ mod tests {
         let tree_id = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
         let sig = Signature::now("ddu", "ddu@test").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
 
         std::fs::write(&file, "line one\nline two changed\n").unwrap();
         std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
@@ -119,7 +123,11 @@ mod tests {
         let diff = head_diff(&dir).expect("head_diff");
         assert_eq!(diff.branch.as_deref(), repo.head().unwrap().shorthand());
 
-        let hello = diff.files.iter().find(|f| f.path == "hello.txt").expect("hello.txt");
+        let hello = diff
+            .files
+            .iter()
+            .find(|f| f.path == "hello.txt")
+            .expect("hello.txt");
         assert_eq!((hello.added, hello.removed), (1, 1));
         let changed = hello
             .hunks
@@ -130,20 +138,40 @@ mod tests {
         assert_eq!(changed.kind, '+');
         assert_eq!(changed.new_no, Some(2));
 
-        let new_file = diff.files.iter().find(|f| f.path == "new.txt").expect("new.txt");
+        let new_file = diff
+            .files
+            .iter()
+            .find(|f| f.path == "new.txt")
+            .expect("new.txt");
         assert_eq!(new_file.added, 1);
-        assert!(new_file.hunks.iter().any(|h| h.lines.iter().any(|l| l.text == "fresh")));
+        assert!(
+            new_file
+                .hunks
+                .iter()
+                .any(|h| h.lines.iter().any(|l| l.text == "fresh"))
+        );
 
         let nested = dir.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
         assert_eq!(head_diff(&nested).unwrap(), diff);
-        std::fs::write(dir.join("large.txt"), "line\n".repeat(MAX_LINES_PER_FILE + 10)).unwrap();
-        let large = head_diff(&dir).unwrap().files.into_iter().find(|f| f.path == "large.txt").unwrap();
+        std::fs::write(
+            dir.join("large.txt"),
+            "line\n".repeat(MAX_LINES_PER_FILE + 10),
+        )
+        .unwrap();
+        let large = head_diff(&dir)
+            .unwrap()
+            .files
+            .into_iter()
+            .find(|f| f.path == "large.txt")
+            .unwrap();
         assert!(large.truncated);
         assert_eq!(large.lines_total, MAX_LINES_PER_FILE);
         assert_eq!(large.added, MAX_LINES_PER_FILE + 10);
-        assert_eq!(large.hunks.iter().map(|h| h.lines.len()).sum::<usize>(), MAX_LINES_PER_FILE);
+        assert_eq!(
+            large.hunks.iter().map(|h| h.lines.len()).sum::<usize>(),
+            MAX_LINES_PER_FILE
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
-

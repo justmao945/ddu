@@ -8,9 +8,9 @@ use gpui_kit::*;
 
 pub(crate) mod diff_panel;
 pub(crate) mod session_panel;
+pub(crate) mod settings_window;
 pub(crate) mod status_bar;
 pub(crate) mod terminal;
-pub(crate) mod settings_window;
 pub(crate) mod title_bar;
 
 /// Shared height of the session/changes panel headers (Zed: ~28px).
@@ -39,6 +39,18 @@ impl gpui_kit::component::IconNamed for AppIcon {
         match self {
             AppIcon::FolderPlus => "icons/folder-plus.svg".into(),
         }
+    }
+}
+
+/// Brand/status icon for a session kind (`terminal`, `claude`, `codex`,
+/// `omp`, custom). Shared by the sidebar menus and the settings window.
+pub(crate) fn agent_icon(kind: &str) -> Icon {
+    match kind {
+        "terminal" => Icon::new(IconName::SquareTerminal),
+        "claude" => Icon::default().path("icons/claude.svg"),
+        "codex" => Icon::default().path("icons/openai.svg"),
+        "omp" => Icon::default().path("icons/omp.svg"),
+        _ => Icon::new(IconName::Bot),
     }
 }
 

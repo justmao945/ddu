@@ -9,8 +9,8 @@ use std::borrow::Cow;
 
 use app::AppView;
 use gpui_kit::component::Root;
-use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::component::TitleBar;
+use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::*;
 
 /// App asset source: the crate's brand icons first, then the
@@ -20,28 +20,24 @@ struct AppAssets;
 impl gpui::AssetSource for AppAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
         match path {
-            "icons/claude.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/claude.svg")))),
-            "icons/openai.svg" => {
-                Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/openai.svg"))))
-            }
-            "icons/wordmark-day.svg" => {
-                Ok(Some(Cow::Borrowed(include_bytes!(
-                    "../assets/icons/wordmark-day.svg"
-                ))))
-            }
-            "icons/wordmark-up.svg" => {
-                Ok(Some(Cow::Borrowed(include_bytes!(
-                    "../assets/icons/wordmark-up.svg"
-                ))))
-            }
-            "icons/folder-plus.svg" => {
-                Ok(Some(Cow::Borrowed(include_bytes!(
-                    "../assets/icons/folder-plus.svg"
-                ))))
-            }
-            "icons/omp.svg" => {
-                Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/omp.svg"))))
-            }
+            "icons/claude.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/claude.svg"
+            )))),
+            "icons/openai.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/openai.svg"
+            )))),
+            "icons/wordmark-day.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/wordmark-day.svg"
+            )))),
+            "icons/wordmark-up.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/wordmark-up.svg"
+            )))),
+            "icons/folder-plus.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/folder-plus.svg"
+            )))),
+            "icons/omp.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/omp.svg"
+            )))),
             _ => gpui_kit::assets::Assets.load(path),
         }
     }
@@ -78,7 +74,15 @@ fn main() {
         // Must be first, before using any component features.
         gpui_kit::init(cx);
         let config = config::Config::load();
-        Theme::change(if config.dark_theme { ThemeMode::Dark } else { ThemeMode::Light }, None, cx);
+        Theme::change(
+            if config.dark_theme {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            },
+            None,
+            cx,
+        );
         Theme::global_mut(cx).font_size = px(14.);
         cx.set_global(config);
         // Activate BEFORE the first window exists: the display-link start
@@ -103,5 +107,14 @@ fn main() {
             .expect("Failed to open window");
         })
         .detach();
+        if std::env::var("DDU_VERIFY_SETTINGS").is_ok() {
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(600))
+                    .await;
+                let _ = cx.update(|cx| ui::settings_window::open(cx));
+            })
+            .detach();
+        }
     });
 }

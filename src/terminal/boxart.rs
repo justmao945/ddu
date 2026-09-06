@@ -108,12 +108,21 @@ fn paint_arm(
     };
     match stroke {
         N => {}
-        L => window.paint_quad(fill(rect(from, to, center - t / 2., center + t / 2.), color)),
+        L => window.paint_quad(fill(
+            rect(from, to, center - t / 2., center + t / 2.),
+            color,
+        )),
         H => window.paint_quad(fill(rect(from, to, center - t, center + t), color)),
         D => {
             // Two light strokes, one thickness apart around the center.
-            window.paint_quad(fill(rect(from, to, center - 1.5 * t, center - 0.5 * t), color));
-            window.paint_quad(fill(rect(from, to, center + 0.5 * t, center + 1.5 * t), color));
+            window.paint_quad(fill(
+                rect(from, to, center - 1.5 * t, center - 0.5 * t),
+                color,
+            ));
+            window.paint_quad(fill(
+                rect(from, to, center + 0.5 * t, center + 1.5 * t),
+                color,
+            ));
         }
         Stroke::Dash3 | Stroke::Dash4 => {
             let dashes = if stroke == Stroke::Dash3 { 3 } else { 4 };
@@ -142,29 +151,57 @@ fn paint_arc(c: char, x0: f32, y0: f32, w: f32, h: f32, color: Hsla, window: &mu
         '\u{256D}' => (
             point(px(cx - t / 2.), px(cy - t / 2.)),
             size(px(w / 2. + t / 2.), px(h / 2. + t / 2.)),
-            Corners { top_left: px(r), ..Default::default() },
-            Edges { top: px(t), left: px(t), ..Default::default() },
+            Corners {
+                top_left: px(r),
+                ..Default::default()
+            },
+            Edges {
+                top: px(t),
+                left: px(t),
+                ..Default::default()
+            },
         ),
         // ╮: left + down; quad spans left → center, center → bottom.
         '\u{256E}' => (
             point(px(x0 - t / 2.), px(cy - t / 2.)),
             size(px(w / 2. + t), px(h / 2. + t / 2.)),
-            Corners { top_right: px(r), ..Default::default() },
-            Edges { top: px(t), right: px(t), ..Default::default() },
+            Corners {
+                top_right: px(r),
+                ..Default::default()
+            },
+            Edges {
+                top: px(t),
+                right: px(t),
+                ..Default::default()
+            },
         ),
         // ╯: left + up; quad spans left → center, top → center.
         '\u{256F}' => (
             point(px(x0 - t / 2.), px(y0 - t / 2.)),
             size(px(w / 2. + t), px(h / 2. + t)),
-            Corners { bottom_right: px(r), ..Default::default() },
-            Edges { right: px(t), bottom: px(t), ..Default::default() },
+            Corners {
+                bottom_right: px(r),
+                ..Default::default()
+            },
+            Edges {
+                right: px(t),
+                bottom: px(t),
+                ..Default::default()
+            },
         ),
         // ╰: right + up; quad spans center → right, top → center.
         '\u{2570}' => (
             point(px(cx - t / 2.), px(y0 - t / 2.)),
             size(px(w / 2. + t / 2.), px(h / 2. + t)),
-            Corners { bottom_left: px(r), ..Default::default() },
-            Edges { left: px(t), bottom: px(t), ..Default::default() },
+            Corners {
+                bottom_left: px(r),
+                ..Default::default()
+            },
+            Edges {
+                left: px(t),
+                bottom: px(t),
+                ..Default::default()
+            },
         ),
         _ => return,
     };
@@ -273,86 +310,86 @@ fn vrect_alpha(x0: f32, y0: f32, w: f32, h: f32, color: Hsla, alpha: f32, window
 /// to the font glyph.
 fn arms(c: char) -> Option<Arms> {
     Some(match c {
-        '\u{2500}' => [L, L, N, N], // ─
-        '\u{2501}' => [H, H, N, N], // ━
-        '\u{2502}' => [N, N, L, L], // │
-        '\u{2503}' => [N, N, H, H], // ┃
+        '\u{2500}' => [L, L, N, N],                         // ─
+        '\u{2501}' => [H, H, N, N],                         // ━
+        '\u{2502}' => [N, N, L, L],                         // │
+        '\u{2503}' => [N, N, H, H],                         // ┃
         '\u{2504}' => [Stroke::Dash3, Stroke::Dash3, N, N], // ┄
-        '\u{2505}' => [H, H, N, N], // ┅ (heavy dash → solid heavy)
+        '\u{2505}' => [H, H, N, N],                         // ┅ (heavy dash → solid heavy)
         '\u{2506}' => [N, N, Stroke::Dash3, Stroke::Dash3], // ┆
-        '\u{2507}' => [N, N, H, H], // ┇
+        '\u{2507}' => [N, N, H, H],                         // ┇
         '\u{2508}' => [Stroke::Dash4, Stroke::Dash4, N, N], // ┈
-        '\u{2509}' => [H, H, N, N], // ┉
+        '\u{2509}' => [H, H, N, N],                         // ┉
         '\u{250A}' => [N, N, Stroke::Dash4, Stroke::Dash4], // ┊
-        '\u{250B}' => [N, N, H, H], // ┋
-        '\u{250C}' => [N, L, N, L], // ┌
-        '\u{250D}' => [N, H, N, L], // ┍
-        '\u{250E}' => [N, L, N, H], // ┎
-        '\u{250F}' => [N, H, N, H], // ┏
-        '\u{2510}' => [L, N, N, L], // ┐
-        '\u{2511}' => [H, N, N, L], // ┑
-        '\u{2512}' => [L, N, N, H], // ┒
-        '\u{2513}' => [H, N, N, H], // ┓
-        '\u{2514}' => [N, L, L, N], // └
-        '\u{2515}' => [N, H, L, N], // ┕
-        '\u{2516}' => [N, L, H, N], // ┖
-        '\u{2517}' => [N, H, H, N], // ┗
-        '\u{2518}' => [L, N, L, N], // ┘
-        '\u{2519}' => [H, N, L, N], // ┙
-        '\u{251A}' => [L, N, H, N], // ┚
-        '\u{251B}' => [H, N, H, N], // ┛
-        '\u{251C}' => [N, L, L, L], // ├
-        '\u{251D}' => [N, H, L, L], // ┝
-        '\u{251E}' => [N, L, H, L], // ┞
-        '\u{251F}' => [N, L, L, H], // ┟
-        '\u{2520}' => [N, L, H, H], // ┠
-        '\u{2523}' => [N, H, H, H], // ┣
-        '\u{2524}' => [L, N, L, L], // ┤
-        '\u{2525}' => [H, N, L, L], // ┥
-        '\u{2526}' => [L, N, H, L], // ┦
-        '\u{2527}' => [L, N, L, H], // ┧
-        '\u{2528}' => [L, N, H, H], // ┨
-        '\u{252B}' => [H, N, H, H], // ┫
-        '\u{252C}' => [L, L, N, L], // ┬
-        '\u{252D}' => [H, L, N, L], // ┭
-        '\u{252E}' => [L, H, N, L], // ┮
-        '\u{252F}' => [H, H, N, L], // ┯
-        '\u{2530}' => [L, L, N, H], // ┰
-        '\u{2533}' => [H, H, N, H], // ┳
-        '\u{2534}' => [L, L, L, N], // ┴
-        '\u{2535}' => [H, H, L, N], // ┵
-        '\u{2536}' => [L, L, H, N], // ┶
-        '\u{2537}' => [H, L, L, N], // ┷
-        '\u{2538}' => [L, H, L, N], // ┸
-        '\u{2550}' => [D, D, N, N], // ═
-        '\u{2551}' => [N, N, D, D], // ║
-        '\u{2552}' => [N, D, N, L], // ╒
-        '\u{2553}' => [N, L, N, D], // ╓
-        '\u{2554}' => [N, D, N, D], // ╔
-        '\u{2555}' => [D, N, N, L], // ╕
-        '\u{2556}' => [L, N, N, D], // ╖
-        '\u{2557}' => [D, N, N, D], // ╗
-        '\u{2558}' => [N, D, L, N], // ╘
-        '\u{2559}' => [N, L, D, N], // ╙
-        '\u{255A}' => [N, D, D, N], // ╚
-        '\u{255B}' => [D, N, L, N], // ╛
-        '\u{255C}' => [L, N, D, N], // ╜
-        '\u{255D}' => [D, N, D, N], // ╝
-        '\u{255E}' => [N, D, L, L], // ╞
-        '\u{255F}' => [N, L, D, D], // ╟
-        '\u{2560}' => [N, D, D, D], // ╠
-        '\u{2561}' => [D, N, L, L], // ╡
-        '\u{2562}' => [L, N, D, D], // ╢
-        '\u{2563}' => [D, N, D, D], // ╣
-        '\u{2564}' => [D, D, N, L], // ╤
-        '\u{2565}' => [L, L, N, D], // ╥
-        '\u{2566}' => [D, D, N, D], // ╦
-        '\u{2567}' => [D, D, L, N], // ╧
-        '\u{2568}' => [L, L, D, N], // ╨
-        '\u{2569}' => [D, D, D, N], // ╩
-        '\u{256A}' => [D, D, L, L], // ╪
-        '\u{256B}' => [L, L, D, D], // ╫
-        '\u{256C}' => [D, D, D, D], // ╬
+        '\u{250B}' => [N, N, H, H],                         // ┋
+        '\u{250C}' => [N, L, N, L],                         // ┌
+        '\u{250D}' => [N, H, N, L],                         // ┍
+        '\u{250E}' => [N, L, N, H],                         // ┎
+        '\u{250F}' => [N, H, N, H],                         // ┏
+        '\u{2510}' => [L, N, N, L],                         // ┐
+        '\u{2511}' => [H, N, N, L],                         // ┑
+        '\u{2512}' => [L, N, N, H],                         // ┒
+        '\u{2513}' => [H, N, N, H],                         // ┓
+        '\u{2514}' => [N, L, L, N],                         // └
+        '\u{2515}' => [N, H, L, N],                         // ┕
+        '\u{2516}' => [N, L, H, N],                         // ┖
+        '\u{2517}' => [N, H, H, N],                         // ┗
+        '\u{2518}' => [L, N, L, N],                         // ┘
+        '\u{2519}' => [H, N, L, N],                         // ┙
+        '\u{251A}' => [L, N, H, N],                         // ┚
+        '\u{251B}' => [H, N, H, N],                         // ┛
+        '\u{251C}' => [N, L, L, L],                         // ├
+        '\u{251D}' => [N, H, L, L],                         // ┝
+        '\u{251E}' => [N, L, H, L],                         // ┞
+        '\u{251F}' => [N, L, L, H],                         // ┟
+        '\u{2520}' => [N, L, H, H],                         // ┠
+        '\u{2523}' => [N, H, H, H],                         // ┣
+        '\u{2524}' => [L, N, L, L],                         // ┤
+        '\u{2525}' => [H, N, L, L],                         // ┥
+        '\u{2526}' => [L, N, H, L],                         // ┦
+        '\u{2527}' => [L, N, L, H],                         // ┧
+        '\u{2528}' => [L, N, H, H],                         // ┨
+        '\u{252B}' => [H, N, H, H],                         // ┫
+        '\u{252C}' => [L, L, N, L],                         // ┬
+        '\u{252D}' => [H, L, N, L],                         // ┭
+        '\u{252E}' => [L, H, N, L],                         // ┮
+        '\u{252F}' => [H, H, N, L],                         // ┯
+        '\u{2530}' => [L, L, N, H],                         // ┰
+        '\u{2533}' => [H, H, N, H],                         // ┳
+        '\u{2534}' => [L, L, L, N],                         // ┴
+        '\u{2535}' => [H, H, L, N],                         // ┵
+        '\u{2536}' => [L, L, H, N],                         // ┶
+        '\u{2537}' => [H, L, L, N],                         // ┷
+        '\u{2538}' => [L, H, L, N],                         // ┸
+        '\u{2550}' => [D, D, N, N],                         // ═
+        '\u{2551}' => [N, N, D, D],                         // ║
+        '\u{2552}' => [N, D, N, L],                         // ╒
+        '\u{2553}' => [N, L, N, D],                         // ╓
+        '\u{2554}' => [N, D, N, D],                         // ╔
+        '\u{2555}' => [D, N, N, L],                         // ╕
+        '\u{2556}' => [L, N, N, D],                         // ╖
+        '\u{2557}' => [D, N, N, D],                         // ╗
+        '\u{2558}' => [N, D, L, N],                         // ╘
+        '\u{2559}' => [N, L, D, N],                         // ╙
+        '\u{255A}' => [N, D, D, N],                         // ╚
+        '\u{255B}' => [D, N, L, N],                         // ╛
+        '\u{255C}' => [L, N, D, N],                         // ╜
+        '\u{255D}' => [D, N, D, N],                         // ╝
+        '\u{255E}' => [N, D, L, L],                         // ╞
+        '\u{255F}' => [N, L, D, D],                         // ╟
+        '\u{2560}' => [N, D, D, D],                         // ╠
+        '\u{2561}' => [D, N, L, L],                         // ╡
+        '\u{2562}' => [L, N, D, D],                         // ╢
+        '\u{2563}' => [D, N, D, D],                         // ╣
+        '\u{2564}' => [D, D, N, L],                         // ╤
+        '\u{2565}' => [L, L, N, D],                         // ╥
+        '\u{2566}' => [D, D, N, D],                         // ╦
+        '\u{2567}' => [D, D, L, N],                         // ╧
+        '\u{2568}' => [L, L, D, N],                         // ╨
+        '\u{2569}' => [D, D, D, N],                         // ╩
+        '\u{256A}' => [D, D, L, L],                         // ╪
+        '\u{256B}' => [L, L, D, D],                         // ╫
+        '\u{256C}' => [D, D, D, D],                         // ╬
         // Single-arm stubs.
         '\u{2574}' => [L, N, N, N], // ╴
         '\u{2575}' => [N, N, L, N], // ╵
@@ -372,9 +409,17 @@ mod tests {
     fn vector_coverage_matches_intent() {
         // TUI staples are vector-drawn; diagonals stay font glyphs.
         for (c, want) in [
-            ('─', true), ('│', true), ('┌', true), ('╬', true), ('╭', true),
-            ('█', true), ('▄', true), ('░', true), ('▛', true),
-            ('╱', false), ('╳', false),
+            ('─', true),
+            ('│', true),
+            ('┌', true),
+            ('╬', true),
+            ('╭', true),
+            ('█', true),
+            ('▄', true),
+            ('░', true),
+            ('▛', true),
+            ('╱', false),
+            ('╳', false),
         ] {
             assert_eq!(super::is_vector(c), want, "{c}");
         }

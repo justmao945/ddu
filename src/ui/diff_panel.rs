@@ -9,14 +9,18 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{hover_bg, meta_text, selection_bg, PANEL_HEADER_PX, ROW_PX};
+use super::{PANEL_HEADER_PX, ROW_PX, hover_bg, meta_text, selection_bg};
 use crate::app::AppView;
 use crate::diff::{DiffFile, DiffLine};
 
 /// Cap on the file-tree height; the tree scrolls beyond it.
 const FILE_TREE_MAX_H: f32 = 220.;
 
-pub(crate) fn render(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl IntoElement {
+pub(crate) fn render(
+    this: &AppView,
+    window: &mut Window,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     // No branch/stat strip when the tree is clean — the body's
     // "No changes" state carries the panel on its own.
     let dirty = this.diff.as_ref().is_some_and(|d| !d.is_empty());
@@ -94,7 +98,8 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
 
 fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl IntoElement {
     let Some(diff) = &this.diff else {
-        return empty(this.diff_error.as_deref().unwrap_or("Loading changes…"), cx).into_any_element();
+        return empty(this.diff_error.as_deref().unwrap_or("Loading changes…"), cx)
+            .into_any_element();
     };
     if diff.is_empty() {
         return empty("No changes — working tree clean.", cx).into_any_element();
@@ -205,11 +210,23 @@ fn tree_level(
     let mut level = v_flex().flex_shrink_0().items_stretch().gap_0p5();
 
     for (ix, f) in &tree.files {
-        level = level.child(file_row(*ix, f, *ix == selected, indent, radius_f, active_bg, hov_bg, cx));
+        level = level.child(file_row(
+            *ix,
+            f,
+            *ix == selected,
+            indent,
+            radius_f,
+            active_bg,
+            hov_bg,
+            cx,
+        ));
     }
 
     for (dir, children) in &tree.dirs {
-        let sub = TreeNode { files: children.clone(), dirs: vec![] };
+        let sub = TreeNode {
+            files: children.clone(),
+            dirs: vec![],
+        };
         let added: usize = children.iter().map(|(_, f)| f.added).sum();
         let removed: usize = children.iter().map(|(_, f)| f.removed).sum();
         level = level
@@ -224,7 +241,8 @@ fn tree_level(
                     .pr_2()
                     .rounded(radius)
                     .child(
-                        Icon::new(IconName::ChevronDown).with_size(gpui_kit::component::Size::XSmall),
+                        Icon::new(IconName::ChevronDown)
+                            .with_size(gpui_kit::component::Size::XSmall),
                     )
                     .child(
                         div()
@@ -287,9 +305,7 @@ fn file_row(
             this.diff_file = ix;
             cx.notify();
         }))
-        .child(
-            Icon::new(IconName::File).with_size(gpui_kit::component::Size::XSmall),
-        )
+        .child(Icon::new(IconName::File).with_size(gpui_kit::component::Size::XSmall))
         .child(
             div()
                 .flex_1()
@@ -346,7 +362,10 @@ fn file_diff(file: &DiffFile, window: &mut Window, cx: &mut Context<AppView>) ->
     // keeping the +/- tint spanning the whole scrollable width.
     let mut hunks = v_flex().gap_2().w(content_w).min_w_full().flex_shrink_0();
     if file.hunks.is_empty() {
-        hunks = hunks.child(super::meta_text("No text changes to display (binary, empty file, or metadata change).", cx));
+        hunks = hunks.child(super::meta_text(
+            "No text changes to display (binary, empty file, or metadata change).",
+            cx,
+        ));
     }
     for hunk in &file.hunks {
         let mut h = v_flex()
@@ -358,7 +377,10 @@ fn file_diff(file: &DiffFile, window: &mut Window, cx: &mut Context<AppView>) ->
         hunks = hunks.child(h);
     }
     if file.truncated {
-        hunks = hunks.child(super::meta_text("Preview limited to 5,000 lines. Change totals include the entire file.", cx));
+        hunks = hunks.child(super::meta_text(
+            "Preview limited to 5,000 lines. Change totals include the entire file.",
+            cx,
+        ));
     }
     hunks
 }
@@ -366,10 +388,20 @@ fn file_diff(file: &DiffFile, window: &mut Window, cx: &mut Context<AppView>) ->
 /// Width the content column needs so the longest line never clips.
 /// Candidates are ranked by a display-cell estimate (non-ASCII ~2 cells),
 /// then the top few are shaped exactly with the mono font at `text_xs`.
-fn measure_content_width(file: &DiffFile, window: &mut Window, cx: &mut Context<AppView>) -> Pixels {
-    let font = Font { family: cx.theme().mono_font_family.clone(), ..Default::default() };
+fn measure_content_width(
+    file: &DiffFile,
+    window: &mut Window,
+    cx: &mut Context<AppView>,
+) -> Pixels {
+    let font = Font {
+        family: cx.theme().mono_font_family.clone(),
+        ..Default::default()
+    };
     let size = px(0.75 * f32::from(window.rem_size()));
-    let estimate = |s: &str| s.chars().fold(0usize, |n, c| n + if c.is_ascii() { 1 } else { 2 });
+    let estimate = |s: &str| {
+        s.chars()
+            .fold(0usize, |n, c| n + if c.is_ascii() { 1 } else { 2 })
+    };
 
     let mut candidates: Vec<(usize, &str, f32)> = Vec::new();
     for hunk in &file.hunks {
@@ -390,7 +422,11 @@ fn measure_content_width(file: &DiffFile, window: &mut Window, cx: &mut Context<
             underline: None,
             strikethrough: None,
         };
-        let w = window.text_system().shape_line(text.into(), size, &[run], None).width() + px(chrome);
+        let w = window
+            .text_system()
+            .shape_line(text.into(), size, &[run], None)
+            .width()
+            + px(chrome);
         if w > max_w {
             max_w = w;
         }
