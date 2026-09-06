@@ -25,6 +25,12 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         .min_w_0()
         .overflow_hidden()
         .bg(cx.theme().sidebar)
+        // Clicking anywhere in the panel moves focus off the terminal,
+        // so its block cursor turns hollow.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, window, cx| this.window_focus.focus(window, cx)),
+        )
         .child(tree(this, cx))
 }
 

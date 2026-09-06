@@ -544,12 +544,13 @@ fn paint_cursor(
         origin: point(x, y),
         size: size(m.cell_width, m.line_height),
     };
-    // Focused: solid block BUT translucent — a fully opaque cursor
-    // covers the glyph (and any completion/IME preview) underneath.
-    // 0.62 keeps the cell readable while still reading as a cursor.
-    // Unfocused: pure hollow outline, no fill — the cell (and the
-    // glyph under the cursor) stays fully readable.
-    if focused {
+    // Focused AND the window active: solid block BUT translucent — a
+    // fully opaque cursor covers the glyph (and any completion/IME
+    // preview) underneath; 0.62 keeps the cell readable while still
+    // reading as a cursor. Anything else (unfocused pane, another
+    // window frontmost): pure hollow outline, no fill — the cell (and
+    // the glyph under the cursor) stays fully readable.
+    if focused && window.is_window_active() {
         window.paint_quad(fill(bounds, palette.cursor.opacity(0.62)));
     } else {
         window.paint_quad(outline(bounds, palette.cursor, BorderStyle::Solid));

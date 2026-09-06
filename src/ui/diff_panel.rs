@@ -32,6 +32,12 @@ pub(crate) fn render(
         .min_w_0()
         .overflow_hidden()
         .bg(cx.theme().background)
+        // Clicking anywhere in the panel moves focus off the terminal,
+        // so its block cursor turns hollow.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, window, cx| this.window_focus.focus(window, cx)),
+        )
         .when(dirty, |el| el.child(header(this, cx)))
         .child(body(this, window, cx))
 }
@@ -118,7 +124,11 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
                                     div()
                                         .id("diff-tree-scroll")
                                         .size_full()
-                                        .overflow_y_scroll()
+                                        // Both axes: deep nesting must not
+                                        // clip paths — the tree scrolls
+                                        // horizontally with a visible bar.
+                                        .items_start()
+                                        .overflow_scroll()
                                         .track_scroll(&this.diff_tree_scroll)
                                         .p_2()
                                         .child(tree_level(
@@ -129,7 +139,7 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
                                             cx,
                                         )),
                                 )
-                                .vertical_scrollbar(&this.diff_tree_scroll),
+                                .scrollbar(&this.diff_tree_scroll, scroll::ScrollbarAxis::Both),
                         ),
                 )
                 // Content pane: whatever height the splitter leaves.
@@ -250,17 +260,20 @@ fn tree_level<'a>(
     let active_bg = selection_bg(cx);
     let hov_bg = hover_bg(cx);
     let guide = cx.theme().foreground.opacity(0.12);
-    let indent = 14. * depth as f32;
     let radius_f = f32::from(radius);
 
-    let mut level = v_flex().flex_shrink_0().items_stretch().gap_0p5();
+    // Indent comes solely from the nested guide wrappers (+7px per
+    // level, border-left as the guide line); rows pad a constant 4px,
+    // so depth never compounds. `items_start` lets rows size to their
+    // content — the horizontal scrollbar range then follows the
+    // longest path instead of the viewport.
+    let mut level = v_flex().flex_shrink_0().items_start().gap_0p5();
 
     for (ix, f) in &tree.files {
         level = level.child(file_row(
             *ix,
             f,
             *ix == selected,
-            indent,
             radius_f,
             active_bg,
             hov_bg,
@@ -276,12 +289,15 @@ fn tree_level<'a>(
         level = level.child(
             div()
                 .id(SharedString::from(format!("diff-dir-{path}")))
+                // Like file rows: stretch to the viewport at minimum,
+                // natural width beyond it (horizontal scrollbar).
+                .min_w(relative(1.))
                 .h(px(ROW_PX))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
                 .gap_1()
-                .pl(px(indent + 4.))
+                .pl(px(4.))
                 .pr_2()
                 .rounded(radius)
                 .cursor_pointer()
@@ -315,10 +331,9 @@ fn tree_level<'a>(
         );
         if open {
             level = level.child(
-                // Nested level: vertical indent guide + deeper indent.
+                // Nested level: vertical indent guide + 7px per level.
                 div()
-                    .ml(px(indent + 7.))
-                    .pl(px(indent + 8.))
+                    .ml(px(7.))
                     .border_l_1()
                     .border_color(guide)
                     .child(tree_level(sub, selected, depth + 1, closed, cx)),
@@ -329,12 +344,10 @@ fn tree_level<'a>(
     level
 }
 
-#[allow(clippy::too_many_arguments)]
 fn file_row(
     ix: usize,
     f: &DiffFile,
     active: bool,
-    indent: f32,
     radius: f32,
     active_bg: Hsla,
     hov_bg: Hsla,
@@ -343,17 +356,19 @@ fn file_row(
     let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
     let name_copy = name.clone();
     let path_copy = f.path.clone();
-    // Full width so the `+N −N` stats pin to the panel's right edge
-    // (items_stretch on the parent) instead of trailing the filename.
+    // Min-width 100%: when the natural width is below the viewport the
+    // row still stretches so the `+N −N` stats pin to the panel's right
+    // edge; when a long path exceeds the viewport the row keeps its
+    // natural width and the tree's horizontal scrollbar gets a range.
     div()
         .id(("diff-file", ix))
-        .w_full()
+        .min_w(relative(1.))
         .h(px(ROW_PX))
         .flex_shrink_0()
         .flex()
         .items_center()
         .gap_2()
-        .pl(px(indent + 4.))
+        .pl(px(4.))
         .pr_2()
         .rounded(px(radius))
         .cursor_pointer()
@@ -372,14 +387,10 @@ fn file_row(
                 .text_color(cx.theme().foreground.opacity(0.6)),
         )
         .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_xs()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(name),
+            // No min_w_0/ellipsis: the name must keep its natural
+            // width, or the row collapses to the viewport and the
+            // horizontal scrollbar never appears.
+            div().flex_1().text_xs().whitespace_nowrap().child(name),
         )
         .child(plus_minus(f.added, f.removed, cx))
         .context_menu(move |menu, _, _| {

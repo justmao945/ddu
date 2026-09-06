@@ -328,14 +328,32 @@ impl AppView {
             });
         }
         // First session for the first project, honoring the configured
-        // default launcher.
-        this.spawn_session_of(&cfg.new_session.kind, window, cx);
-        // Restore the last-selected session. `spawn_session_of` makes
-        // the fresh session current; if the saved index still exists in
-        // the restored rows (e.g. a `last_agent` resume row), prefer it
-        // so the window reopens where the user left off.
-        let n = this.projects[this.current_project].sessions.len();
-        this.current_session = state.current_session.min(n.saturating_sub(1));
+        // default launcher — unless the saved selection is a restored
+        // agent row (Done + a persisted `--resume <id>`): auto-resume
+        // it instead of idling on a Resume button, and skip the extra
+        // default shell so reopening never accumulates stray rows.
+        let restored = this.projects[this.current_project]
+            .sessions
+            .get(state.current_session)
+            .is_some_and(|s| {
+                s.term.is_none()
+                    && s.cmd.resume.is_some()
+                    && matches!(s.status, AgentStatus::Done(_))
+            });
+        if restored {
+            this.current_session = state.current_session;
+            cx.defer_in(window, |this, window, cx| {
+                this.resume_current_session(window, cx);
+            });
+        } else {
+            this.spawn_session_of(&cfg.new_session.kind, window, cx);
+            // Restore the last-selected session. `spawn_session_of` makes
+            // the fresh session current; if the saved index still exists
+            // in the restored rows, prefer it so the window reopens
+            // where the user left off.
+            let n = this.projects[this.current_project].sessions.len();
+            this.current_session = state.current_session.min(n.saturating_sub(1));
+        }
         this
     }
 
