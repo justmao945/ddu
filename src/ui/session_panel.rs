@@ -5,6 +5,7 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -82,6 +83,8 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .flex_1()
         .min_h_0()
         .overflow_y_scroll()
+        .track_scroll(&this.sessions_scroll)
+        .vertical_scrollbar(&this.sessions_scroll)
         .p_2()
         .gap_0p5()
         .children((0..this.projects.len()).map(move |p| {
@@ -289,7 +292,7 @@ fn session_row(
                     // synthesis never sees this press (see quick-add).
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.close_session(p, six, window, cx);
+                        this.request_close_session(p, six, window, cx);
                     })),
             )
         })

@@ -218,12 +218,61 @@ impl AppView {
             // saved right away: a crash or kill -9 must not lose it.
             self.persist(cx);
         }
+        crate::config::debug_log(&format!(
+            "exit: code={code} matched={matched} running={} shutting_down={}",
+            self.running_terms().len(),
+            self.shutting_down
+        ));
         // Shutdown sequencing: every Exit is a candidate for the last
-        // one — when nothing runs anymore, close the window or quit.
         if self.shutting_down && self.running_terms().is_empty() {
             self.finish_shutdown(window, cx);
         }
         cx.notify();
+    }
+
+    /// Close-session entry point: a live agent first gets the confirm
+    /// dialog (stopping is disruptive); a dead row goes right away.
+    pub(crate) fn request_close_session(
+        &mut self,
+        p: usize,
+        six: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.projects.get(p).and_then(|pr| pr.sessions.get(six)) else {
+            return;
+        };
+        if !session.status.is_running() {
+            self.close_session(p, six, window, cx);
+            return;
+        }
+        let title = session.title.clone();
+        let this = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            alert
+                .title(format!("Close “{title}”?"))
+                .description(
+                    "The running agent will be stopped (Ctrl-C); its session id is saved so the conversation can be resumed.",
+                )
+                .on_ok({
+                    let this = this.clone();
+                    move |_, window, cx| {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |v, cx| v.close_session(p, six, window, cx));
+                        }
+                        true
+                    }
+                })
+                .footer(crate::ui::dialog_footer("Close Session", "confirm-close", {
+                    let this = this.clone();
+                    move |_, window, cx| {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |v, cx| v.close_session(p, six, window, cx));
+                        }
+                        window.close_dialog(cx);
+                    }
+                }))
+        });
     }
 
     /// Close session `six` of project `p`. A live agent is stopped
@@ -296,37 +345,87 @@ impl AppView {
             .collect()
     }
 
-    /// Window close (red button): with live agents this becomes a
-    /// graceful shutdown — interrupt every agent, let each exit and
-    /// capture its resume id, persist, then remove the window. Without
-    /// live agents it persists and closes right away.
-    pub(crate) fn request_close(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.running_terms().is_empty() {
-            self.persist(cx);
-            return true;
+    /// Window close (red button): always confirms first. The confirm
+    /// handler runs the exit process — live agents get Ctrl-C, their
+    /// resume ids land in state.json, then the window goes away.
+    /// Returns false while the dialog or the exit process is live.
+    pub(crate) fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.shutting_down {
+            return false;
         }
-        if !self.shutting_down {
-            self.shutting_down = true;
-            self.quit_after_shutdown = false;
-            self.begin_shutdown(cx);
-        }
-        // Keep the window until the last agent is out.
+        self.confirm_exit(false, window, cx);
         false
     }
 
-    /// ⌘Q: same graceful shutdown, ending in a process exit (the
+    /// ⌘Q: the same confirm dialog, ending in a process exit (the
     /// reliable route here — the platform terminate path never
     /// completes under this app's setup).
-    pub(crate) fn request_quit(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_exit(true, window, cx);
+    }
+
+    /// Confirm dialog shared by window close and ⌘Q.
+    fn confirm_exit(&mut self, quit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shutting_down {
+            return;
+        }
+        let live = self.running_terms().len();
+        let what = if quit { "Quit" } else { "Close window" };
+        let description = if live > 0 {
+            format!(
+                "{live} session{} running. They will be stopped now and their session ids saved so the conversations can be resumed.",
+                if live == 1 { " is" } else { "s are" }
+            )
+        } else {
+            "The workspace layout is saved; sessions stay resumable.".to_string()
+        };
+        let this = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            alert
+                .title(format!("{what}?"))
+                .description(description.clone())
+                .on_ok({
+                    let this = this.clone();
+                    move |_, window, cx| {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |v, cx| v.begin_exit(quit, window, cx));
+                        }
+                        true
+                    }
+                })
+                .footer(crate::ui::dialog_footer(
+                    if quit { "Quit" } else { "Close" },
+                    "confirm-exit",
+                    {
+                        let this = this.clone();
+                        move |_, window, cx| {
+                            if let Some(this) = this.upgrade() {
+                                this.update(cx, |v, cx| v.begin_exit(quit, window, cx));
+                            }
+                            window.close_dialog(cx);
+                        }
+                    },
+                ))
+        });
+    }
+
+    /// Confirmed exit: with live agents start the graceful shutdown
+    /// (the Exiting overlay shows meanwhile); otherwise finish at once.
+    pub(crate) fn begin_exit(&mut self, quit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shutting_down {
+            return;
+        }
+        self.quit_after_shutdown = quit;
         if self.running_terms().is_empty() {
-            self.persist(cx);
-            std::process::exit(0);
+            self.finish_shutdown(window, cx);
+            return;
         }
-        if !self.shutting_down {
-            self.shutting_down = true;
-            self.quit_after_shutdown = true;
-            self.begin_shutdown(cx);
-        }
+        self.shutting_down = true;
+        crate::config::debug_log(&format!(
+            "begin_exit: quit={quit} live={}",
+            self.running_terms().len()
+        ));
+        self.begin_shutdown(cx);
     }
 
     /// Kick off the shutdown sequence: Ctrl-C to every live agent now;
@@ -334,6 +433,7 @@ impl AppView {
     /// 2s; anything still alive at 6s is killed outright (its Exit
     /// still fires, the tail may still carry the resume id).
     fn begin_shutdown(&mut self, cx: &mut Context<Self>) {
+        crate::config::debug_log("begin_shutdown: interrupt all");
         for term in self.running_terms() {
             term.update(cx, |s, _| s.interrupt());
         }
@@ -364,6 +464,7 @@ impl AppView {
     /// captured on each Exit), then close the window or quit.
     fn finish_shutdown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.shutting_down = false;
+        crate::config::debug_log("finish_shutdown: persist + close");
         self.persist(cx);
         if self.quit_after_shutdown {
             std::process::exit(0);
@@ -388,9 +489,11 @@ impl AppView {
                 .or_else(|| s.cmd.resume.clone())
         });
         let Some(id) = resume_id else {
+            crate::config::debug_log("resume: NO ID — aborting");
             eprintln!("[ddu] No session id found in the last run's output.");
             return;
         };
+        crate::config::debug_log(&format!("resume: respawning with id={id}"));
         self.respawn_current_session(Some(id), window, cx);
     }
 

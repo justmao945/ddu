@@ -43,6 +43,11 @@ cp "$BIN" "$APP/Contents/MacOS/ddu.bin"
 cat > "$APP/Contents/MacOS/launch.sh" <<LAUNCH
 #!/bin/sh
 cd "\${DDU_DIR:-\$HOME/Code/ddu}" || exit 1
+# Forward every DDU_* variable (DDU_DIR, DDU_STATE_PATH, DDU_DEBUG, …)
+# so a dev relaunch can point the app at a scratch state file.
+for v in \$(env | sed -n 's/^\\(DDU_[A-Za-z0-9_]*\\)=.*/\\1/p'); do
+  eval "export \$v"
+done
 # Dev hook baked at bundle time (see main.rs): auto-open Settings. Omitted
 # entirely when unset so a clean bundle can't leak an empty-string var.
 ${DDU_VERIFY_SETTINGS:+export DDU_VERIFY_SETTINGS="${DDU_VERIFY_SETTINGS}"}

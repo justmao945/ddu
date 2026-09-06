@@ -23,8 +23,13 @@ const LEVEL_INDENT: f32 = 14.;
 /// The sidebar's lower layer: the working tree's changed files.
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let Some(diff) = &this.diff else {
-        return empty_layer(this.diff_error.as_deref().unwrap_or("Loading changes…"), cx)
-            .into_any_element();
+        // No session under the tree → say so; otherwise show the poll
+        // error (or the initial "loading" note).
+        let note = match this.current_session() {
+            None => "No session — pick one in the project tree.",
+            _ => this.diff_error.as_deref().unwrap_or("Loading changes…"),
+        };
+        return empty_layer(note, cx).into_any_element();
     };
     if diff.is_empty() {
         return empty_layer("No changes — working tree clean.", cx).into_any_element();
@@ -82,7 +87,9 @@ fn empty_layer(text: &str, cx: &mut Context<AppView>) -> impl IntoElement {
         .items_center()
         .justify_center()
         .p_2()
-        .child(meta_text(text.to_string(), cx))
+        // Constrain the block so longer notes wrap into a few centered
+        // lines instead of one clipped strip.
+        .child(meta_text(text.to_string(), cx).max_w(px(160.)))
 }
 
 /// One level of the file tree. `files` are entries at this depth,

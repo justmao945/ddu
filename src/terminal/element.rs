@@ -250,17 +250,16 @@ impl Element for TerminalElement {
         paint_cursor(
             &cursor, cursor_row, &m, &palette, origin, focused, window, cx,
         );
-        // Right-edge scrollbar thumb — macOS-style overlay: only while
-        // scrolled back into history or mid-drag (auto-hidden at the
-        // live bottom). Same geometry the mouse handlers hit-test
-        // against; the track spans the element's full height.
+        // Right-edge scrollbar thumb — macOS-style overlay: shows while
+        // the mouse hovers the strip, during scroll/drag activity, or
+        // while scrolled back into history; fades after the idle
+        // window. Same geometry the mouse handlers hit-test against.
         let (rows, history) = {
             let g = term_lock.grid();
             (g.screen_lines(), g.history_size())
         };
-        // `scrollbar_visible()` re-locks the term mutex (held here), so
-        // inline the check: drag state + the already-read offset.
-        if session.read(cx).scrollbar_drag.is_some() || content.display_offset > 0 {
+        // Inline the activity test (no term re-lock while held here).
+        if session.read(cx).scrollbar_activity() || content.display_offset > 0 {
             if let Some((_track, thumb)) =
                 scrollbar_geometry(bounds, rows, history, content.display_offset)
             {

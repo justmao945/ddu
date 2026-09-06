@@ -85,6 +85,10 @@ fn chrono_like_timestamp() -> u128 {
         .unwrap_or(0)
 }
 
+struct ExitHook(Option<(gpui::WeakEntity<AppView>, gpui::AnyWindowHandle)>);
+
+impl gpui::Global for ExitHook {}
+
 fn main() {
     install_panic_logger();
     let app = gpui_kit::application().with_assets(AppAssets);
@@ -123,25 +127,41 @@ fn main() {
             cx,
         );
         Theme::global_mut(cx).font_size = px(14.);
+        // Where the main window lives, so the global ⌘Q fallback can
+        // route through the window's confirm dialog + graceful shutdown.
+        cx.set_global(ExitHook(None));
+
         // Application menu. The keymap binding for `Quit` (cmd-q) must
         // exist before the menu is built — the menu item resolves its
         // shortcut from the keymap — so it is registered at app level
-        // here. ⌘Q then routes through the same action → persist → exit
-        // path instead of AppKit's terminate, which this app's platform
-        // plumbing never completes.
+        // here. ⌘Q then routes through the window's confirm dialog →
+        // graceful shutdown, not AppKit's terminate (which this app's
+        // platform plumbing never completes).
         cx.bind_keys([KeyBinding::new("cmd-q", app::Quit, None)]);
         cx.set_menus([Menu::new("ddu").items(vec![MenuItem::action("Quit", app::Quit)])]);
         // Global quit fallback: menu dispatch may not reach the window
-        // view's action handlers (focus chain), so catch `Quit` here.
-        // The global State is kept current by AppView::persist on every
-        // mutation; flushing it to disk is the last step before exit.
+        // view's action handlers (focus chain), so catch `Quit` here and
+        // drive the window's view directly; a plain save+exit only when
+        // no window is alive.
         cx.on_action(|_: &app::Quit, cx| {
-            if let Some(state) = cx.try_global::<crate::config::State>() {
-                if let Err(err) = state.save() {
-                    eprintln!("[ddu] Failed to save state on quit: {err}");
+            let hook = cx.global::<ExitHook>().0.clone();
+            match hook {
+                Some((view, window)) => {
+                    let _ = window.update(cx, |_, window, cx| {
+                        if let Some(view) = view.upgrade() {
+                            view.update(cx, |v, cx| v.request_quit(window, cx));
+                        }
+                    });
+                }
+                None => {
+                    if let Some(state) = cx.try_global::<crate::config::State>() {
+                        if let Err(err) = state.save() {
+                            eprintln!("[ddu] Failed to save state on quit: {err}");
+                        }
+                    }
+                    std::process::exit(0);
                 }
             }
-            std::process::exit(0);
         });
         // Activate BEFORE the first window exists: the display-link start
         // guard latches on the window's occlusion state at creation, and a
@@ -183,11 +203,21 @@ fn open_main_window(cx: &mut gpui_kit::App) {
         ..TitleBar::window_options()
     };
     cx.spawn(async move |cx| {
-        let _ = cx.open_window(options, |window, cx| {
+        match cx.open_window(options, |window, cx| {
             let view = cx.new(|cx| AppView::new(window, cx));
+            // The global ⌘Q fallback drives the view through this hook
+            // (the window's root view is Root, so the handle alone
+            // can't reach it).
+            cx.global_mut::<ExitHook>().0 = Some((view.downgrade(), window.window_handle()));
             // First level on the window must be a Root.
             cx.new(|cx| Root::new(view, window, cx))
-        });
+        }) {
+            Ok(_) => {}
+            Err(err) => {
+                eprintln!("[ddu] open_window failed: {err}");
+                crate::config::debug_log(&format!("open_window failed: {err}"));
+            }
+        }
     })
     .detach();
 }

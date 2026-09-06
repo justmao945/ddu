@@ -32,6 +32,9 @@ pub use pty::PtySpawn;
 
 /// Minimum gap between grid+PTY reflows while a drag is resizing.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(140);
+/// How long the overlay thumb stays up after the last scroll/hover
+/// activity (macOS fades at ~1s).
+const SCROLLBAR_IDLE: Duration = Duration::from_millis(900);
 
 /// Terminal events emitted to subscribers (the app shell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +75,11 @@ pub struct TermSession {
     content_bounds: Cell<Option<Bounds<Pixels>>>,
     /// Scrollbar thumb drag: grab offset (px) below the thumb's top.
     scrollbar_drag: Option<f32>,
+    /// Overlay-scrollbar visibility, macOS-style: show while the mouse
+    /// hovers the right-edge strip or while scroll activity is recent,
+    /// fade out after [`SCROLLBAR_IDLE`].
+    scrollbar_hover: bool,
+    scrollbar_until: Option<Instant>,
     /// Button code held while the child tracks the mouse (xterm 1002
     /// drag reports); None when no button is down.
     mouse_held: Option<u8>,
@@ -120,15 +128,17 @@ impl TermSession {
                 selecting: false,
                 grid_bounds: Cell::new(None),
                 content_bounds: Cell::new(None),
-                ever_resized: false,
-                flush_scheduled: false,
-                scroll_remainder: 0.,
-                marked_text: None,
                 scrollbar_drag: None,
+                scrollbar_hover: false,
+                scrollbar_until: None,
                 mouse_held: None,
                 mouse_cell: (u32::MAX, u32::MAX),
                 wheel_remainder: 0.,
+                marked_text: None,
                 ime_cursor_bounds: Cell::new(None),
+                ever_resized: false,
+                flush_scheduled: false,
+                scroll_remainder: 0.,
             }
         });
 
@@ -267,6 +277,9 @@ impl TermSession {
         self.scroll_remainder += lines;
         let whole = self.scroll_remainder.trunc() as i32;
         self.scroll_remainder -= whole as f32;
+        // Any wheel traffic counts as scrollbar activity — even a
+        // whole==0 trickle must refresh the idle window.
+        self.reveal_scrollbar();
         if whole != 0 {
             self.grid.scroll(whole);
             cx.emit(TermEvent::Wakeup);
@@ -367,15 +380,51 @@ impl TermSession {
             .is_some_and(|s| !s.is_empty())
     }
 
-    /// Overlay scrollbar visibility: macOS-style auto-hide. The thumb
-    /// shows only while scrolled back into history or while a drag is
-    /// active; at the live bottom it stays out of the way.
+    /// Overlay-scrollbar visibility, macOS-style: visible while the
+    /// mouse hovers the right-edge strip, while a drag or recent scroll
+    /// activity is live, or while scrolled back into history. Hidden
+    /// again once the mouse leaves and the idle window closes.
     pub(crate) fn scrollbar_visible(&self) -> bool {
-        self.scrollbar_drag.is_some() || self.grid.term.lock().grid().display_offset() > 0
+        self.scrollbar_activity() || self.grid.term.lock().grid().display_offset() > 0
     }
 
-    /// Right-edge scrollbar track+thumb in window coordinates, or None
-    /// when there is no scrollback to navigate.
+    /// Hover/drag/recent-scroll part of the visibility test — no term
+    /// mutex, so the painter (which holds the lock) can call this.
+    pub(crate) fn scrollbar_activity(&self) -> bool {
+        self.scrollbar_drag.is_some()
+            || self.scrollbar_hover
+            || self
+                .scrollbar_until
+                .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Scroll activity happened: keep the thumb up for another idle
+    /// window.
+    fn reveal_scrollbar(&mut self) {
+        self.scrollbar_until = Some(Instant::now() + SCROLLBAR_IDLE);
+    }
+
+    /// Mouse over the right-edge strip (hover keeps the thumb up).
+    pub(crate) fn scrollbar_hover_at(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let hovered = self
+            .scrollbar_geometry()
+            .map(|(track, _)| {
+                let mut hit = track;
+                hit.origin.x -= px(4.);
+                hit.size.width += px(8.);
+                hit.contains(&pos)
+            })
+            .unwrap_or(false);
+        let changed = self.scrollbar_hover != hovered;
+        self.scrollbar_hover = hovered;
+        if hovered {
+            self.reveal_scrollbar();
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     pub(crate) fn scrollbar_geometry(&self) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
         let bounds = self.grid_bounds.get()?;
         let (_cols, rows) = self.grid.size();
@@ -403,6 +452,7 @@ impl TermSession {
         let Some((track, thumb)) = self.scrollbar_geometry() else {
             return false;
         };
+        self.reveal_scrollbar();
         if thumb.contains(&pos) {
             self.scrollbar_drag = Some(f32::from(pos.y - thumb.origin.y));
         } else if track.contains(&pos) {
@@ -430,13 +480,14 @@ impl TermSession {
         let Some((track, thumb)) = self.scrollbar_geometry() else {
             return false;
         };
+        self.reveal_scrollbar();
         let travel = f32::from(track.size.height - thumb.size.height);
-        let history = self.grid.term.lock().grid().history_size() as f32;
         let frac = if travel <= 0. {
             0.
         } else {
             1. - ((f32::from(pos.y) - grab - f32::from(track.origin.y)) / travel).clamp(0., 1.)
         };
+        let history = self.grid.term.lock().grid().history_size() as f32;
         let target = (frac * history).round() as i32;
         let current = self.grid.term.lock().grid().display_offset() as i32;
         if target != current {
@@ -449,6 +500,7 @@ impl TermSession {
     /// End any scrollbar drag (mouse up anywhere).
     pub(crate) fn scrollbar_mouse_up(&mut self) {
         self.scrollbar_drag = None;
+        self.reveal_scrollbar();
     }
 
     /// What mouse traffic the child asked for (xterm 1000/1002/1003).

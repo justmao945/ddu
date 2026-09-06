@@ -64,6 +64,16 @@ impl AppView {
                     .collect(),
             })
             .collect();
+        crate::config::debug_log(&format!(
+            "persist: sessions={:?} current=({},{})",
+            snapshot
+                .projects
+                .iter()
+                .map(|p| format!("{}:{}", p.name, p.sessions.len()))
+                .collect::<Vec<_>>(),
+            self.current_project,
+            self.current_session
+        ));
         let path = self.current_project().path.to_string_lossy().to_string();
         let entry = snapshot
             .project_state
@@ -112,6 +122,22 @@ impl AppView {
     ) {
         let current = self.current_project;
         let mut seq = self.session_seq;
+        crate::config::debug_log(&format!(
+            "restore: current_project={current} saved={:?}",
+            state
+                .projects
+                .iter()
+                .map(|p| format!(
+                    "{}:[{}]",
+                    p.name,
+                    p.sessions
+                        .iter()
+                        .map(|s| format!("{}@{}", s.kind, s.resume.as_deref().unwrap_or("-")))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ))
+                .collect::<Vec<_>>()
+        ));
         for (ix, project) in self.projects.iter_mut().enumerate() {
             let Some(saved) = state.projects.get(ix).map(|p| p.sessions.clone()) else {
                 continue;

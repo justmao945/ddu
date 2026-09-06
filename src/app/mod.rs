@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui_kit::component::*;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::diff::{GitDiff, git};
@@ -77,12 +78,14 @@ pub struct AppView {
     pub(crate) panes_state: Entity<ResizableState>,
     pub(crate) diff_tree_scroll: ScrollHandle,
     pub(crate) diff_hunks_scroll: ScrollHandle,
+    /// Project/session tree scroll (sidebar upper layer) — drives its
+    /// auto-hide scrollbar.
+    pub(crate) sessions_scroll: ScrollHandle,
     /// The sidebar's vertical split: [project tree | diff tree layer].
     pub(crate) sidebar_split_state: Entity<ResizableState>,
     /// Whether the diff file tree layer is shown under the project
     /// tree in the sidebar.
     pub(crate) show_diff_tree: bool,
-    /// Directory paths collapsed in the diff tree (all default open).
     pub(crate) diff_tree_closed: std::collections::HashSet<String>,
     pub(crate) hovered_project: Option<usize>,
     /// Project whose `...` menu is open: keeps the row's buttons mounted
@@ -122,9 +125,13 @@ pub struct AppView {
 /// emit CSS `min_w`, so a panel can never render below its min even when
 /// the window itself is squeezed (flex then shrinks the center pane).
 const SIDEBAR_DEFAULT: f32 = 200.;
-const SIDEBAR_MAX: f32 = 420.;
+/// Compact session list: rows are narrow, so dragging far past ~300px
+/// only starves the terminal for no gain.
+const SIDEBAR_MAX: f32 = 300.;
 const SIDEBAR_MIN: f32 = 150.;
 const DIFF_DEFAULT: f32 = 340.;
+/// Floor for the diff pane's adaptive max: even on a small window the
+/// pane may reach this wide.
 const DIFF_MAX: f32 = 600.;
 const DIFF_MIN: f32 = 200.;
 /// The terminal pane never shrinks below this while dragging a divider.
@@ -213,6 +220,7 @@ impl AppView {
             panes_state: cx.new(|_| ResizableState::default()),
             diff_tree_scroll: ScrollHandle::new(),
             diff_hunks_scroll: ScrollHandle::new(),
+            sessions_scroll: ScrollHandle::new(),
             sidebar_split_state: cx.new(|_| ResizableState::default()),
             show_diff_tree: state.show_diff_tree,
             diff_tree_closed: HashSet::new(),
@@ -388,6 +396,7 @@ impl Render for AppView {
         // keep a dispatch path no matter what was clicked last.
         v_flex()
             .id("app-root")
+            .relative()
             .track_focus(&self.window_focus)
             .size_full()
             .bg(cx.theme().background)
@@ -444,24 +453,27 @@ impl Render for AppView {
                 }
                 let p = this.current_project;
                 let six = this.current_session;
-                this.close_session(p, six, window, cx);
+                this.request_close_session(p, six, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSessions, _, cx| this.toggle_sessions(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, _, cx| this.toggle_diff(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiffTree, _, cx| this.toggle_diff_tree(cx)))
-            // ⌘Q: graceful shutdown — live agents get Ctrl-C, their
-            // resume ids land in state.json, then the process exits.
-            .on_action(cx.listener(|this, _: &Quit, _, cx| {
-                this.request_quit(cx);
+            // ⌘Q: confirm dialog, then graceful shutdown — live agents
+            // get Ctrl-C, their resume ids land in state.json, then the
+            // process exits.
+            .on_action(cx.listener(|this, _: &Quit, window, cx| {
+                this.request_quit(window, cx);
             }))
             .child(ui::title_bar::render(self, cx))
             .child({
                 // Two nested splitters. The sidebar column owns a status
                 // strip, so the LEFT divider runs to the window's bottom
                 // edge; the terminal/changes region wraps its splitter
-                // ABOVE one unified strip, so the RIGHT divider stops at
-                // the strip's top edge and all strips sit on one line.
                 let panes_min = CENTER_MIN + if self.show_diff { DIFF_MIN } else { 0. } + 8.;
+                // The diff pane flexes with the window: its drag cap
+                // scales with the viewport (a fixed cap reads cramped
+                // on a big display), floored at DIFF_MAX.
+                let diff_max = (window.viewport_size().width.as_f32() * 0.6).max(DIFF_MAX);
                 let mut shell = h_resizable("shell").with_state(&self.shell_state);
                 if self.show_sessions {
                     shell = shell.child(
@@ -499,11 +511,14 @@ impl Render for AppView {
                         ),
                 );
                 if self.show_diff {
+                    // No `.flex_none()`: the pane grows/shrinks with
+                    // the window (the sidebar stays pinned by its own
+                    // flex_none), with the drag cap tracking the
+                    // viewport width.
                     panes = panes.child(
                         resizable_panel()
                             .size(self.last_diff_w())
-                            .flex_none()
-                            .size_range(px(DIFF_MIN)..px(DIFF_MAX))
+                            .size_range(px(DIFF_MIN)..px(diff_max))
                             .child(
                                 div()
                                     .size_full()
@@ -532,5 +547,29 @@ impl Render for AppView {
             // window.open_dialog / open_alert_dialog are hosted here —
             // gpui-kit requires the app to render these layers.
             .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
+            // Exit in progress (confirmed close/⌘Q): a dimming overlay
+            // while agents are interrupted and their resume ids saved.
+            .when(self.shutting_down, |el| {
+                let n = self.running_terms().len();
+                el.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui_kit::black().opacity(0.45))
+                        .text_color(gpui_kit::white())
+                        .text_sm()
+                        .child(if n > 0 {
+                            format!(
+                                "Exiting — stopping {n} session{}…",
+                                if n == 1 { "" } else { "s" }
+                            )
+                        } else {
+                            "Exiting — saving session ids…".to_string()
+                        }),
+                )
+            })
     }
 }

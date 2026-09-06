@@ -221,6 +221,9 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                                 if s.mouse_motion(event.position, &event.modifiers, window, cx) {
                                     return;
                                 }
+                                // Hovering the right-edge strip keeps
+                                // the overlay thumb up.
+                                s.scrollbar_hover_at(event.position, cx);
                                 if s.scrollbar_mouse_drag(event.position, cx) {
                                     return;
                                 }
@@ -382,8 +385,8 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
 }
 
 /// In-flow exit strip at the bottom of the terminal: status + resume
-/// (when the agent printed its session id) + restart. Card-style with
-/// a soft fill — no full-width hairline, which read as a stray rule.
+/// (when the agent printed its session id) + restart. One compact row,
+/// visually level with the status strips.
 fn exited_banner(
     exit: Option<i32>,
     resume_id: Option<String>,
@@ -398,42 +401,32 @@ fn exited_banner(
         .flex_shrink_0()
         .items_center()
         .justify_center()
+        .py_1()
         .gap_2()
-        .py_1p5()
+        .text_sm()
+        .text_color(cx.theme().foreground.opacity(0.8))
+        .child(label)
+        .when_some(resume_id, |el, _id| {
+            el.child(
+                Button::new("resume-session")
+                    .label("Resume")
+                    .ghost()
+                    .with_size(gpui_kit::component::Size::XSmall)
+                    .tab_stop(false)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.resume_current_session(window, cx);
+                    })),
+            )
+        })
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .py_1()
-                .rounded(cx.theme().radius)
-                .bg(cx.theme().muted_foreground.opacity(0.08))
-                .text_sm()
-                .text_color(cx.theme().foreground.opacity(0.8))
-                .child(label)
-                .when_some(resume_id, |el, _id| {
-                    el.child(
-                        Button::new("resume-session")
-                            .label("Resume")
-                            .ghost()
-                            .small()
-                            .tab_stop(false)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.resume_current_session(window, cx);
-                            })),
-                    )
-                })
-                .child(
-                    Button::new("restart-session")
-                        .label("Restart")
-                        .ghost()
-                        .small()
-                        .tab_stop(false)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.restart_current_session(window, cx);
-                        })),
-                ),
+            Button::new("restart-session")
+                .label("Restart")
+                .ghost()
+                .with_size(gpui_kit::component::Size::XSmall)
+                .tab_stop(false)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.restart_current_session(window, cx);
+                })),
         )
 }
 
@@ -455,6 +448,9 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .current_session()
         .map(|s| format!("{} · finished", s.kind))
         .unwrap_or_default();
+    // With no session anywhere, a New Session button can't know which
+    // project to spawn into — point at the sidebar instead.
+    let nowhere = this.projects.iter().all(|p| p.sessions.is_empty());
     v_flex()
         .size_full()
         .p_6()
@@ -471,6 +467,8 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         } else if has_session {
             // Restored row with no session id to resume — restart it.
             resumed_label
+        } else if nowhere {
+            "No sessions yet — add one from a project in the sidebar".to_string()
         } else {
             "No sessions in this project".to_string()
         })
@@ -478,6 +476,9 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
             el.child(div().max_w(px(480.)).child(error))
         })
         .children((0..1).filter_map(move |_| {
+            if nowhere && error.is_none() && !has_session {
+                return None;
+            }
             let (label, action) = if error.is_some() {
                 ("Retry", 0)
             } else if can_resume {
