@@ -35,17 +35,51 @@ pub(crate) fn render_sidebar(this: &AppView, cx: &mut Context<AppView>) -> impl 
 }
 
 pub(crate) fn render_center(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
-    let bar = StatusBar::new();
+    let mut bar = StatusBar::new();
     // A hidden panel's toggle moves here so it stays reachable.
-    let bar = if this.show_sessions {
-        bar
+    if !this.show_sessions {
+        bar = bar.left(h_flex().items_center().child(toggle_sessions(this, cx)));
+    }
+    if !this.show_diff {
+        bar = bar.right(h_flex().items_center().child(toggle_diff(this, cx)));
+    }
+    // All panels open: the strip would otherwise render as an empty
+    // sliver below the terminal. Give it the current run's identity
+    // (kind + title), like the bottom of a real terminal.
+    if this.show_sessions && this.show_diff {
+        let label = current_run_label(this);
+        if let Some(label) = label {
+            bar = bar.left(
+                h_flex()
+                    .items_center()
+                    .gap_1_5()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        Icon::new(IconName::SquareTerminal).text_color(cx.theme().muted_foreground),
+                    )
+                    .child(label),
+            );
+        }
+    }
+    bar
+}
+
+/// The live session row's title (agents adopt the PTY's OSC title —
+/// already kind-prefixed, e.g. "omp · finished"); `None` when no
+/// session exists or the title is empty.
+fn current_run_label(this: &AppView) -> Option<String> {
+    let s = this.current_session()?;
+    let title = s.title.trim();
+    if title.is_empty() {
+        return None;
+    }
+    // Live agents announce their own title via OSC (e.g. "omp · ddu");
+    // a bare shell shows its kind.
+    if s.is_agent() {
+        Some(title.to_string())
     } else {
-        bar.left(h_flex().items_center().child(toggle_sessions(this, cx)))
-    };
-    if this.show_diff {
-        bar
-    } else {
-        bar.right(h_flex().items_center().child(toggle_diff(this, cx)))
+        Some(format!("{} · {title}", s.kind))
     }
 }
 

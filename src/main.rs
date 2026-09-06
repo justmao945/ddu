@@ -123,6 +123,26 @@ fn main() {
             cx,
         );
         Theme::global_mut(cx).font_size = px(14.);
+        // Application menu. The keymap binding for `Quit` (cmd-q) must
+        // exist before the menu is built — the menu item resolves its
+        // shortcut from the keymap — so it is registered at app level
+        // here. ⌘Q then routes through the same action → persist → exit
+        // path instead of AppKit's terminate, which this app's platform
+        // plumbing never completes.
+        cx.bind_keys([KeyBinding::new("cmd-q", app::Quit, None)]);
+        cx.set_menus([Menu::new("ddu").items(vec![MenuItem::action("Quit", app::Quit)])]);
+        // Global quit fallback: menu dispatch may not reach the window
+        // view's action handlers (focus chain), so catch `Quit` here.
+        // The global State is kept current by AppView::persist on every
+        // mutation; flushing it to disk is the last step before exit.
+        cx.on_action(|_: &app::Quit, cx| {
+            if let Some(state) = cx.try_global::<crate::config::State>() {
+                if let Err(err) = state.save() {
+                    eprintln!("[ddu] Failed to save state on quit: {err}");
+                }
+            }
+            std::process::exit(0);
+        });
         // Activate BEFORE the first window exists: the display-link start
         // guard latches on the window's occlusion state at creation, and a
         // background-launched (unactivated) process misses it — the window

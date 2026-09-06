@@ -33,6 +33,7 @@ gpui_kit::actions!(
         TermPaste,
         TermCopy,
         CloseSettings,
+        Quit,
         SelectSession1,
         SelectSession2,
         SelectSession3,
@@ -198,7 +199,9 @@ impl AppView {
                     started: std::time::Instant::now(),
                     ended: Some(std::time::Instant::now()),
                     term: None,
-                    show_diff: true,
+                    // Seed the restored row with the diff visibility
+                    // saved when the previous run quit.
+                    show_diff: state.show_diff,
                 });
             }
         }
@@ -210,7 +213,9 @@ impl AppView {
             current_project,
             current_session: 0,
             show_sessions: !state.hidden_sessions,
-            show_diff: true,
+            // Diff visibility is per-session live, but the last saved
+            // value seeds the restored window.
+            show_diff: state.show_diff,
             resize_state: cx.new(|_| ResizableState::default()),
             diff_tree_scroll: ScrollHandle::new(),
             diff_hunks_scroll: ScrollHandle::new(),
@@ -302,9 +307,25 @@ impl AppView {
             },
         )
         .detach();
+        // Window close (red button / ⌘W on the window): persist before
+        // the view goes away. The OS-level terminate path (⌘Q via the
+        // app menu) has no hook, hence the `CmdQ` binding above too.
+        {
+            let this = cx.weak_entity();
+            window.on_window_should_close(cx, move |_, cx| {
+                let _ = this.update(cx, |view, cx| view.persist(cx));
+                true
+            });
+        }
         // First session for the first project, honoring the configured
         // default launcher.
         this.spawn_session_of(&cfg.new_session.kind, window, cx);
+        // Restore the last-selected session. `spawn_session_of` makes
+        // the fresh session current; if the saved index still exists in
+        // the restored rows (e.g. a `last_agent` resume row), prefer it
+        // so the window reopens where the user left off.
+        let n = this.projects[this.current_project].sessions.len();
+        this.current_session = state.current_session.min(n.saturating_sub(1));
         this
     }
 
@@ -380,6 +401,9 @@ impl AppView {
         } else {
             self.window_focus.focus(window, cx);
         }
+        // Remember the selection (and any diff adopt that flipped the
+        // panel) even when no layout changed.
+        self.persist(cx);
         cx.notify();
     }
 
@@ -530,6 +554,8 @@ impl AppView {
         snapshot.sidebar_width = self.last_sidebar_size.map(|w| w.as_f32());
         snapshot.diff_width = self.last_diff_size.map(|w| w.as_f32());
         snapshot.current_project = self.current_project;
+        snapshot.current_session = self.current_session;
+        snapshot.show_diff = self.show_diff;
         let old_projects = &snapshot.projects;
         snapshot.projects = self
             .projects
@@ -1180,6 +1206,18 @@ impl Render for AppView {
             }))
             .on_action(cx.listener(|this, _: &ToggleSessions, _, cx| this.toggle_sessions(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, _, cx| this.toggle_diff(cx)))
+            // ⌘Q: save the workspace snapshot, then quit. `persist` runs
+            // before `quit` so state.json reflects the final layout.
+            // `cx.quit()` routes through the platform terminate path,
+            // which macOS AppKit intercepts and (in this app's setup)
+            // never completes; a direct exit is the reliable route.
+            // `on_window_should_close` above already persisted, but the
+            // keybinding is the user-visible path — persist one more time
+            // so panel geometry from the last interaction lands on disk.
+            .on_action(cx.listener(|this, _: &Quit, _, cx| {
+                this.persist(cx);
+                std::process::exit(0);
+            }))
             .child(ui::title_bar::render(self, cx))
             .child({
                 // Each column owns its status strip, so the resize

@@ -154,6 +154,15 @@ pub struct State {
     /// Last active project (index into `projects`).
     #[serde(default)]
     pub current_project: usize,
+    /// Last active session (index into the current project's rows).
+    /// Restored after restart; clamped to the rows that actually exist.
+    #[serde(default)]
+    pub current_session: usize,
+    /// Last diff-panel visibility. Per-session in the UI, but only the
+    /// value of the session that was current at save time survives a
+    /// restart — it seeds the restored default.
+    #[serde(default = "default_true")]
+    pub show_diff: bool,
     /// Per-project right-pane state: the diff selection, tree collapse
     /// state and tree/content split height are project-local concerns —
     /// they mean nothing once the working tree changes or the project

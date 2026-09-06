@@ -144,11 +144,13 @@ impl AgentSession {
     }
 
     /// Time the current (or last) run has taken, in `m`/`h`/`d` units.
+    /// Anything under a minute shows as `1m` (the label is a coarse
+    /// human read-out, not a timer).
     pub fn elapsed_label(&self) -> String {
         let end = self.ended.unwrap_or_else(Instant::now);
         let secs = end.saturating_duration_since(self.started).as_secs();
         if secs < 60 {
-            "<1m".into()
+            "1m".into()
         } else if secs < 3600 {
             format!("{}m", secs / 60)
         } else if secs < 86_400 {
