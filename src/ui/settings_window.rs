@@ -211,7 +211,9 @@ fn update_config(f: impl FnOnce(&mut crate::config::Config, &mut App), cx: &mut 
         return;
     }
     let snapshot = cx.global::<crate::config::Config>().clone();
-    snapshot.save();
+    if let Err(err) = snapshot.save() {
+        crate::config::report_error(err, cx);
+    }
     cx.refresh_windows();
 }
 
@@ -595,40 +597,66 @@ fn builtin_agent_groups(cx: &App) -> SettingGroup {
 fn custom_agents_groups(cx: &App) -> Vec<SettingGroup> {
     let cfg = cx.global::<crate::config::Config>().clone();
     let mut groups = Vec::new();
-    groups.push(
-        SettingGroup::new()
-            .title("Custom agents")
-            .description("Extra launchers for the sidebar menus.")
-            .item(SettingItem::render(|options, _, _| {
-                Button::new("add-agent")
-                    .icon(IconName::Plus)
-                    .label("Add agent")
-                    .ghost()
-                    .small()
-                    .tab_stop(false)
-                    .disabled(options.is_disabled())
-                    .on_click(|_, _, cx| {
-                        update_config(
-                            |c, _| {
-                                let mut number = 1;
-                                while c
-                                    .custom_agents
-                                    .iter()
-                                    .any(|a| a.name == format!("agent-{number}"))
-                                {
-                                    number += 1;
-                                }
-                                c.custom_agents.push(crate::config::AgentPreset {
-                                    name: format!("agent-{number}"),
-                                    program: String::new(),
-                                    args: String::new(),
-                                });
-                            },
-                            cx,
-                        );
-                    })
-            })),
-    );
+    // No stock `.title()` here: the group needs a `+` button on the
+    // right of its header row, which `SettingGroup::title` (a plain
+    // SharedString) cannot host. Render the header inside the group,
+    // first item: title text styled like GroupBox's default title,
+    // plus button pinned right — visible even with zero agents.
+    groups.push(SettingGroup::new().item(SettingItem::render({
+        move |options, _, cx| {
+            let muted = cx.theme().muted_foreground;
+            v_flex()
+                .w_full()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_color(muted)
+                                .line_height(relative(1.))
+                                .child("Custom agents"),
+                        )
+                        .child(
+                            Button::new("add-agent")
+                                .icon(IconName::Plus)
+                                .ghost()
+                                .xsmall()
+                                .tab_stop(false)
+                                .tooltip("Add agent")
+                                .disabled(options.is_disabled())
+                                .on_click(|_, _, cx| {
+                                    update_config(
+                                        |c, _| {
+                                            let mut number = 1;
+                                            while c
+                                                .custom_agents
+                                                .iter()
+                                                .any(|a| a.name == format!("agent-{number}"))
+                                            {
+                                                number += 1;
+                                            }
+                                            c.custom_agents.push(crate::config::AgentPreset {
+                                                name: format!("agent-{number}"),
+                                                program: String::new(),
+                                                args: String::new(),
+                                            });
+                                        },
+                                        cx,
+                                    );
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("Extra launchers for the sidebar menus."),
+                )
+        }
+    })));
     for ix in 0..cfg.custom_agents.len() {
         let a = cfg.custom_agents[ix].clone();
         let command = if a.program.trim().is_empty() {

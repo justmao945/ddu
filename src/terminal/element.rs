@@ -388,11 +388,9 @@ fn paint_grid(
                 continue;
             }
             let wide = cell.flags.contains(Flags::WIDE_CHAR);
-            // Some nominally single-column glyphs (geometric bullets,
-            // Nerd Font symbols) shape wider than one cell in the
-            // fallback face and would swallow the next column, so pin
-            // every non-wide segment to its own column count: without
-            // a width hint the shaper lets the run overflow.
+            // Same-style run extent. A wide char paints alone (its spacer
+            // cell is covered by the forced two-column shaping); ASCII
+            // continues while style matches and no wide cell intervenes.
             let mut run_end = ix + 1;
             while run_end < row.len()
                 && !row[run_end].flags.contains(Flags::WIDE_CHAR)
@@ -406,13 +404,12 @@ fn paint_grid(
                 run_end += 1;
             }
             let text: String = row[ix..run_end].iter().map(|c| c.c).collect();
-            let cols = if wide { 2. } else { (run_end - ix) as f32 };
             segs.push(Seg::Text {
                 text,
                 key: StyleKey::of(cell, palette),
                 // A wide char owns two columns: itself + its spacer.
-                cols,
-                force_width: Some(px(f32::from(m.cell_width) * cols)),
+                cols: if wide { 2. } else { (run_end - ix) as f32 },
+                force_width: wide.then(|| px(f32::from(m.cell_width) * 2.)),
             });
             ix = run_end;
         }
@@ -442,7 +439,6 @@ fn paint_grid(
                         continue;
                     }
                     let run = key.into_run(text.len(), &m.font);
-                    let width = px(f32::from(m.cell_width) * cols);
                     let shaped = window.text_system().shape_line(
                         text.into(),
                         m.font_size,
@@ -450,30 +446,13 @@ fn paint_grid(
                         force_width,
                     );
                     // Backgrounds were already painted as merged row runs above.
-                    // Shaped text must never spill past its cells: some
-                    // faces (Nerd Font symbols, CJK fallbacks) draw
-                    // nominally single-width glyphs (bullets, dots) far
-                    // wider than the cell, swallowing the next column.
-                    // gpui's text renderer clips against the
-                    // window-sized clip stack, so pin a rect rounded up
-                    // to the segment's own box before painting.
-                    window.with_content_mask(
-                        Some(ContentMask {
-                            bounds: Bounds {
-                                origin: point(x, y),
-                                size: size(width, m.line_height),
-                            },
-                        }),
-                        |window| {
-                            let _ = shaped.paint(
-                                point(x, y),
-                                m.line_height,
-                                TextAlign::Left,
-                                Some(shaped.width()),
-                                window,
-                                cx,
-                            );
-                        },
+                    let _ = shaped.paint(
+                        point(x, y),
+                        m.line_height,
+                        TextAlign::Left,
+                        Some(shaped.width()),
+                        window,
+                        cx,
                     );
                     x += px(f32::from(m.cell_width) * cols);
                 }

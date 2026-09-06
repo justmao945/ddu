@@ -1,29 +1,48 @@
-//! Persistent app configuration (`state.json`): projects, new-session
-//! default, terminal shell, agent arg overrides and custom agents.
+//! Persistence, split in two files with one responsibility each:
 //!
-//! Everything is plain data with `Default` so a missing/corrupt file
-//! falls back to sane built-ins instead of failing the launch.
+//! * `settings.json` — [`Config`]: one-to-one user settings (default
+//!   launcher, shell, agent args, custom agents, font, theme).
+//! * `state.json` — [`State`]: runtime workspace snapshot (project
+//!   list with expand states, panel visibility).
+//!
+//! Both are plain data with `Default`. Loads report problems instead of
+//! failing the launch: a corrupt file is backed up beside itself and
+//! defaults are used; saves return the error for the caller to surface.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::session::AgentCmd;
 
-/// Where the state file lives: `~/Library/Application Support/ddu/` on
-/// macOS, `~/.config/ddu/` elsewhere.
-pub fn state_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("DDU_STATE_PATH") {
-        return PathBuf::from(path);
-    }
+/// `~/Library/Application Support/ddu/` on macOS, `~/.config/ddu/`
+/// elsewhere. Env override `DDU_STATE_PATH` still names the state file
+/// directly (launcher/tests); `DDU_SETTINGS_PATH` does the same for
+/// settings.
+fn data_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     if cfg!(target_os = "macos") {
-        PathBuf::from(home).join("Library/Application Support/ddu/state.json")
+        PathBuf::from(home).join("Library/Application Support/ddu")
     } else {
-        PathBuf::from(home).join(".config/ddu/state.json")
+        PathBuf::from(home).join(".config/ddu")
     }
 }
+
+pub fn settings_path() -> PathBuf {
+    std::env::var_os("DDU_SETTINGS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir().join("settings.json"))
+}
+
+pub fn state_path() -> PathBuf {
+    std::env::var_os("DDU_STATE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir().join("state.json"))
+}
+
+// ── settings.json ─────────────────────────────────────────────────────
 
 /// One user-defined agent launcher.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,9 +52,6 @@ pub struct AgentPreset {
     #[serde(default)]
     pub args: String,
 }
-
-/// Root of `state.json`.
-impl gpui_kit::Global for Config {}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShellConfig {
@@ -69,24 +85,11 @@ impl Default for NewSessionDefault {
     }
 }
 
-/// Persisted project entry (sessions themselves are ephemeral).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProjectConfig {
-    pub name: String,
-    pub path: PathBuf,
-    #[serde(default = "default_true")]
-    pub expanded: bool,
-}
+/// Root of `settings.json`: user configuration, nothing else.
+impl gpui_kit::Global for Config {}
 
-fn default_true() -> bool {
-    true
-}
-
-/// Root of `state.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default)]
-    pub projects: Vec<ProjectConfig>,
     #[serde(default)]
     pub new_session: NewSessionDefault,
     #[serde(default)]
@@ -101,42 +104,189 @@ pub struct Config {
     pub terminal_font: Option<String>,
     #[serde(default)]
     pub dark_theme: bool,
+}
+
+// ── state.json ────────────────────────────────────────────────────────
+
+/// Persisted project entry (sessions themselves are ephemeral).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectConfig {
+    pub name: String,
+    pub path: PathBuf,
+    #[serde(default = "default_true")]
+    pub expanded: bool,
+    /// The last agent run's resume hint, restored as a Done session row
+    /// after an app restart so the conversation can be picked up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_agent: Option<SavedAgent>,
+}
+
+/// Minimal snapshot of a finished agent run, enough to offer Resume.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedAgent {
+    /// Launcher kind (`claude`/`codex`/`omp`/custom name).
+    pub kind: String,
+    /// Agent session id for `--resume`.
+    pub resume_id: String,
+    /// Title for the restored row (the command's label).
+    pub title: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Root of `state.json`: runtime workspace snapshot, not configuration.
+impl gpui_kit::Global for State {}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct State {
+    #[serde(default)]
+    pub projects: Vec<ProjectConfig>,
     #[serde(default)]
     pub hidden_sessions: bool,
     #[serde(default)]
     pub show_diff: bool,
+    /// Sidebar width (px), clamped by the panel min/max on restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_width: Option<f32>,
+    /// Diff panel width (px), clamped on restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_width: Option<f32>,
+    /// Last active project (index into `projects`).
+    #[serde(default)]
+    pub current_project: usize,
+    /// Per-project right-pane state: the diff selection, tree collapse
+    /// state and tree/content split height are project-local concerns —
+    /// they mean nothing once the working tree changes or the project
+    /// changes.
+    #[serde(default)]
+    pub project_state: BTreeMap<String, ProjectState>,
 }
 
-/// The three builtin agent launchers, in menu order.
-pub const BUILTIN_AGENTS: &[(&str, &str)] = &[
-    ("Claude", "claude"),
-    ("Codex", "codex"),
-    ("Oh My Pi", "omp"),
-];
+/// Per-project runtime state for the diff pane and related viewers.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectState {
+    /// Selected file path (stable across reloads, unlike the file index).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_file: Option<String>,
+    /// Directory paths collapsed in the diff file tree.
+    #[serde(default)]
+    pub closed_dirs: Vec<String>,
+    /// Height of the tree pane above the content pane (px).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_height: Option<f32>,
+}
 
-impl Config {
-    pub fn load() -> Self {
-        let path = state_path();
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+/// Load-time persistence warnings, drained by the main view and shown
+/// as notifications once the window exists (load happens before any
+/// window can display anything).
+#[derive(Default)]
+pub struct StartupWarnings(pub Vec<String>);
+impl gpui_kit::Global for StartupWarnings {}
+
+/// The single-file shape the app used before the settings/state split;
+/// kept only to migrate it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct LegacyStore {
+    #[serde(default)]
+    projects: Vec<ProjectConfig>,
+    #[serde(default)]
+    new_session: NewSessionDefault,
+    #[serde(default)]
+    shell: ShellConfig,
+    #[serde(default)]
+    agent_args: BTreeMap<String, String>,
+    #[serde(default)]
+    custom_agents: Vec<AgentPreset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_font: Option<String>,
+    #[serde(default)]
+    dark_theme: bool,
+    #[serde(default)]
+    hidden_sessions: bool,
+    #[serde(default)]
+    show_diff: bool,
+}
+
+impl From<LegacyStore> for Config {
+    fn from(l: LegacyStore) -> Self {
+        Self {
+            new_session: l.new_session,
+            shell: l.shell,
+            agent_args: l.agent_args,
+            custom_agents: l.custom_agents,
+            terminal_font: l.terminal_font,
+            dark_theme: l.dark_theme,
+        }
+    }
+}
+
+impl From<LegacyStore> for State {
+    fn from(l: LegacyStore) -> Self {
+        Self {
+            projects: l.projects,
+            hidden_sessions: l.hidden_sessions,
+            show_diff: l.show_diff,
+            ..Default::default()
+        }
+    }
+}
+
+// ── load / save ───────────────────────────────────────────────────────
+
+/// Load settings + state plus any warnings worth showing the user.
+pub fn load_all() -> (Config, State, Vec<String>) {
+    let mut warnings = Vec::new();
+
+    // One-time migration from the legacy single `state.json`. Do it
+    // before loading so the migrated values are the live ones.
+    let cfg_path = settings_path();
+    if !cfg_path.exists() && state_path().exists() {
+        match read_legacy(&state_path()) {
+            Ok(legacy) => {
+                let config = Config::from(legacy.clone());
+                let state = State::from(legacy);
+                let mut ok = true;
+                if let Err(e) = config.save() {
+                    warnings.push(e);
+                    ok = false;
+                }
+                if let Err(e) = state.save() {
+                    warnings.push(e);
+                    ok = false;
+                }
+                if ok {
+                    warnings.push(
+                        "Migrated settings from the legacy state.json into settings.json.".into(),
+                    );
+                }
+                return (config, state, warnings);
+            }
+            Err(e) => warnings.push(e),
+        }
     }
 
-    pub fn save(&self) {
-        let path = state_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+    let config = match read_json(&cfg_path) {
+        Ok(c) => c,
+        Err(e) => {
+            warnings.push(e);
+            Config::default()
         }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-            if std::fs::write(&temporary, json).is_ok()
-                && let Err(err) = std::fs::rename(&temporary, &path)
-            {
-                eprintln!("[ddu] saving settings: {err}");
-                let _ = std::fs::remove_file(temporary);
-            }
+    };
+    let state = match read_json(&state_path()) {
+        Ok(s) => s,
+        Err(e) => {
+            warnings.push(e);
+            State::default()
         }
+    };
+    (config, state, warnings)
+}
+
+impl Config {
+    pub fn save(&self) -> Result<(), String> {
+        write_json(&settings_path(), self)
     }
 
     /// Menu entries for the `...` button and the settings page:
@@ -175,6 +325,7 @@ impl Config {
         Ok(AgentCmd {
             program: program.trim().into(),
             args,
+            resume: None,
         })
     }
 
@@ -197,9 +348,114 @@ impl Config {
     }
 }
 
+impl State {
+    pub fn save(&self) -> Result<(), String> {
+        write_json(&state_path(), self)
+    }
+}
+
+/// Surface a persistence error: always to stderr, and — best effort —
+/// as a notification in the first live window (there may be none, e.g.
+/// while re-opening from the dock).
+pub fn report_error(err: String, cx: &mut gpui_kit::App) {
+    eprintln!("[ddu] {err}");
+    if let Some(handle) = cx.windows().into_iter().next() {
+        let _ = handle.update(cx, |_, window, cx| {
+            use gpui_kit::component::WindowExt as _;
+            window.push_notification(
+                gpui_kit::component::notification::Notification::error(format!(
+                    "Failed to save: {err}"
+                )),
+                cx,
+            );
+        });
+    }
+}
+
+/// Read and parse a JSON value. A missing file is a normal first run and
+/// yields `Default`; an unreadable or unparseable file is backed up
+/// (timestamped `*.corrupt-<secs>` beside it) so nothing is silently
+/// lost, and the error is returned.
+fn read_json<T>(path: &Path) -> Result<T, String>
+where
+    T: DeserializeOwned + Default,
+{
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(e) => return Err(format!("Could not read {}: {e}", path.display())),
+    };
+    match serde_json::from_str::<T>(&text) {
+        Ok(value) => Ok(value),
+        Err(e) => {
+            // `path.with_extension` would replace the real extension
+            // (settings.json → settings.corrupt-…json), so append to
+            // the full file name instead: settings.json.corrupt-….
+            let mut file_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            file_name.push_str(&format!(".corrupt-{}", unix_secs()));
+            let backup = path.with_file_name(file_name);
+            match std::fs::rename(path, &backup) {
+                Ok(()) => Err(format!(
+                    "{}: {e} — invalid file backed up to {}; defaults loaded",
+                    path.display(),
+                    backup.display()
+                )),
+                Err(re) => Err(format!(
+                    "{}: {e} — invalid file (and backing it up failed: {re}); defaults loaded",
+                    path.display()
+                )),
+            }
+        }
+    }
+}
+
+fn read_legacy(path: &Path) -> Result<LegacyStore, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("Could not migrate {}: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("Could not migrate {}: {e}", path.display()))
+}
+
+fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("Could not serialize {}: {e}", path.display()))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+    }
+    // Atomic: write a sibling temp, then rename over the target, so a
+    // crash mid-write can never leave a truncated file behind.
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&temporary, json)
+        .map_err(|e| format!("Could not write {}: {e}", temporary.display()))?;
+    std::fs::rename(&temporary, path).map_err(|e| {
+        let _ = std::fs::remove_file(&temporary);
+        format!("Could not save {}: {e}", path.display())
+    })
+}
+
+fn unix_secs() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as u128)
+        .unwrap_or(0)
+}
+
+// ── builtins ──────────────────────────────────────────────────────────
+
+/// The three builtin agent launchers, in menu order.
+pub const BUILTIN_AGENTS: &[(&str, &str)] = &[
+    ("Claude", "claude"),
+    ("Codex", "codex"),
+    ("Oh My Pi", "omp"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn quoted_arguments_keep_spaces_and_empty_values() {
         let mut cfg = Config::default();
@@ -211,10 +467,103 @@ mod tests {
         cfg.shell.args = "'unfinished".into();
         assert!(cfg.cmd_for("terminal").is_err());
     }
+
     #[test]
     fn older_settings_load_with_light_theme() {
         let cfg: Config = serde_json::from_str("{}").unwrap();
         assert!(!cfg.dark_theme);
         assert_eq!(cfg.new_session.kind, "terminal");
+    }
+
+    #[test]
+    fn corrupt_file_is_backed_up_and_defaulted() {
+        let dir = std::env::temp_dir().join(format!("ddu-cfg-{}", unix_secs()));
+        let path = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "{ not json").unwrap();
+        let result = read_json::<Config>(&path);
+        assert!(result.is_err());
+        // Original renamed aside, defaults returned, backup carries the content.
+        assert!(!path.exists());
+        let backup_name = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .find(|n| n.starts_with("settings.json.corrupt-"));
+        assert!(backup_name.is_some(), "expected a .corrupt backup sibling");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(backup_name.unwrap())).unwrap(),
+            "{ not json"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_single_file_splits_into_settings_and_state() {
+        let dir = std::env::temp_dir().join(format!("ddu-cfg-mig-{}", unix_secs()));
+        let state_path = dir.join("state.json");
+        let settings_path = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = serde_json::json!({
+            "projects": [{"name": "proj", "path": "/tmp", "expanded": false}],
+            "new_session": {"kind": "claude"},
+            "shell": {"program": "/bin/zsh", "args": "-l"},
+            "agent_args": {"claude": "--fast"},
+            "custom_agents": [{"name": "a1", "program": "echo", "args": "hi"}],
+            "terminal_font": "Fira Code",
+            "dark_theme": true,
+            "hidden_sessions": true,
+            "show_diff": false,
+        });
+        std::fs::write(&state_path, serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        // Simulate the env overrides without touching process env: call
+        // the file-level helpers via the paths captured in load_all.
+        let _ = (settings_path.clone(),);
+        // load_all reads env; stub by temporarily setting the vars.
+        unsafe {
+            std::env::set_var("DDU_STATE_PATH", state_path.to_str().unwrap());
+            std::env::set_var("DDU_SETTINGS_PATH", settings_path.to_str().unwrap());
+        }
+        let (config, state, warnings) = load_all();
+        unsafe {
+            std::env::remove_var("DDU_STATE_PATH");
+            std::env::remove_var("DDU_SETTINGS_PATH");
+        }
+        assert_eq!(config.new_session.kind, "claude");
+        assert_eq!(config.agent_args["claude"], "--fast");
+        assert_eq!(config.custom_agents[0].name, "a1");
+        assert!(config.dark_theme);
+        assert!(config.terminal_font.as_deref() == Some("Fira Code"));
+        assert_eq!(state.projects.len(), 1);
+        assert!(!state.projects[0].expanded);
+        assert!(state.hidden_sessions);
+        assert!(!state.show_diff);
+        // Both files now exist, legacy migrated.
+        assert!(settings_path.exists());
+        assert!(state_path.exists());
+        assert!(warnings.iter().any(|w| w.contains("Migrated")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_files_are_clean_defaults() {
+        let dir = std::env::temp_dir().join(format!("ddu-cfg-miss-{}", unix_secs()));
+        let state_path = dir.join("state.json");
+        let settings_path = dir.join("settings.json");
+        let _ = std::fs::create_dir_all(&dir);
+        unsafe {
+            std::env::set_var("DDU_STATE_PATH", state_path.to_str().unwrap());
+            std::env::set_var("DDU_SETTINGS_PATH", settings_path.to_str().unwrap());
+        }
+        let (config, state, warnings) = load_all();
+        unsafe {
+            std::env::remove_var("DDU_STATE_PATH");
+            std::env::remove_var("DDU_SETTINGS_PATH");
+        }
+        assert_eq!(config, Config::default());
+        assert_eq!(state, State::default());
+        assert!(warnings.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -246,7 +246,7 @@ fn session_row(
                         .child(meta_label(s)),
                 ),
         )
-        .when(working, |el| {
+        .when(working && this.hovered_session != Some((p, six)), |el| {
             // Activity pulse: a small accent dot, Zed-style — the spinner
             // read as perpetual motion for background work.
             el.child(

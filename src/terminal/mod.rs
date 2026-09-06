@@ -47,6 +47,9 @@ pub struct TermSession {
     process: Option<pty::PtyProcess>,
     pub(crate) focus: FocusHandle,
     exit: Option<i32>,
+    /// Agent session id captured from the startup banner (`session id:
+    /// <uuid>`), usable for `--resume` on the same command.
+    resume_id: Option<String>,
     /// Grid/PTY resize target waiting for the debounce window to close.
     pending_resize: Option<(u16, u16)>,
     last_resize: Instant,
@@ -111,6 +114,7 @@ impl TermSession {
                 process: Some(process),
                 focus: cx.focus_handle().tab_stop(false),
                 exit: None,
+                resume_id: None,
                 pending_resize: None,
                 last_resize: Instant::now(),
                 selecting: false,
@@ -142,6 +146,13 @@ impl TermSession {
                     grid::PumpMsg::Exit(code) => {
                         let _ = weak.update(cx, |s, cx| {
                             s.exit = Some(code);
+                            // Agents print their session id in the
+                            // banner / exit footer (`session id: …`,
+                            // `--resume <id>`, `Session ID: <id>`);
+                            // the last scan of the output tail finds it.
+                            if s.resume_id.is_none() {
+                                s.resume_id = grid::extract_resume_id(&s.grid.recent.tail());
+                            }
                             cx.emit(TermEvent::Exit(code));
                             cx.notify();
                         });
@@ -159,6 +170,12 @@ impl TermSession {
     /// Exit code once the child has been reaped.
     pub fn exit(&self) -> Option<i32> {
         self.exit
+    }
+
+    /// Agent session id for `--resume` (`None` when the child never
+    /// printed one in the captured tail).
+    pub fn resume_id(&self) -> Option<&str> {
+        self.resume_id.as_deref()
     }
 
     /// True when the PTY delivered bytes within `window` — the "agent is

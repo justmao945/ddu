@@ -146,7 +146,11 @@ struct AgentCmd { program: String, args: Vec<String>, cwd: PathBuf, env: Vec<(St
 ## 10. Config / Persistence / Shortcuts / Theme / Notifications
 
 * Config `~/.config/ddu/config.toml`: agent commands, font, scrollback, follow-system theme.
-* Persistence `~/.config/ddu/state.json`: project list + current selection; PTY contents are NOT persisted (sessions restart as empty shells needing manual restart).
+* Persistence `~/Library/Application Support/ddu/` with `settings.json`
+  (user settings) + `state.json` (workspace snapshot: project list,
+  panel widths, per-project diff state, last agent resume hint); PTY
+  contents are NOT persisted (sessions restart as empty shells needing
+  manual restart).
 * Shortcuts: `cmd-1/2/3` focus the three panes, `cmd-t` new session, `cmd-w` close session (with `AlertDialog` kill confirmation), `cmd-b` collapse right pane. Via `actions! + bind_keys`.
 * Theme: everything via `cx.theme()` tokens, no hardcoded colors; terminal SGR colors map onto the theme palette.
 * Notifications: agent exit/error via `push_notification`; kill via `open_alert_dialog` (title names the object, confirm button names the outcome, e.g. Remove "xxx").

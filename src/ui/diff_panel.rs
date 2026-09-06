@@ -14,9 +14,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 /// Tree pane height bounds and default for the vertical splitter.
-const FILE_TREE_DEFAULT_H: f32 = 220.;
-const FILE_TREE_MIN_H: f32 = 80.;
-const FILE_TREE_MAX_H: f32 = 480.;
+pub(crate) const FILE_TREE_DEFAULT_H: f32 = 220.;
+pub(crate) const FILE_TREE_MIN_H: f32 = 80.;
+pub(crate) const FILE_TREE_MAX_H: f32 = 480.;
 
 pub(crate) fn render(
     this: &AppView,
@@ -99,7 +99,14 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
                 // Tree pane: draggable height between the header and the content.
                 .child(
                     resizable_panel()
-                        .size(px(FILE_TREE_DEFAULT_H))
+                        // Persisted height wins on the first render of a
+                        // session; the panel keeps whatever the user
+                        // drags afterwards, and the live value is
+                        // persisted by the AppView resize subscription.
+                        .size(
+                            this.diff_tree_height_seed
+                                .unwrap_or(px(FILE_TREE_DEFAULT_H)),
+                        )
                         .size_range(px(FILE_TREE_MIN_H)..px(FILE_TREE_MAX_H))
                         .child(
                             div()

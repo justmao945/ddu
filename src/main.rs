@@ -89,10 +89,26 @@ fn main() {
     install_panic_logger();
     let app = gpui_kit::application().with_assets(AppAssets);
 
+    // Reopen from the dock after the window was closed: macOS calls
+    // `applicationShouldHandleReopen`; gpui surfaces it as `on_reopen`.
+    // Register before `run` — the method lives on `Application`.
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty() {
+            open_main_window(cx);
+        } else {
+            cx.activate(true);
+        }
+    });
+
     app.run(move |cx| {
         // Must be first, before using any component features.
         gpui_kit::init(cx);
-        let config = config::Config::load();
+        let (config, state, warnings) = config::load_all();
+        cx.set_global(config::StartupWarnings(warnings));
+        // Keep globals loaded even if no window opens (dock reopen
+        // path), so a re-created AppView reads the same settings.
+        cx.set_global(config.clone());
+        cx.set_global(state);
         Theme::change(
             if config.dark_theme {
                 ThemeMode::Dark
@@ -103,7 +119,6 @@ fn main() {
             cx,
         );
         Theme::global_mut(cx).font_size = px(14.);
-        cx.set_global(config);
         // Activate BEFORE the first window exists: the display-link start
         // guard latches on the window's occlusion state at creation, and a
         // background-launched (unactivated) process misses it — the window
@@ -111,21 +126,8 @@ fn main() {
         // recovers it (see scripts/ddu-app.sh comments).
         cx.activate(true);
 
-        let window_options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(960.), px(680.)), cx)),
-            window_min_size: Some(size(px(app::WINDOW_MIN_WIDTH), px(app::WINDOW_MIN_HEIGHT))),
-            ..TitleBar::window_options()
-        };
+        open_main_window(cx);
 
-        cx.spawn(async move |cx| {
-            cx.open_window(window_options, |window, cx| {
-                let view = cx.new(|cx| AppView::new(window, cx));
-                // First level on the window must be a Root.
-                cx.new(|cx| Root::new(view, window, cx))
-            })
-            .expect("Failed to open window");
-        })
-        .detach();
         // Empty string (clean launcher exports it unset-as-empty) must not
         // count as "set": require a valid page index.
         if std::env::var("DDU_VERIFY_SETTINGS")
@@ -142,4 +144,26 @@ fn main() {
             .detach();
         }
     });
+}
+
+/// Open the main window (fresh AppView) if none is alive. Window options
+/// are built here — `WindowBounds::centered` needs `&mut App`, and the
+/// struct itself is not `Clone` (so it can't be stashed for callbacks).
+fn open_main_window(cx: &mut gpui_kit::App) {
+    if !cx.windows().is_empty() {
+        return;
+    }
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::centered(size(px(960.), px(680.)), cx)),
+        window_min_size: Some(size(px(app::WINDOW_MIN_WIDTH), px(app::WINDOW_MIN_HEIGHT))),
+        ..TitleBar::window_options()
+    };
+    cx.spawn(async move |cx| {
+        let _ = cx.open_window(options, |window, cx| {
+            let view = cx.new(|cx| AppView::new(window, cx));
+            // First level on the window must be a Root.
+            cx.new(|cx| Root::new(view, window, cx))
+        });
+    })
+    .detach();
 }

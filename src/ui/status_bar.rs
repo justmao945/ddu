@@ -26,7 +26,7 @@ pub(crate) fn render_sidebar(this: &AppView, cx: &mut Context<AppView>) -> impl 
                     .ghost()
                     .small()
                     .tab_stop(false)
-                    .tooltip("Add project…")
+                    .tooltip("Add project (⌘O)")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.add_project(window, cx);
                     })),

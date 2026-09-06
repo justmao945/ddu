@@ -6,6 +6,7 @@
 //! Left: session list. Center: the live agent terminal (PTY-backed).
 //! Right: the project's git diff (HEAD→workdir, polled).
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui_kit::component::notification::Notification;
@@ -16,6 +17,7 @@ use crate::diff::{GitDiff, git};
 use crate::session::{AgentStatus, Project, initial_projects};
 use crate::terminal::{TermEvent, TermSession};
 use crate::ui;
+use crate::ui::diff_panel::{FILE_TREE_MAX_H, FILE_TREE_MIN_H};
 
 // Global keyboard actions: new session, dock toggles, close session.
 gpui_kit::actions!(
@@ -70,6 +72,12 @@ pub struct AppView {
     /// Session row currently under the mouse: reveals its delete button.
     pub(crate) hovered_session: Option<(usize, usize)>,
     pub(crate) diff_file: usize,
+    /// Persisted selected-file path, pinned against the first loaded
+    /// diff (files move between sessions), then cleared.
+    pub(crate) diff_seed_path: Option<String>,
+    /// Persisted tree-pane height, applied once the diff splitter has
+    /// been laid out (its panels are created at render time).
+    pub(crate) diff_tree_height_seed: Option<Pixels>,
     pub(crate) session_seq: usize,
     pub(crate) diff: Option<GitDiff>,
     pub(crate) diff_error: Option<String>,
@@ -127,10 +135,12 @@ impl AppView {
         ]);
 
         let cfg = cx.global::<crate::config::Config>().clone();
-        let projects: Vec<Project> = if cfg.projects.is_empty() {
+        let state = cx.global::<crate::config::State>().clone();
+        let mut projects: Vec<Project> = if state.projects.is_empty() {
             initial_projects()
         } else {
-            cfg.projects
+            state
+                .projects
                 .iter()
                 .map(|p| Project {
                     name: p.name.clone(),
@@ -140,39 +150,149 @@ impl AppView {
                 .collect()
         };
         let mut expanded = projects.iter().map(|_| true).collect::<Vec<_>>();
-        for (ix, p) in cfg.projects.iter().enumerate() {
+        for (ix, p) in state.projects.iter().enumerate() {
             if ix < expanded.len() {
                 expanded[ix] = p.expanded;
             }
         }
         let window_focus = cx.focus_handle().tab_stop(false);
+        // Rebuild each project's finished agent row from the persisted
+        // resume hint: after an app restart the row is a Done session
+        // with no live PTY — clicking its Resume button re-spawns the
+        // agent with `--resume <id>`.
+        for (ix, project) in projects.iter_mut().enumerate() {
+            let Some(saved) = state.projects.get(ix).and_then(|p| p.last_agent.clone()) else {
+                continue;
+            };
+            let saved_kind = saved.kind.clone();
+            let cmd = cx
+                .global::<crate::config::Config>()
+                .cmd_for(&saved_kind)
+                .ok();
+            if let Some(cmd) = cmd {
+                project.sessions.push(crate::session::AgentSession {
+                    id: format!("restored-{ix}"),
+                    title: saved.title.clone(),
+                    status: AgentStatus::Done(0),
+                    cmd: cmd.with_resume(saved.resume_id),
+                    kind: saved_kind,
+                    started: std::time::Instant::now(),
+                    ended: Some(std::time::Instant::now()),
+                    term: None,
+                });
+            }
+        }
+        let current_project = state.current_project.min(projects.len().saturating_sub(1));
         let mut this = Self {
             window_focus,
             projects,
             expanded,
-            current_project: 0,
+            current_project,
             current_session: 0,
-            show_sessions: !cfg.hidden_sessions,
-            show_diff: cfg.show_diff,
+            show_sessions: !state.hidden_sessions,
+            show_diff: state.show_diff,
             resize_state: cx.new(|_| ResizableState::default()),
             diff_tree_scroll: ScrollHandle::new(),
             diff_hunks_scroll: ScrollHandle::new(),
             diff_split_state: cx.new(|_| ResizableState::default()),
-            diff_tree_closed: std::collections::HashSet::new(),
+            diff_tree_closed: HashSet::new(),
             hovered_project: None,
             hovered_session: None,
             menu_project: None,
             last_sidebar_size: None,
             last_diff_size: None,
             diff_file: 0,
+            diff_seed_path: None,
+            diff_tree_height_seed: None,
             session_seq: 0,
             diff: None,
             diff_error: None,
             diff_seq: 0,
         };
+        // Restore persisted widths; the raw values are clamped by the
+        // panel size_range on render, out-of-range ones fall back to the
+        // defaults inside `last_sidebar_w`/`last_diff_w`.
+        this.last_sidebar_size = state.sidebar_width.map(gpui::px);
+        this.last_diff_size = state.diff_width.map(gpui::px);
+        // The diff itself is loaded asynchronously; remember the
+        // persisted selection until it lands, then `apply_diff` re-pins
+        // by path (files move/rename between sessions).
+        let current_path = this.current_project().path.to_string_lossy().to_string();
+        let project_state = state.project_state.get(&current_path);
+        this.diff_seed_path = project_state.and_then(|s| s.selected_file.clone());
+        this.diff_tree_closed = project_state
+            .map(|s| s.closed_dirs.iter().cloned().collect())
+            .unwrap_or_default();
+        this.diff_tree_height_seed = project_state
+            .and_then(|s| s.tree_height)
+            .map(gpui::px)
+            .filter(|h| {
+                h.as_f32() >= FILE_TREE_MIN_H as f32 && h.as_f32() <= FILE_TREE_MAX_H as f32
+            });
         this.window_focus.focus(window, cx);
         this.start_diff_poll(cx);
         this.start_ui_tick(cx);
+        // Panel drags: capture the new width into the persisted state
+        // (emit fires once per drag, so no debounce loop needed).
+        let resize = this.resize_state.clone();
+        let view = cx.weak_entity();
+        cx.subscribe_in(
+            &this.resize_state,
+            window,
+            move |_, _, _: &ResizablePanelEvent, _, cx| {
+                let _ = view.update(cx, |this, cx| {
+                    let sizes = resize.read(cx).sizes();
+                    // index 0 = sidebar when visible; otherwise the
+                    // center pane. Capture it as the sidebar width only
+                    // when visible so a hidden panel never records.
+                    if this.show_sessions {
+                        this.last_sidebar_size = sizes.first().copied();
+                    }
+                    if this.show_diff {
+                        // diff slot: index 1 with sidebar visible,
+                        // index 0 without (center is always present).
+                        let ix = usize::from(this.show_sessions);
+                        this.last_diff_size = sizes.get(ix).copied();
+                    }
+                    this.persist(cx);
+                });
+            },
+        )
+        .detach();
+        // Tree/content splitter drags: persist the tree pane height and
+        // clear the seed so it can't fight a later live resize.
+        let view2 = cx.weak_entity();
+        cx.subscribe_in(
+            &this.diff_split_state,
+            window,
+            move |_, _, _: &ResizablePanelEvent, _, cx| {
+                let _ = view2.update(cx, |this, cx| {
+                    this.diff_tree_height_seed = None;
+                    this.persist(cx);
+                });
+            },
+        )
+        .detach();
+        // Persistence problems discovered at load (corrupt backup,
+        // migration, save failures): show them once the window exists
+        // AND the Root layer is mounted (push_notification resolves the
+        // Root at call time — AppView::new runs before Root::new).
+        let startup_warnings = cx.global::<crate::config::StartupWarnings>().0.clone();
+        if !startup_warnings.is_empty() {
+            cx.spawn(async move |this, cx| {
+                // A few frames: the window + Root mount happens in the
+                // same tick as AppView::new; this runs after.
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                let _ = this.update_in(cx, |_, window, cx| {
+                    for warning in &startup_warnings {
+                        window.push_notification(Notification::warning(warning.clone()), cx);
+                    }
+                });
+            })
+            .detach();
+        }
         // First session for the first project, honoring the configured
         // default launcher.
         this.spawn_session_of(&cfg.new_session.kind, window, cx);
@@ -199,6 +319,23 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let changed_project = self.current_project != project;
+        if changed_project {
+            // Save the outgoing project's placement state, then adopt
+            // the incoming one from the global snapshot.
+            self.persist(cx);
+            let path = self.projects[project].path.to_string_lossy().to_string();
+            let entry = cx
+                .global::<crate::config::State>()
+                .project_state
+                .get(&path)
+                .cloned()
+                .unwrap_or_default();
+            self.diff_seed_path = entry.selected_file.clone();
+            self.diff_tree_closed = entry.closed_dirs.iter().cloned().collect();
+            self.diff_tree_height_seed = entry.tree_height.map(gpui::px).filter(|h| {
+                h.as_f32() >= FILE_TREE_MIN_H as f32 && h.as_f32() <= FILE_TREE_MAX_H as f32
+            });
+        }
         self.current_project = project;
         let n = self.projects[project].sessions.len();
         self.current_session = session.min(n.saturating_sub(1));
@@ -352,12 +489,17 @@ impl AppView {
         cx.notify();
     }
 
-    /// Write current projects + expanded flags into the global config
-    /// and save to disk.
+    /// Write current projects + expanded flags + panel geometry into the
+    /// global state snapshot and save to disk. Save errors are reported
+    /// (notification or stderr) but never crash the app.
     pub(crate) fn persist(&self, cx: &mut App) {
-        let mut snapshot = cx.global::<crate::config::Config>().clone();
+        let mut snapshot = cx.global::<crate::config::State>().clone();
         snapshot.hidden_sessions = !self.show_sessions;
         snapshot.show_diff = self.show_diff;
+        snapshot.sidebar_width = self.last_sidebar_size.map(|w| w.as_f32());
+        snapshot.diff_width = self.last_diff_size.map(|w| w.as_f32());
+        snapshot.current_project = self.current_project;
+        let old_projects = &snapshot.projects;
         snapshot.projects = self
             .projects
             .iter()
@@ -366,9 +508,43 @@ impl AppView {
                 name: p.name.clone(),
                 path: p.path.clone(),
                 expanded: *ex,
+                // Keep the resume hint of a project whose path matches;
+                // it was written when the agent exited.
+                last_agent: old_projects
+                    .iter()
+                    .find(|op| op.path == p.path)
+                    .and_then(|op| op.last_agent.clone()),
             })
             .collect();
-        snapshot.save();
+        let path = self.current_project().path.to_string_lossy().to_string();
+        let entry = snapshot
+            .project_state
+            .entry(path)
+            .or_insert_with(crate::config::ProjectState::default);
+        entry.selected_file = self
+            .diff
+            .as_ref()
+            .and_then(|d| d.files.get(self.diff_file))
+            .map(|f| f.path.clone())
+            .or_else(|| self.diff_seed_path.clone());
+        entry.closed_dirs = self.diff_tree_closed.iter().cloned().collect();
+        entry.tree_height = self
+            .diff_split_state
+            .read(cx)
+            .sizes()
+            .first()
+            .copied()
+            .map(|h| h.as_f32());
+        // Stale state for removed projects must not accumulate.
+        let live: std::collections::BTreeSet<_> = self
+            .projects
+            .iter()
+            .map(|p| p.path.to_string_lossy().into_owned())
+            .collect();
+        snapshot.project_state.retain(|path, _| live.contains(path));
+        if let Err(err) = snapshot.save() {
+            crate::config::report_error(err, cx);
+        }
         cx.set_global(snapshot);
     }
 
@@ -448,18 +624,33 @@ impl AppView {
         };
         let ended = std::time::Instant::now();
         let mut matched = false;
-        for session in self
-            .projects
-            .iter_mut()
-            .flat_map(|p| p.sessions.iter_mut())
-            .filter(|s| s.term.as_ref() == Some(&emitter))
-        {
-            matched = true;
-            session.status = status.clone();
-            session.ended = Some(ended);
+        let mut agent_hint: Option<(usize, String, String)> = None; // (project, kind, title)
+        for (p_ix, project) in self.projects.iter_mut().enumerate() {
+            for session in project.sessions.iter_mut() {
+                if session.term.as_ref() == Some(&emitter) {
+                    matched = true;
+                    session.status = status.clone();
+                    session.ended = Some(ended);
+                    // Capture the resume hint for the sidebar row and
+                    // the state snapshot (agents only — shells need no
+                    // resume).
+                    if session.is_agent()
+                        && let Some(id) = session
+                            .term
+                            .as_ref()
+                            .and_then(|t| t.read(cx).resume_id().map(String::from))
+                    {
+                        agent_hint = Some((p_ix, session.kind.clone(), id));
+                    }
+                }
+            }
         }
         if !matched {
             return;
+        }
+        if let Some((p_ix, kind, resume_id)) = agent_hint {
+            let title = format!("{} · finished", kind);
+            self.persist_last_agent(p_ix, kind, resume_id, title, cx);
         }
         // Only agents merit a toast: the exit banner already covers the
         // terminal, and a shell exits every time the user types `exit`.
@@ -588,6 +779,37 @@ impl AppView {
 
     /// Restart the current session with the same command in a fresh PTY.
     pub(crate) fn restart_current_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.respawn_current_session(None, window, cx);
+    }
+
+    /// Restart the current session resuming its agent session
+    /// (`--resume <id>`), using the id captured from the last run's
+    /// output. No-ops when the last run captured none.
+    pub(crate) fn resume_current_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let resume_id = self.current_session().and_then(|s| {
+            s.term
+                .as_ref()
+                .and_then(|t| t.read(cx).resume_id().map(String::from))
+                .or_else(|| s.cmd.resume.clone())
+        });
+        let Some(id) = resume_id else {
+            window.push_notification(
+                Notification::warning("No session id found in the last run's output."),
+                cx,
+            );
+            return;
+        };
+        self.respawn_current_session(Some(id), window, cx);
+    }
+
+    /// Shared body of restart/resume: kill the old PTY (if alive) and
+    /// spawn a fresh one, optionally resuming the agent session.
+    fn respawn_current_session(
+        &mut self,
+        resume: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(project) = self.projects.get_mut(self.current_project) else {
             return;
         };
@@ -596,7 +818,11 @@ impl AppView {
             return;
         };
         let title = session.title.clone();
-        let cmd = session.cmd.clone();
+        let resumed = resume.is_some();
+        let cmd = match resume {
+            Some(id) => session.cmd.clone().with_resume(id),
+            None => session.cmd.clone(),
+        };
         if let Some(old) = session.term.take() {
             old.update(cx, |s, _| s.kill());
         }
@@ -639,9 +865,41 @@ impl AppView {
             };
         }
         if self.current_term().is_some() {
-            window.push_notification(Notification::info(format!("Restarted “{title}”")), cx);
+            window.push_notification(
+                Notification::info(if resumed {
+                    format!("Resumed “{title}”")
+                } else {
+                    format!("Restarted “{title}”")
+                }),
+                cx,
+            );
         }
         cx.notify();
+    }
+
+    /// Write the finished agent's resume hint into the state snapshot
+    /// (per-project `last_agent`) and save.
+    fn persist_last_agent(
+        &self,
+        project: usize,
+        kind: String,
+        resume_id: String,
+        title: String,
+        cx: &mut App,
+    ) {
+        let mut snapshot = cx.global::<crate::config::State>().clone();
+        let Some(entry) = snapshot.projects.get_mut(project) else {
+            return;
+        };
+        entry.last_agent = Some(crate::config::SavedAgent {
+            kind,
+            resume_id,
+            title,
+        });
+        if let Err(err) = snapshot.save() {
+            crate::config::report_error(err, cx);
+        }
+        cx.set_global(snapshot);
     }
 
     /// Toggle the sidebar, keeping the splitter slot list in sync.
@@ -766,6 +1024,15 @@ impl AppView {
             .as_ref()
             .and_then(|d| d.files.get(self.diff_file))
             .map(|f| f.path.clone());
+        // First paint after a cold start: the persisted selection wins
+        // when the path still exists in the working tree; afterwards
+        // switching projects keeps overwriting it via `diff_file`.
+        let seed = if self.diff_seed_path.is_some() && self.diff.is_none() {
+            self.diff_seed_path.clone()
+        } else {
+            None
+        };
+        let selected = selected.or(seed);
         match result {
             Ok(diff) => {
                 let next = selected
@@ -784,6 +1051,7 @@ impl AppView {
                 self.diff_error = Some(err.to_string());
             }
         }
+        self.diff_seed_path = None;
     }
 
     /// Kick off one diff reload; results newer than any in-flight one win.
@@ -884,6 +1152,7 @@ impl Render for AppView {
                 this.request_close_session(p, six, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSessions, _, cx| this.toggle_sessions(cx)))
+            .on_action(cx.listener(|this, _: &ToggleDiff, _, cx| this.toggle_diff(cx)))
             .child(ui::title_bar::render(self, cx))
             .child({
                 // Each column owns its status strip, so the resize
@@ -900,7 +1169,7 @@ impl Render for AppView {
                 if self.show_sessions {
                     group = group.child(
                         resizable_panel()
-                            .size(px(SIDEBAR_DEFAULT))
+                            .size(self.last_sidebar_w())
                             .flex_none()
                             .size_range(px(SIDEBAR_MIN)..px(SIDEBAR_MAX))
                             .child(column(
@@ -920,7 +1189,7 @@ impl Render for AppView {
                 if self.show_diff {
                     group = group.child(
                         resizable_panel()
-                            .size(px(DIFF_DEFAULT))
+                            .size(self.last_diff_w())
                             .flex_none()
                             .size_range(px(DIFF_MIN)..px(DIFF_MAX))
                             .child(column(

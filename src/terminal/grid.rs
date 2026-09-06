@@ -34,6 +34,120 @@ pub struct TermMeta {
     pub title: Option<String>,
 }
 
+/// Rolling capture of the last ~64 KiB of PTY bytes, utf-8 repaired at
+/// read time. The waiter thread extracts an agent's resume id from it
+/// when the child exits.
+pub struct RecentOutput {
+    buf: Mutex<Vec<u8>>,
+    cap: usize,
+}
+
+impl RecentOutput {
+    fn new(cap: usize) -> Self {
+        Self {
+            buf: Mutex::new(Vec::with_capacity(cap)),
+            cap,
+        }
+    }
+
+    fn push(&self, bytes: &[u8]) {
+        let mut buf = self.buf.lock();
+        buf.extend_from_slice(bytes);
+        if buf.len() > self.cap {
+            let excess = self.cap.min(buf.len() - (self.cap / 2));
+            buf.drain(..excess);
+        }
+    }
+
+    /// Best-effort utf-8 text of the captured tail.
+    pub fn tail(&self) -> String {
+        let buf = self.buf.lock();
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+}
+
+/// Agent-specific resume id extraction, matching the formats agents
+/// print in their banner/exit footer:
+/// - `session id: 01a075df-…` / `Session ID: 01a075df-…` (codex, claude)
+/// - `claude --resume 65e901cd-…` / `Resume this session with omp
+///   --resume 01a075e2-…` (the shell snippets agents print on exit)
+/// Scans lines newest first; ignores lines whose id token is pure
+/// digits (a "session id: 42" counter, not a suite id).
+pub fn extract_resume_id(text: &str) -> Option<String> {
+    for line in text.lines().rev() {
+        let lower = line.to_ascii_lowercase();
+        // Form 1: `session id: <id>` / `Session ID: <id>` /
+        // `session_id=<id>`.
+        if let Some(pos) = lower.find("session") {
+            let mut rest = lower[pos + "session".len()..].trim_start();
+            let prefixes = ["id", "_id", "-id"];
+            let mut matched = None;
+            for p in prefixes {
+                if let Some(after) = rest.strip_prefix(p) {
+                    rest = after.trim_start_matches([' ', ':', '=', '_', '-']);
+                    matched = Some(());
+                    break;
+                }
+            }
+            if matched.is_some() {
+                if let Some(id) = take_id(rest) {
+                    return Some(id);
+                }
+            }
+        }
+        // Form 2: `claude --resume <id>`, `omp -r <id>` /
+        // `resume this session with omp --resume <id>` /
+        // `codex resume <id>`.
+        // Scan every occurrence: a line may contain both a prose
+        // "Resume this session…" and the actual snippet.
+        let mut search_from = 0;
+        while let Some(pos) = lower[search_from..].find("resume") {
+            let abs = search_from + pos;
+            let rest = lower[abs + "resume".len()..].trim_start();
+            let after_flag = rest
+                .strip_prefix("--")
+                .and_then(|r| {
+                    r.strip_prefix("resume")
+                        .or_else(|| r.strip_prefix("continue"))
+                })
+                .or_else(|| rest.strip_prefix("-r"))
+                .or_else(|| {
+                    // `codex resume <id>` — the id follows with no
+                    // flag at all.
+                    if rest.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+                        Some(rest)
+                    } else {
+                        None
+                    }
+                });
+            if let Some(after) = after_flag {
+                let after = after.trim_start_matches([' ', ':', '=', '-']);
+                if let Some(id) = take_id(after) {
+                    return Some(id);
+                }
+            }
+            search_from = abs + "resume".len();
+        }
+    }
+    None
+}
+
+/// Consume an id-like token at the start of `rest`.
+fn take_id(rest: &str) -> Option<String> {
+    let id: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let id = id.replace('_', "");
+    // UUIDs and slugs: at least 8 chars, not all digits (a line
+    // like "session id: 42" is a counter, not a session).
+    if id.len() >= 8 && id.chars().any(|c| !c.is_ascii_digit()) {
+        Some(id)
+    } else {
+        None
+    }
+}
+
 /// Event sink installed into the `Term`. Query responses (`PtyWrite`)
 /// are routed back to the PTY; everything user-visible becomes a
 /// coalesced wakeup.
@@ -108,6 +222,8 @@ pub struct TermGrid {
     /// Epoch ms of the last PTY read; drives the "agent is working" spinner.
     pub activity: Arc<AtomicU64>,
     pub dark: Arc<AtomicBool>,
+    /// Rolling tail of raw PTY output (resume-id extraction at exit).
+    pub recent: Arc<RecentOutput>,
     cols: u16,
     rows: u16,
 }
@@ -122,6 +238,7 @@ impl TermGrid {
         let activity = Arc::new(AtomicU64::new(now_ms()));
         let meta = Arc::new(Mutex::new(TermMeta::default()));
         let dark = Arc::new(AtomicBool::new(true));
+        let recent = Arc::new(RecentOutput::new(64 * 1024));
         let proxy = EventProxy {
             writer: writer.clone(),
             wake,
@@ -139,6 +256,7 @@ impl TermGrid {
             writer,
             activity,
             dark,
+            recent,
             cols,
             rows,
         }
@@ -183,6 +301,7 @@ pub fn spawn_pump(
     term: Arc<FairMutex<Term<EventProxy>>>,
     wake: async_channel::Sender<PumpMsg>,
     activity: Arc<AtomicU64>,
+    recent: Arc<RecentOutput>,
     mut reader: Box<dyn Read + Send>,
     mut child: Box<dyn Child + Send + Sync>,
 ) {
@@ -197,6 +316,7 @@ pub fn spawn_pump(
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         activity.store(now_ms(), Ordering::Relaxed);
+                        recent.push(&buf[..n]);
                         {
                             let mut term = term.lock();
                             for &byte in &buf[..n] {
@@ -238,6 +358,7 @@ pub fn spawn_session(
         grid.term.clone(),
         wake,
         grid.activity.clone(),
+        grid.recent.clone(),
         reader,
         child,
     );
@@ -262,6 +383,45 @@ mod tests {
             let _ = cols;
         }
         text
+    }
+
+    #[test]
+    fn resume_id_extraction_matches_agent_formats() {
+        // Startup banner forms.
+        assert_eq!(
+            extract_resume_id("session id: 01a075e1-346f-7b92-b832-745a71ee00ed"),
+            Some("01a075e1-346f-7b92-b832-745a71ee00ed".into())
+        );
+        assert_eq!(
+            extract_resume_id("Session ID: 01a075df-9d32-7440-a3a2-57d067ae1d2a"),
+            Some("01a075df-9d32-7440-a3a2-57d067ae1d2a".into())
+        );
+        assert_eq!(
+            extract_resume_id("session_id=019f55b9-cf32-7000-b1c8-33aa18bc3df6 omp_session=weixin"),
+            Some("019f55b9-cf32-7000-b1c8-33aa18bc3df6".into())
+        );
+        // Exit footer shell snippets.
+        assert_eq!(
+            extract_resume_id("claude --resume 65e901cd-41c1-46c3-9c6d-abde891d87b2"),
+            Some("65e901cd-41c1-46c3-9c6d-abde891d87b2".into())
+        );
+        assert_eq!(
+            extract_resume_id(
+                "Resume this session with omp --resume 01a075e2-cea0-7312-bba4-b507c7d738c0"
+            ),
+            Some("01a075e2-cea0-7312-bba4-b507c7d738c0".into())
+        );
+        assert_eq!(
+            extract_resume_id("codex resume 01a075e1-346f-7b92-b832-745a71ee00ed"),
+            Some("01a075e1-346f-7b92-b832-745a71ee00ed".into())
+        );
+        // Noise and counters must not match.
+        assert_eq!(extract_resume_id("session id: 42"), None);
+        assert_eq!(extract_resume_id("no ids here"), None);
+        assert_eq!(
+            extract_resume_id("2026-09-06 12:00:00 something unrelated"),
+            None
+        );
     }
 
     fn wait_until(term: &FairMutex<Term<EventProxy>>, needle: &str, deadline: Duration) -> bool {

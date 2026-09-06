@@ -27,6 +27,7 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
 fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoElement {
     let focus = term.read(cx).focus.clone();
     let exited = term.read(cx).exit();
+    let resume_id = term.read(cx).resume_id().map(String::from);
     let weak = term.downgrade();
 
     div()
@@ -375,13 +376,19 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                 .min_w_0()
                 .child(TermSession::element(weak, focus)),
         )
-        .when(exited.is_some(), |el| el.child(exited_banner(exited, cx)))
+        .when(exited.is_some(), |el| {
+            el.child(exited_banner(exited, resume_id, cx))
+        })
 }
 
-/// In-flow exit strip at the bottom of the terminal: status + restart
-/// (same command, fresh PTY). Lives inside the flex column so it can
-/// never be clipped like the old absolutely-positioned chip.
-fn exited_banner(exit: Option<i32>, cx: &mut Context<AppView>) -> impl IntoElement {
+/// In-flow exit strip at the bottom of the terminal: status + resume
+/// (when the agent printed its session id) + restart. Card-style with
+/// a soft fill — no full-width hairline, which read as a stray rule.
+fn exited_banner(
+    exit: Option<i32>,
+    resume_id: Option<String>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let label = match exit {
         Some(0) => "Session finished".to_string(),
         Some(code) => format!("Session exited ({code})"),
@@ -392,23 +399,41 @@ fn exited_banner(exit: Option<i32>, cx: &mut Context<AppView>) -> impl IntoEleme
         .items_center()
         .justify_center()
         .gap_2()
-        .border_t_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().background)
-        .px_3()
         .py_1p5()
-        .text_sm()
-        .text_color(cx.theme().foreground.opacity(0.8))
-        .child(label)
         .child(
-            Button::new("restart-session")
-                .label("Restart")
-                .ghost()
-                .small()
-                .tab_stop(false)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.restart_current_session(window, cx);
-                })),
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1()
+                .rounded(cx.theme().radius)
+                .bg(cx.theme().muted_foreground.opacity(0.08))
+                .text_sm()
+                .text_color(cx.theme().foreground.opacity(0.8))
+                .child(label)
+                .when_some(resume_id, |el, _id| {
+                    el.child(
+                        Button::new("resume-session")
+                            .label("Resume")
+                            .ghost()
+                            .small()
+                            .tab_stop(false)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.resume_current_session(window, cx);
+                            })),
+                    )
+                })
+                .child(
+                    Button::new("restart-session")
+                        .label("Restart")
+                        .ghost()
+                        .small()
+                        .tab_stop(false)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.restart_current_session(window, cx);
+                        })),
+                ),
         )
 }
 
@@ -419,6 +444,16 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         crate::session::AgentStatus::Error(error) => Some(error.clone()),
         _ => None,
     });
+    // A restored row (agent finished before the app closed) still offers
+    // its Resume action from here — the PTY never came back.
+    let can_resume = this
+        .current_session()
+        .and_then(|s| s.cmd.resume.clone())
+        .is_some();
+    let resumed_label = this
+        .current_session()
+        .map(|s| format!("{} · finished", s.kind))
+        .unwrap_or_default();
     v_flex()
         .size_full()
         .p_6()
@@ -429,27 +464,37 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .text_sm()
         .text_color(cx.theme().muted_foreground)
         .child(if error.is_some() {
-            "Unable to start session"
+            "Unable to start session".to_string()
+        } else if can_resume {
+            format!("{resumed_label} — resume the conversation?")
         } else {
-            "No sessions in this project"
+            "No sessions in this project".to_string()
         })
         .when_some(error.clone(), |el, error| {
             el.child(div().max_w(px(480.)).child(error))
         })
-        .child(
-            Button::new("empty-session-action")
-                .tab_stop(false)
-                .label(if error.is_some() {
-                    "Retry"
-                } else {
-                    "New session"
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if error.is_some() {
-                        this.restart_current_session(window, cx);
-                    } else {
-                        this.spawn_session(window, cx);
-                    }
-                })),
-        )
+        .children((0..1).filter_map(move |_| {
+            let label = if error.is_some() {
+                "Retry"
+            } else if can_resume {
+                "Resume"
+            } else {
+                "New session"
+            };
+            let has_error = error.is_some();
+            Some(
+                Button::new("empty-session-action")
+                    .tab_stop(false)
+                    .label(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if has_error {
+                            this.restart_current_session(window, cx);
+                        } else if can_resume {
+                            this.resume_current_session(window, cx);
+                        } else {
+                            this.spawn_session(window, cx);
+                        }
+                    })),
+            )
+        }))
 }

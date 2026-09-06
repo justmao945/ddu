@@ -15,8 +15,13 @@ License: Apache-2.0, GPL-free throughout. Design doc: `DESIGN.md`.
   polling, notifications, folder picker). Keyboard actions declared here.
 - `src/session.rs` — domain model (`Project`, `AgentSession`, `AgentStatus`),
   launch presets, `initial_projects()` (= cwd).
-- `src/config.rs` — `~/.config/ddu/config.toml` (agent menu, overrides) and
-  `state.json` (persisted sessions).
+- `src/config.rs` — persistence split in two JSON files under
+  `~/Library/Application Support/ddu/`: `settings.json` (user
+  settings, one-to-one with the Settings window) and `state.json`
+  (runtime workspace snapshot: projects, panel widths, per-project
+  diff state, last agent resume hint). Loads/saves check errors;
+  corrupt files are backed up with `.corrupt-<ts>` and defaults are
+  used.
 - `src/diff/` — `git.rs` git2 working-tree diff (cap 5000 lines/file), polled
   with a seq guard against stale results; `mod.rs` data model.
 - `src/terminal/` — `mod.rs` portable-pty pump + subscriber-channel wakeup

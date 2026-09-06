@@ -21,20 +21,64 @@ impl AgentStatus {
     }
 }
 
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn resume_spec_uses_agent_proper_flag() {
+        let base = AgentCmd {
+            program: "claude".into(),
+            args: vec!["--foo".into()],
+            resume: None,
+        };
+        let spec = base
+            .clone()
+            .with_resume("abc-123".into())
+            .spec(Path::new("/t"));
+        assert_eq!(spec.program, "claude");
+        assert_eq!(spec.args, vec!["--foo", "--resume", "abc-123"]);
+        assert_eq!(spec.cwd, PathBuf::from("/t"));
+
+        let codex = AgentCmd {
+            program: "codex".into(),
+            args: vec![],
+            resume: None,
+        };
+        let spec = codex.with_resume("u-1".into()).spec(Path::new("/t"));
+        assert_eq!(spec.program, "codex");
+        assert_eq!(spec.args, vec!["resume", "u-1"]);
+    }
+}
+
 /// Backend command preset for spawning one agent.
 #[derive(Debug, Clone)]
 pub struct AgentCmd {
     pub program: String,
     pub args: Vec<String>,
+    /// Session id to resume (`--resume <id>` / `codex resume <id>`).
+    pub resume: Option<String>,
 }
 
 impl AgentCmd {
+    /// Copy with a resume id attached; `spec` then appends the right
+    /// flag form (`--resume` for claude/omp, bare `resume <id>` for
+    /// codex's subcommand style).
+    pub fn with_resume(mut self, id: String) -> Self {
+        self.resume = Some(id);
+        self
+    }
+
     /// Human-readable command line for the session list.
     pub fn label(&self) -> String {
-        if self.args.is_empty() {
+        let base = if self.args.is_empty() {
             self.program.clone()
         } else {
             format!("{} {}", self.program, self.args.join(" "))
+        };
+        match &self.resume {
+            Some(id) => format!("{base} (resume {id})"),
+            None => base,
         }
     }
 
@@ -49,9 +93,22 @@ impl AgentCmd {
 
     /// Build the PTY spawn spec with `cwd` as the working directory.
     pub fn spec(&self, cwd: &Path) -> PtySpawn {
+        let mut args = self.args.clone();
+        if let Some(id) = &self.resume {
+            // codex takes a bare `resume <id>` subcommand; claude and
+            // omp use `--resume <id>`. Codex still accepts `--resume`
+            // only for `codex exec`, so branch on the program name.
+            if self.program.ends_with("codex") {
+                args.push("resume".into());
+                args.push(id.clone());
+            } else {
+                args.push("--resume".into());
+                args.push(id.clone());
+            }
+        }
         PtySpawn {
             program: self.program.clone(),
-            args: self.args.clone(),
+            args,
             cwd: cwd.into(),
         }
     }
