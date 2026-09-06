@@ -57,6 +57,11 @@ click dispatch; system events fired during the modal (e.g. keyboard-layout
 change) re-enter gpui effects while `App` is borrowed → `RefCell already
 borrowed` crash.
 
+Confirm dialogs: never hand-roll `DialogFooter` button pairs — use
+`ui::dialog_footer(label, id, on_confirm)` (`src/ui/mod.rs`:
+Cancel-outline + danger-small shared recipe). Set `.on_ok(...)` alongside
+the footer when Enter should confirm. One-off informational dialogs
+(no footer) are fine inline.
 ## Verification
 
 - `cargo test` — includes terminal regression tests (`plain_text_lands`,
@@ -75,9 +80,11 @@ borrowed` crash.
 
 - Single GPUI import surface: `use gpui_kit::*;` plus specific component
   modules. Never invent gpui APIs; follow gpui-kit/gpui-component sources.
-- Theme via `cx.theme()`; mono font for terminal/diff/stat text; wrap list
-  rows in `ROW_PX` single lines (ellipsis on the title only).
-- Async view updates: `cx.weak_entity()` + `view.update_in(cx, ...)`
-  inside `window.spawn` (see `add_project`).
 - Terminal wakeups flow as `PumpMsg` events through a subscriber channel;
   never poll-render.
+- Global shortcuts live in `AppView::new` (`src/app.rs`): ⌘T/⌘N new
+  session (same action, guarded against an empty workspace), ⌘O add
+  project (shares `add_project`'s folder-picker flow), ⌘,/⌘B/⌘R/⌘W.
+  Terminal-scoped ⌘C/⌘V (`TermCopy`/`TermPaste`) double as the
+  right-click menu's shortcut hints via `PopupMenuItem::action` — any new
+  terminal action shown in a menu must wire its action the same way.

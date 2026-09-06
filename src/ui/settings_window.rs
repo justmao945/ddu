@@ -5,11 +5,11 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::IconName;
+use gpui_kit::component::Root;
 use gpui_kit::component::Side;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -158,11 +158,12 @@ pub(crate) fn open(cx: &mut App) {
     {
         return;
     }
+    // Centered on the primary display (gpui has no parent-relative
+    // centering for `open_window`): a fixed 880×600 at a point that
+    // puts it near-center on common laptop/desktop sizes without
+    // hiding the workspace behind it.
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: point(px(240.), px(140.)),
-            size: size(px(880.), px(600.)),
-        })),
+        window_bounds: Some(WindowBounds::centered(size(px(880.), px(600.)), cx)),
         titlebar: Some(TitlebarOptions {
             title: Some("Settings".into()),
             appears_transparent: false,
@@ -185,7 +186,10 @@ pub(crate) fn open(cx: &mut App) {
         tabbing_identifier: None,
     };
     match cx.open_window(options, |window, cx| {
-        cx.new(|cx| SettingsWindow::new(window, cx))
+        let view = cx.new(|cx| SettingsWindow::new(window, cx));
+        // First level on the window must be a Root — `*_dialog`,
+        // notification and menu overlays all `expect` it.
+        cx.new(|cx| Root::new(view, window, cx))
     }) {
         Ok(handle) => {
             if cx.try_global::<SettingsWindowSlot>().is_none() {
@@ -292,12 +296,24 @@ fn default_session_field() -> SettingField<SharedString> {
         let current = cfg.new_session.kind.clone();
         Button::new("default-session-select")
             .child(
-                div()
+                h_flex()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(cfg.label_for(&current)),
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        super::agent_icon(&current)
+                            .xsmall()
+                            .flex_none()
+                            .text_color(super::agent_tint(&current, cx)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(cfg.label_for(&current)),
+                    ),
             )
             .dropdown_caret(true)
             .outline()
@@ -326,7 +342,9 @@ fn default_session_field() -> SettingField<SharedString> {
             })
     })
 }
-/// Common macOS shells for the program dropdown.
+/// Common macOS shells for the program dropdown. Only entries that
+/// actually exist on this machine are listed — uninstalled shells
+/// would spawn-and-die with a cryptic PTY error.
 const SHELLS: &[&str] = &[
     "/bin/zsh",
     "/bin/bash",
@@ -334,7 +352,16 @@ const SHELLS: &[&str] = &[
     "/opt/homebrew/bin/fish",
     "/usr/local/bin/fish",
     "/opt/homebrew/bin/nu",
+    "/usr/local/bin/nu",
 ];
+
+fn installed_shells() -> Vec<&'static str> {
+    SHELLS
+        .iter()
+        .copied()
+        .filter(|s| std::path::Path::new(s).is_file())
+        .collect()
+}
 
 /// Login shell picker: a fixed dropdown (there are only a handful of
 /// shells), keeping the trigger and its menu one aligned control.
@@ -358,11 +385,17 @@ fn shell_program_field() -> SettingField<SharedString> {
             .with_size(options.size())
             .w(px(220.))
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                // Always keep the current value selectable (it may be
+                // a custom path typed before), plus installed shells.
+                let mut shells = vec![current.as_str()];
+                shells.extend(installed_shells());
+                shells.sort();
+                shells.dedup();
                 let mut m = menu.min_w(px(220.)).check_side(Side::Right);
-                for shell in SHELLS {
-                    let checked = *shell == current;
-                    let s = (*shell).to_string();
-                    m = m.item(PopupMenuItem::new(*shell).checked(checked).on_click(
+                for shell in shells {
+                    let checked = shell == current;
+                    let s = shell.to_string();
+                    m = m.item(PopupMenuItem::new(shell).checked(checked).on_click(
                         move |_, _, cx| {
                             let s = s.clone();
                             update_config(|c, _| c.shell.program = s, cx);
@@ -552,44 +585,48 @@ fn builtin_agent_groups(cx: &App) -> SettingGroup {
     group
 }
 
-/// Custom agents: the Add button group first, then one bordered group
-/// per agent (name as title, effective command as description) so each
-/// agent reads as a unit instead of a flat run of identical rows.
+/// Custom agents: one bordered group per agent, reading as a unit
+/// instead of a flat run of identical rows. Each group opens with one
+/// header row (brand mark + name + a trailing × that asks for
+/// confirmation), then stacked full-width Name / Program / Args inputs.
+/// "Custom agents" itself is a plain group whose own header row is the
+/// + affordance (icon + "Add agent", ghost, small) — visible even with
+/// zero agents, since a title-only group would render no row at all.
 fn custom_agents_groups(cx: &App) -> Vec<SettingGroup> {
     let cfg = cx.global::<crate::config::Config>().clone();
     let mut groups = Vec::new();
-    // The Add affordance is a single compact `+` button, pinned right.
     groups.push(
         SettingGroup::new()
             .title("Custom agents")
             .description("Extra launchers for the sidebar menus.")
             .item(SettingItem::render(|options, _, _| {
-                div().flex().justify_end().child(
-                    Button::new("add-agent")
-                        .icon(IconName::Plus)
-                        .outline()
-                        .with_size(options.size())
-                        .on_click(|_, _, cx| {
-                            update_config(
-                                |c, _| {
-                                    let mut number = 1;
-                                    while c
-                                        .custom_agents
-                                        .iter()
-                                        .any(|a| a.name == format!("agent-{number}"))
-                                    {
-                                        number += 1;
-                                    }
-                                    c.custom_agents.push(crate::config::AgentPreset {
-                                        name: format!("agent-{number}"),
-                                        program: String::new(),
-                                        args: String::new(),
-                                    });
-                                },
-                                cx,
-                            );
-                        }),
-                )
+                Button::new("add-agent")
+                    .icon(IconName::Plus)
+                    .label("Add agent")
+                    .ghost()
+                    .small()
+                    .tab_stop(false)
+                    .disabled(options.is_disabled())
+                    .on_click(|_, _, cx| {
+                        update_config(
+                            |c, _| {
+                                let mut number = 1;
+                                while c
+                                    .custom_agents
+                                    .iter()
+                                    .any(|a| a.name == format!("agent-{number}"))
+                                {
+                                    number += 1;
+                                }
+                                c.custom_agents.push(crate::config::AgentPreset {
+                                    name: format!("agent-{number}"),
+                                    program: String::new(),
+                                    args: String::new(),
+                                });
+                            },
+                            cx,
+                        );
+                    })
             })),
     );
     for ix in 0..cfg.custom_agents.len() {
@@ -602,9 +639,101 @@ fn custom_agents_groups(cx: &App) -> Vec<SettingGroup> {
         let name = a.name.clone();
         let program = a.program.clone();
         let args = a.args.clone();
-        let group = SettingGroup::new()
-            .title(a.name.clone())
+        let tint = super::agent_tint(&a.name, cx);
+        let title: SharedString = if name.trim().is_empty() {
+            "Untitled agent".into()
+        } else {
+            SharedString::from(name.clone())
+        };
+        let mut group = SettingGroup::new()
+            .title(title)
             .description(command)
+            // Header row FIRST (same offset as an input's label
+            // column): brand mark + name, × pinned right — the name
+            // still edits below, so this row is display-only.
+            .item(
+                SettingItem::render({
+                    let name = name.clone();
+                    let kind = a.name.clone();
+                    move |options, _, _cx| {
+                        let agent_name = name.clone();
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                super::agent_icon(&kind)
+                                    .size_3p5()
+                                    .flex_none()
+                                    .text_color(tint),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(name.clone()),
+                            )
+                            .child(
+                                Button::new(("remove-agent", ix))
+                                    .icon(IconName::Close)
+                                    .danger()
+                                    .ghost()
+                                    .xsmall()
+                                    .tab_stop(false)
+                                    .tooltip(format!("Remove {name}"))
+                                    .disabled(options.is_disabled())
+                                    .on_click(move |_, window, cx| {
+                                        let ix = ix;
+                                        let agent_name = agent_name.clone();
+                                        window.open_alert_dialog(cx, move |alert, _, _| {
+                                            let ix = ix;
+                                            let agent_name = agent_name.clone();
+                                            // Same Cancel + danger-confirm
+                                            // recipe as every other dialog —
+                                            // see `ui::dialog_footer`.
+                                            alert
+                                                .title(format!("Remove “{agent_name}”?"))
+                                                .description(
+                                                    "The agent disappears from the sidebar menus.",
+                                                )
+                                                .footer(super::dialog_footer(
+                                                    "Remove",
+                                                    ("confirm-remove", ix),
+                                                    move |_, window, cx| {
+                                                        window.close_dialog(cx);
+                                                        update_config(
+                                                            move |c, _| {
+                                                                if ix < c.custom_agents.len() {
+                                                                    let removed =
+                                                                        c.custom_agents.remove(ix);
+                                                                    if c.new_session.kind
+                                                                        == removed.name
+                                                                    {
+                                                                        c.new_session.kind =
+                                                                            "terminal".into();
+                                                                    }
+                                                                }
+                                                            },
+                                                            cx,
+                                                        );
+                                                    },
+                                                ))
+                                        });
+                                    }),
+                            )
+                    }
+                })
+                .keywords([
+                    SharedString::from("Remove"),
+                    SharedString::from(name.clone()),
+                ]),
+            );
+        group = group
             // Stacked label-over-input rows: the inputs span the group
             // width instead of leaving dead space to their right.
             .item(
@@ -669,66 +798,7 @@ fn custom_agents_groups(cx: &App) -> Vec<SettingGroup> {
                     ),
                 )
                 .layout(Axis::Vertical),
-            )
-            // A corner × with a confirm dialog — no labeled Remove row.
-            .item(SettingItem::render(move |options, _, _| {
-                let ix = ix;
-                let agent_name = a.name.clone();
-                div().flex().justify_end().child(
-                    Button::new(("remove-agent", ix))
-                        .icon(IconName::Close)
-                        .danger()
-                        .ghost()
-                        .with_size(options.size())
-                        .on_click(move |_, window, cx| {
-                            let ix = ix;
-                            let agent_name = agent_name.clone();
-                            window.open_alert_dialog(cx, move |alert, _, _| {
-                                let ix = ix;
-                                let agent_name = agent_name.clone();
-                                alert
-                                    .title(format!("Remove “{agent_name}”?"))
-                                    .description("The agent disappears from the sidebar menus.")
-                                    .footer(
-                                        DialogFooter::new()
-                                            .child(
-                                                Button::new(("cancel-remove", ix))
-                                                    .label("Cancel")
-                                                    .outline()
-                                                    .small()
-                                                    .on_click(|_, window, cx| {
-                                                        window.close_dialog(cx)
-                                                    }),
-                                            )
-                                            .child(
-                                                Button::new(("confirm-remove", ix))
-                                                    .label("Remove")
-                                                    .danger()
-                                                    .small()
-                                                    .on_click(move |_, window, cx| {
-                                                        window.close_dialog(cx);
-                                                        update_config(
-                                                            move |c, _| {
-                                                                if ix < c.custom_agents.len() {
-                                                                    let removed =
-                                                                        c.custom_agents.remove(ix);
-                                                                    if c.new_session.kind
-                                                                        == removed.name
-                                                                    {
-                                                                        c.new_session.kind =
-                                                                            "terminal".into();
-                                                                    }
-                                                                }
-                                                            },
-                                                            cx,
-                                                        );
-                                                    }),
-                                            ),
-                                    )
-                            });
-                        }),
-                )
-            }));
+            );
         groups.push(group);
     }
     groups

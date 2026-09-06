@@ -60,10 +60,20 @@ impl gpui::AssetSource for AppAssets {
 /// abort before the message is printed; tee them to a file so crashes
 /// are diagnosable.
 fn install_panic_logger() {
+    use std::io::Write as _;
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("[{}] {info}\n", chrono_like_timestamp());
         eprint!("{msg}");
-        let _ = std::fs::write("/tmp/ddu-panic.log", &msg);
+        // Append, never overwrite: a click-dispatch panic is followed
+        // by a second "cannot unwind" abort across the AppKit boundary,
+        // and overwriting would destroy the original message.
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/ddu-panic.log")
+        {
+            let _ = f.write_all(msg.as_bytes());
+        }
     }));
 }
 

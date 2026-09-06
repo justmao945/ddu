@@ -8,8 +8,6 @@
 
 use std::time::Duration;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::*;
 use gpui_kit::*;
@@ -24,6 +22,7 @@ gpui_kit::actions!(
     ddu,
     [
         NewSession,
+        AddProject,
         ToggleSessions,
         ToggleDiff,
         CloseSession,
@@ -101,7 +100,13 @@ impl AppView {
         // cmd-w close.
         cx.bind_keys([
             KeyBinding::new("cmd-,", OpenSettings, None),
+            // ⌘T spawns the default launcher in the active project
+            // (guarded: with no projects there is nothing to spawn
+            // into); ⌘N is the same action for muscle memory. ⌘O adds
+            // a project via the folder picker.
             KeyBinding::new("cmd-t", NewSession, None),
+            KeyBinding::new("cmd-n", NewSession, None),
+            KeyBinding::new("cmd-o", AddProject, None),
             KeyBinding::new("cmd-b", ToggleSessions, None),
             KeyBinding::new("cmd-r", ToggleDiff, None),
             KeyBinding::new("cmd-w", CloseSession, None),
@@ -563,35 +568,21 @@ impl AppView {
                         true
                     }
                 })
-                // Custom footer: the app's compact button recipe instead
-                // of the stock large OK/Cancel pair.
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            Button::new("cancel-close")
-                                .label("Cancel")
-                                .outline()
-                                .small()
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("confirm-close")
-                                .label("Close Session")
-                                .danger()
-                                .small()
-                                .on_click({
-                                    let this = this.clone();
-                                    move |_, window, cx| {
-                                        if let Some(this) = this.upgrade() {
-                                            this.update(cx, |v, cx| {
-                                                v.close_session(p, six, window, cx)
-                                            });
-                                        }
-                                        window.close_dialog(cx);
-                                    }
-                                }),
-                        ),
-                )
+                // Shared Cancel + danger-confirm recipe — see
+                // `ui::dialog_footer`.
+                .footer(crate::ui::dialog_footer(
+                    "Close Session",
+                    "confirm-close",
+                    {
+                        let this = this.clone();
+                        move |_, window, cx| {
+                            if let Some(this) = this.upgrade() {
+                                this.update(cx, |v, cx| v.close_session(p, six, window, cx));
+                            }
+                            window.close_dialog(cx);
+                        }
+                    },
+                ))
         });
     }
 
@@ -869,9 +860,20 @@ impl Render for AppView {
                 if window.has_active_dialog(cx) {
                     return;
                 }
+                // ⌘N on an empty workspace is a no-op: spawning needs
+                // an active project to create the session in.
+                if this.projects.is_empty() {
+                    return;
+                }
                 this.spawn_session(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleDiff, _, cx| this.toggle_diff(cx)))
+            .on_action(cx.listener(|this, _: &AddProject, window, cx| {
+                if window.has_active_dialog(cx) {
+                    return;
+                }
+                // Same folder-picker flow as the sidebar button.
+                this.add_project(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| {
                 if window.has_active_dialog(cx) {
                     window.close_dialog(cx);

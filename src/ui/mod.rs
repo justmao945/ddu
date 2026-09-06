@@ -128,6 +128,39 @@ pub(crate) fn agent_menu_row(kind: &str, label: impl Into<SharedString>, cx: &Ap
         .into_any_element()
 }
 
+/// App-wide dialog footer recipe: Cancel (outline) + one danger confirm.
+/// Every confirm dialog in the app (main window and settings window)
+/// must use this so footers never drift apart again. `confirm_label`
+/// names the destructive action ("Close Session", "Remove", ...); the
+/// `on_confirm` handler must close the dialog itself
+/// (`window.close_dialog(cx)`) before or after its own work.
+pub(crate) fn dialog_footer(
+    confirm_label: impl Into<gpui::SharedString>,
+    confirm_id: impl Into<gpui::ElementId>,
+    on_confirm: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> gpui::AnyElement {
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use gpui_kit::component::dialog::DialogFooter;
+    DialogFooter::new()
+        .child(
+            Button::new("dialog-cancel")
+                .label("Cancel")
+                .outline()
+                .small()
+                .on_click(|_, window, cx| {
+                    use gpui_kit::component::WindowExt as _;
+                    window.close_dialog(cx)
+                }),
+        )
+        .child(
+            Button::new(confirm_id)
+                .label(confirm_label)
+                .danger()
+                .small()
+                .on_click(on_confirm),
+        )
+        .into_any_element()
+}
 /// Zed reserves accent for activity; list selection is elevated neutral.
 pub(crate) fn selection_bg(cx: &App) -> Hsla {
     cx.theme().foreground.opacity(0.12)

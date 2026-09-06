@@ -144,6 +144,7 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                 menu.item(
                     PopupMenuItem::new("Copy")
                         .disabled(!has_selection)
+                        .action(Box::new(crate::app::TermCopy))
                         .on_click(move |_, _, cx| {
                             if let Some(t) = copy_term.upgrade() {
                                 t.update(cx, |s, cx| {
@@ -155,6 +156,7 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                 .item(
                     PopupMenuItem::new("Paste")
                         .disabled(!can_paste)
+                        .action(Box::new(crate::app::TermPaste))
                         .on_click(move |_, _, cx| {
                             let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
                             else {
