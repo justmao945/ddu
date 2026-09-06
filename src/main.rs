@@ -107,7 +107,13 @@ fn main() {
             .expect("Failed to open window");
         })
         .detach();
-        if std::env::var("DDU_VERIFY_SETTINGS").is_ok() {
+        // Empty string (clean launcher exports it unset-as-empty) must not
+        // count as "set": require a valid page index.
+        if std::env::var("DDU_VERIFY_SETTINGS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .is_some()
+        {
             cx.spawn(async move |cx| {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(600))

@@ -43,8 +43,9 @@ cp "$BIN" "$APP/Contents/MacOS/ddu.bin"
 cat > "$APP/Contents/MacOS/launch.sh" <<LAUNCH
 #!/bin/sh
 cd "\${DDU_DIR:-\$HOME/Code/ddu}" || exit 1
-# Dev hook baked at bundle time (see main.rs): auto-open Settings.
-export DDU_VERIFY_SETTINGS="${DDU_VERIFY_SETTINGS:-}"
+# Dev hook baked at bundle time (see main.rs): auto-open Settings. Omitted
+# entirely when unset so a clean bundle can't leak an empty-string var.
+${DDU_VERIFY_SETTINGS:+export DDU_VERIFY_SETTINGS="${DDU_VERIFY_SETTINGS}"}
 exec "\$(dirname "\$0")/ddu.bin"
 LAUNCH
 chmod +x "$APP/Contents/MacOS/launch.sh"
