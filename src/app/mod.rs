@@ -35,6 +35,8 @@ gpui_kit::actions!(
         TermPaste,
         TermCopy,
         CloseSettings,
+        FontLarger,
+        FontSmaller,
         Quit,
         SelectSession1,
         SelectSession2,
@@ -163,6 +165,12 @@ impl AppView {
             KeyBinding::new("cmd-b", ToggleSessions, None),
             KeyBinding::new("cmd-r", ToggleDiff, None),
             KeyBinding::new("cmd-w", CloseSession, None),
+            // ⌘+/⌘− (with their shifted variants) zoom the terminal
+            // font size; persisted like the settings field.
+            KeyBinding::new("cmd-=", FontLarger, None),
+            KeyBinding::new("cmd-+", FontLarger, None),
+            KeyBinding::new("cmd--", FontSmaller, None),
+            KeyBinding::new("cmd-_", FontSmaller, None),
             // ⌘1..⌘9: select the Nth session in the current project.
             // Prefixed "cmd" so bare digits keep reaching the PTY.
             KeyBinding::new("cmd-1", SelectSession1, None),
@@ -445,6 +453,8 @@ impl Render for AppView {
             .size_full()
             .bg(cx.theme().background)
             .on_action(cx.listener(|_, _: &OpenSettings, _, cx| ui::settings::open(cx)))
+            .on_action(|_: &FontLarger, _, cx| ui::settings::bump_font_size(1., cx))
+            .on_action(|_: &FontSmaller, _, cx| ui::settings::bump_font_size(-1., cx))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {
                 if window.has_active_dialog(cx) {
                     return;

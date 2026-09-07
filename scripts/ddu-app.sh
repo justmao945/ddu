@@ -43,6 +43,18 @@ cp "$BIN" "$APP/Contents/MacOS/ddu.bin"
 cat > "$APP/Contents/MacOS/launch.sh" <<LAUNCH
 #!/bin/sh
 cd "\${DDU_DIR:-\$HOME/Code/ddu}" || exit 1
+# LaunchServices starts the app with the bare system environment
+# (PATH=/usr/bin:/bin:/usr/sbin:/sbin), so agent CLIs installed via
+# homebrew/mise/nvm/cargo/… are not found. Rebuild the environment
+# from the user's login+interactive shell first; the DDU_* forwards
+# below then win by order. -i matters: most users export PATH in
+# ~/.zshrc, which only an interactive shell sources. The dump prints
+# each exported var as a plain sh export NAME=value (zsh's stock
+# export -p emits export -T PATH path=(...) arrays that sh cannot
+# eval), with (q) shell-quoting values.
+if [ -x /bin/zsh ]; then
+  eval "\$(/bin/zsh -ilc 'for k in \${(k)parameters[(R)*export*]}; do print -r -- "export \$k=\${(q)\${(P)k}}"; done' 2>/dev/null)" || true
+fi
 # Forward every DDU_* variable (DDU_DIR, DDU_STATE_PATH, DDU_DEBUG, …)
 # so a dev relaunch can point the app at a scratch state file.
 for v in \$(env | sed -n 's/^\\(DDU_[A-Za-z0-9_]*\\)=.*/\\1/p'); do

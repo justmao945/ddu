@@ -44,7 +44,7 @@ impl AppView {
         self.spawn_session_of(&kind, window, cx);
     }
 
-    /// Create a session of `kind` (`terminal`/builtin/custom) in project
+    /// Create a session of `kind` (`terminal`/builtin) in project
     /// `project` and focus it.
     pub(crate) fn spawn_session_of(
         &mut self,

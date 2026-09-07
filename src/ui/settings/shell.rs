@@ -1,6 +1,6 @@
 //! Login shell and default-session configuration fields.
 
-use super::{commit_text_field, update_config};
+use super::update_config;
 use gpui_kit::base::h_flex;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Disableable as _;
@@ -76,16 +76,8 @@ pub(super) fn shell_program_field() -> SettingField<SharedString> {
     })
 }
 
-pub(super) fn shell_args_field() -> SettingField<SharedString> {
-    commit_text_field(
-        |cx| cx.global::<crate::config::Config>().shell.args.clone(),
-        |value, cx| {
-            update_config(|c, _| c.shell.args = value, cx);
-        },
-    )
-}
 
-/// Default new-session type picker: Terminal / builtins / custom agents.
+/// Default new-session type picker: Terminal / builtins.
 pub(super) fn default_session_field() -> SettingField<SharedString> {
     SettingField::<SharedString>::render(|options, _, cx| {
         let cfg = cx.global::<crate::config::Config>().clone();

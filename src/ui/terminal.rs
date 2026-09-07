@@ -126,6 +126,20 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                 }
             }
         }))
+        // Actions dispatch from the FOCUSED node up the tree, and the
+        // focus node here is this surface div (`.track_focus`) — so
+        // TermCopy must live on THIS div, not on the mouse-handler
+        // child below, or ⌘C would never reach it.
+        .on_action(cx.listener({
+            let weak = weak.clone();
+            move |_, _: &TermCopy, _, cx| {
+                if let Some(term) = weak.upgrade() {
+                    if term.update(cx, |s, cx| s.copy_selection(cx)) {
+                        cx.stop_propagation();
+                    }
+                }
+            }
+        }))
         .context_menu({
             let weak = weak.clone();
             move |menu, _window, cx| {
@@ -364,16 +378,6 @@ fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoEle
                         }
                     }),
                 )
-                .on_action(cx.listener({
-                    let weak = weak.clone();
-                    move |_, _: &TermCopy, _, cx| {
-                        if let Some(term) = weak.upgrade() {
-                            if term.update(cx, |s, cx| s.copy_selection(cx)) {
-                                cx.stop_propagation();
-                            }
-                        }
-                    }
-                }))
                 .flex_1()
                 .min_h_0()
                 .min_w_0()

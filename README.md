@@ -14,7 +14,7 @@
 - **Real terminals, not a text box** — every session runs in a PTY with streaming ANSI color, scrollback, and live resize, so agent CLIs behave exactly as they do in your shell.
 - **Live git diff** — working tree vs. HEAD: modified, staged, and untracked files with per-file `+`/`−` stats and the current branch, refreshed automatically as your agents edit.
 - **Session lifecycle** — spawn, kill, and restart sessions; get notified when an agent exits or fails. ddu keeps each session's conversation id, so an agent chat can be resumed later (`claude --resume` / `codex resume`).
-- **Settings window** — theme, shell, and agent command presets, in a dedicated window (`⌘,`).
+- **Settings window** — theme, shell, and terminal font, in a dedicated window (`⌘,`).
 - **Persistent workspace** — projects, panel layout, and per-project diff state survive relaunches (`~/Library/Application Support/ddu/`).
 
 ## Keyboard shortcuts

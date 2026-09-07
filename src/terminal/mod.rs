@@ -97,9 +97,11 @@ impl gpui_kit::EventEmitter<TermEvent> for TermSession {}
 impl TermSession {
     /// Spawn `cmd` in a fresh PTY and start its pump threads. Initial
     /// grid size is 80×24; the element's prepaint resizes it to the
-    /// panel on the first frame.
+    /// panel on the first frame. Scrollback comes from the user config
+    /// (`Settings → Terminal → Scrollback`).
     pub fn spawn(cmd: &PtySpawn, cx: &mut App) -> anyhow::Result<Entity<Self>> {
         let (cols, rows) = (80, 24);
+        let scrollback = cx.global::<crate::config::Config>().terminal_scrollback();
         let (wake_tx, wake_rx) = async_channel::bounded::<grid::PumpMsg>(1);
         let (grid, process) = grid::spawn_session(
             cmd,
@@ -107,6 +109,7 @@ impl TermSession {
             rows,
             wake_tx,
             gpui_kit::component::theme::Theme::global(cx).is_dark(),
+            scrollback,
         )?;
 
         let entity = cx.new(|cx| {
@@ -1240,6 +1243,7 @@ mod tests {
                 let session = cx
                     .update(|cx| {
                         cx.set_global(Theme::default());
+                        cx.set_global(crate::config::Config::default());
                         TermSession::spawn(
                             &PtySpawn {
                                 program: "cat".into(),

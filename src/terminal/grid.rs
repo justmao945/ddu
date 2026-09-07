@@ -232,6 +232,7 @@ impl TermGrid {
         rows: u16,
         writer: PtyWriter,
         wake: async_channel::Sender<PumpMsg>,
+        scrollback: usize,
     ) -> Self {
         let meta = Arc::new(Mutex::new(TermMeta::default()));
         let dark = Arc::new(AtomicBool::new(true));
@@ -243,7 +244,10 @@ impl TermGrid {
             dark: dark.clone(),
         };
         let term = Arc::new(FairMutex::new(Term::new(
-            Config::default(),
+            Config {
+                scrolling_history: scrollback,
+                ..Config::default()
+            },
             &GridDims { cols, rows },
             proxy,
         )));
@@ -337,16 +341,18 @@ pub fn spawn_pump(
 }
 
 /// Convenience: spawn a process and its pumps in one go, returning the
-/// grid plus the master handle.
+/// grid plus the master handle. `scrollback` caps the grid's history
+/// (lines; older output is dropped).
 pub fn spawn_session(
     cmd: &PtySpawn,
     cols: u16,
     rows: u16,
     wake: async_channel::Sender<PumpMsg>,
     dark: bool,
+    scrollback: usize,
 ) -> anyhow::Result<(TermGrid, PtyProcess)> {
     let (process, reader, child) = PtyProcess::spawn(cmd, cols, rows)?;
-    let grid = TermGrid::new(cols, rows, process.writer().clone(), wake.clone());
+    let grid = TermGrid::new(cols, rows, process.writer().clone(), wake.clone(), scrollback);
     grid.dark.store(dark, Ordering::Relaxed);
     spawn_pump(grid.term.clone(), wake, grid.recent.clone(), reader, child);
     Ok((grid, process))
@@ -433,7 +439,8 @@ mod tests {
             args: vec![],
             cwd: std::env::temp_dir(),
         };
-        let (grid, _process) = spawn_session(&cmd, 80, 24, wake, true).expect("spawn sh");
+        let (grid, _process) =
+            spawn_session(&cmd, 80, 24, wake, true, 1000).expect("spawn sh");
 
         assert!(
             wait_until(&grid.term, "$", Duration::from_secs(5)),
@@ -482,7 +489,8 @@ mod zsh_probe {
 
     fn feed(bytes: &[u8]) -> String {
         let (_tx, _rx) = async_channel::bounded::<PumpMsg>(1);
-        let grid = TermGrid::new(80, 24, crate::terminal::pty::PtyWriter::for_test(), _tx);
+        let grid =
+            TermGrid::new(80, 24, crate::terminal::pty::PtyWriter::for_test(), _tx, 1000);
         let mut parser: Processor<StdSyncHandler> = Processor::new();
         {
             let mut term = grid.term.lock();
@@ -543,7 +551,8 @@ mod color_query_tests {
         }
         let capture = Capture(Arc::new(std::sync::Mutex::new(Vec::new())));
         let (wake, _rx) = async_channel::bounded(1);
-        let grid = TermGrid::new(80, 24, PtyWriter::test_writer(capture.clone()), wake);
+        let grid =
+            TermGrid::new(80, 24, PtyWriter::test_writer(capture.clone()), wake, 1000);
         let mut parser: Processor<StdSyncHandler> = Processor::new();
         for (dark, expected) in [
             (

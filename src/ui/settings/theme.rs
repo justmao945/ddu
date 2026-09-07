@@ -1,20 +1,24 @@
-//! Theme appearance: the mode switch and the terminal font
-//! picker.
+//! Theme appearance: the mode switch, the terminal font picker and
+//! the terminal buffer (scrollback) settings.
 
 use super::update_config;
+use crate::config::{TERMINAL_FONT_SIZE_DEFAULT, TERMINAL_SCROLLBACK_DEFAULT};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::setting::SettingField;
+use gpui_kit::component::setting::{NumberFieldOptions, SettingField};
 use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::*;
 
 pub(crate) fn set_theme(mode: ThemeMode, cx: &mut App) {
     Theme::change(mode, None, cx);
     // `Theme::change` re-applies the registry theme config; keep the
-    // compact 14px base set at startup (see `main.rs`).
+    // compact 14px base set at startup (see `main.rs`), and the
+    // configured terminal mono size (the registry resets it to 13px).
     Theme::global_mut(cx).font_size = px(14.);
+    Theme::global_mut(cx).mono_font_size =
+        px(cx.global::<crate::config::Config>().terminal_font_size());
     // `Theme::change(.., None, ..)` refreshes no window — repaint all,
     // or existing terminals/panels keep the old palette until their
     // next wakeup.
@@ -56,6 +60,57 @@ pub(super) fn theme_field() -> SettingField<SharedString> {
 /// Width of the font picker trigger; the popup menu matches it exactly
 /// so the two read as one control.
 pub(super) const FONT_PICKER_W: f32 = 300.;
+
+/// Terminal font size clamp (px). Keeps a mistyped value from breaking
+/// the grid metrics while still allowing any sane size.
+const FONT_SIZE_MIN: f32 = 8.;
+const FONT_SIZE_MAX: f32 = 32.;
+
+/// ⌘+/⌘− zoom: step the terminal font size by `delta`, persist it and
+/// apply it to the live theme (the same path the settings field uses).
+pub(crate) fn bump_font_size(delta: f32, cx: &mut App) {
+    let current = cx.global::<crate::config::Config>().terminal_font_size();
+    let size = (current + delta).clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+    Theme::global_mut(cx).mono_font_size = px(size);
+    update_config(move |c, _| c.terminal_font_size = Some(size), cx);
+}
+
+/// Terminal font size (px): a spinner field — type a value, or step
+/// with the ▲▼ buttons / arrow keys. Every change applies to the live
+/// theme and persists immediately.
+pub(super) fn terminal_size_field() -> SettingField<f64> {
+    SettingField::<f64>::number_input(
+        NumberFieldOptions {
+            min: FONT_SIZE_MIN as f64,
+            max: FONT_SIZE_MAX as f64,
+            step: 1.,
+        },
+        |cx| cx.global::<crate::config::Config>().terminal_font_size() as f64,
+        |size, cx| {
+            let size = size as f32;
+            Theme::global_mut(cx).mono_font_size = px(size);
+            update_config(move |c, _| c.terminal_font_size = Some(size), cx);
+        },
+    )
+    .default_value(TERMINAL_FONT_SIZE_DEFAULT as f64)
+}
+
+/// Terminal scrollback cap (lines): a spinner field. Applies to newly
+/// spawned sessions — an existing grid keeps the cap it was built with.
+pub(super) fn terminal_scrollback_field() -> SettingField<f64> {
+    SettingField::<f64>::number_input(
+        NumberFieldOptions {
+            min: 100.,
+            max: 100_000.,
+            step: 500.,
+        },
+        |cx| cx.global::<crate::config::Config>().terminal_scrollback() as f64,
+        |lines, cx| {
+            update_config(move |c, _| c.terminal_scrollback = Some(lines as usize), cx)
+        },
+    )
+    .default_value(TERMINAL_SCROLLBACK_DEFAULT as f64)
+}
 
 pub(super) fn terminal_font_field() -> SettingField<SharedString> {
     const SYSTEM_DEFAULT: &str = "__system_default__";

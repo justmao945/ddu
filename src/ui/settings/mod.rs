@@ -1,30 +1,29 @@
 //! Settings window: the sidebar-based [`Settings`] surface in its own
-//! native window, opened from the title-bar gear or ⌘,. Appearance
-//! (theme) lives here; future config appends as new pages.
+//! native window, opened from the title-bar gear or ⌘,. General
+//! (theme, default session) and Terminal (shell, font, scrollback)
+//! live here; future config appends as new pages.
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::IconName;
 use gpui_kit::component::Root;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::group_box::GroupBoxVariant;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::setting::{
-    SettingField, SettingGroup, SettingItem, SettingPage, Settings,
-};
+use gpui_kit::component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-mod agents;
 mod shell;
 mod theme;
 
 // Re-exports for the submodules' `super::` paths (they render brand
 // icons and tints from the ui root).
-pub(super) use crate::ui::{agent_icon, agent_menu_row, agent_tint, dialog_footer};
+pub(super) use crate::ui::{agent_icon, agent_menu_row, agent_tint};
 
-use self::agents::{builtin_agent_groups, custom_agents_groups};
-use self::shell::{default_session_field, shell_args_field, shell_program_field};
-use self::theme::{terminal_font_field, theme_field};
+use self::shell::{default_session_field, shell_program_field};
+use self::theme::{
+    terminal_font_field, terminal_scrollback_field, terminal_size_field, theme_field,
+};
+pub(crate) use self::theme::bump_font_size;
 
 /// The one settings window, while open (singleton slot).
 struct SettingsWindowSlot(Option<AnyWindowHandle>);
@@ -55,6 +54,9 @@ impl Render for SettingsWindow {
             .track_focus(&self.focus)
             .key_context("SettingsWindow")
             .on_action(|_: &crate::app::CloseSettings, window, _| window.remove_window())
+            // ⌘+/⌘− zoom the terminal font from the settings window too.
+            .on_action(|_: &crate::app::FontLarger, _, cx| bump_font_size(1., cx))
+            .on_action(|_: &crate::app::FontSmaller, _, cx| bump_font_size(-1., cx))
             .child(
                 Settings::new("ddu-settings")
                     // One compact control size for every field, so the
@@ -73,13 +75,22 @@ impl Render for SettingsWindow {
                     )
                     .with_group_variant(GroupBoxVariant::Outline)
                     .page(
-                        SettingPage::new("Appearance")
+                        SettingPage::new("General")
                             .header_style(&page_header_style())
-                            .icon(IconName::Palette)
+                            .icon(IconName::Settings)
                             .group(
-                                SettingGroup::new().item(
+                                SettingGroup::new().title("Appearance").item(
                                     SettingItem::new("Theme", theme_field())
                                         .description("Color scheme for the interface."),
+                                ),
+                            )
+                            .group(
+                                SettingGroup::new().title("Sessions").item(
+                                    SettingItem::new(
+                                        "Default type",
+                                        default_session_field(),
+                                    )
+                                    .description("What the sidebar + button creates."),
                                 ),
                             ),
                     )
@@ -88,46 +99,32 @@ impl Render for SettingsWindow {
                             .header_style(&page_header_style())
                             .icon(IconName::SquareTerminal)
                             .group(
-                                SettingGroup::new()
-                                    .title("Shell")
-                                    .item(
-                                        SettingItem::new("Program", shell_program_field())
-                                            .layout(Axis::Vertical)
-                                            .description("Program for Terminal sessions."),
-                                    )
-                                    .item(
-                                        SettingItem::new("Args", shell_args_field())
-                                            .layout(Axis::Vertical)
-                                            .description("Arguments passed to the shell."),
-                                    ),
+                                SettingGroup::new().title("Shell").item(
+                                    SettingItem::new("Program", shell_program_field())
+                                        .layout(Axis::Vertical)
+                                        .description("Program for Terminal sessions."),
+                                ),
                             )
                             .group(
-                                SettingGroup::new().title("Font").item(
+                                SettingGroup::new().title("Font").items([
                                     SettingItem::new("Font", terminal_font_field())
                                         .layout(Axis::Vertical)
                                         .description(
                                             "Typeface for all sessions. System default uses the platform monospace font.",
                                         ),
-                                ),
-                            )
-                    )
-                    .page(
-                        SettingPage::new("Sessions")
-                            .header_style(&page_header_style())
-                            .icon(IconName::Bot)
-                            .group(
-                                SettingGroup::new().item(
-                                    SettingItem::new(
-                                        "Default type",
-                                        default_session_field(),
-                                    )
-                                    .description(
-                                        "What the sidebar + button creates.",
+                                    SettingItem::new("Size", terminal_size_field()).description(
+                                        "Mono font size for all sessions, in points (8–32). ⌘+ / ⌘− zoom anywhere.",
                                     ),
-                                ),
+                                ]),
                             )
-                            .group(builtin_agent_groups(cx))
-                            .groups(custom_agents_groups(cx)),
+                            .group(
+                                SettingGroup::new().title("Scrollback").item(
+                                    SettingItem::new("Lines", terminal_scrollback_field())
+                                        .description(
+                                            "Maximum history kept per session; older lines are dropped. Applies to new sessions.",
+                                        ),
+                                ),
+                            ),
                     ),
             )
             // Overlay layers (anchored, no layout impact): dropdown
@@ -220,80 +217,6 @@ pub(super) fn update_config(f: impl FnOnce(&mut crate::config::Config, &mut App)
     cx.refresh_windows();
 }
 
-/// State for [`commit_text_field`].
-struct CommitFieldState {
-    input: Entity<InputState>,
-    _subscription: Subscription,
-}
-
-/// The composable half of [`commit_text_field`]: an [`Input`] that
-/// commits on Enter or blur, keyed by `key`, resyncing from `current`
-/// whenever the field isn't focused. Returns the bare component so
-/// callers can embed it in custom rows (e.g. the builtin-agent line).
-pub(super) fn commit_input(
-    key: String,
-    current: String,
-    set: std::rc::Rc<dyn Fn(String, &mut App)>,
-    options: &gpui_kit::component::setting::RenderOptions,
-    window: &mut Window,
-    cx: &mut App,
-) -> Input {
-    let state = window.use_keyed_state(SharedString::from(key), cx, {
-        let current = current.clone();
-        let set = set.clone();
-        move |window, cx| {
-            let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
-            let subscription = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                    set(input.read(cx).value().to_string(), cx);
-                }
-            });
-            CommitFieldState {
-                input,
-                _subscription: subscription,
-            }
-        }
-    });
-    // Resync when the config changed from elsewhere — but never
-    // clobber the text while the user is editing this field.
-    state.update(cx, |state, cx| {
-        let input = state.input.read(cx);
-        let focused = input.focus_handle(cx).is_focused(window);
-        if !focused && input.value() != current {
-            state.input.update(cx, |input, cx| {
-                input.set_value(current.clone(), window, cx);
-            });
-        }
-    });
-    Input::new(&state.read(cx).input)
-        .disabled(options.is_disabled())
-        .with_size(options.size())
-}
-
-/// Text field that commits on Enter or blur — not per keystroke, so a
-/// half-typed value never lands in the config file and typing doesn't
-/// trigger a save + full-window refresh per character.
-pub(super) fn commit_text_field(
-    get: impl Fn(&App) -> String + 'static,
-    set: impl Fn(String, &mut App) + 'static,
-) -> SettingField<SharedString> {
-    let set = std::rc::Rc::new(set);
-    SettingField::<SharedString>::render(move |options, window, cx| {
-        let key = format!(
-            "commit-input-{}-{}-{}",
-            options.page_ix(),
-            options.group_ix(),
-            options.item_ix()
-        );
-        commit_input(key, get(cx), set.clone(), options, window, cx).map(|this| {
-            if matches!(options.layout(), Axis::Horizontal) {
-                this.w_64()
-            } else {
-                this.w_full()
-            }
-        })
-    })
-}
 /// Zed-style page header: a prominent 16px medium title above the muted
 /// group titles, without the stock header's bottom hairline.
 pub(super) fn page_header_style() -> StyleRefinement {

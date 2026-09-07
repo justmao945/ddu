@@ -1,7 +1,7 @@
 //! Persistence, split in two files with one responsibility each:
 //!
 //! * `settings.json` — [`Config`]: one-to-one user settings (default
-//!   launcher, shell, agent args, custom agents, font, theme).
+//!   launcher, shell, terminal font, theme).
 //! * `state.json` — [`State`]: runtime workspace snapshot (project
 //!   list with expand states, panel visibility).
 //!
@@ -9,7 +9,6 @@
 //! failing the launch: a corrupt file is backed up beside itself and
 //! defaults are used; saves return the error for the caller to surface.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -44,27 +43,15 @@ pub fn state_path() -> PathBuf {
 
 // ── settings.json ─────────────────────────────────────────────────────
 
-/// One user-defined agent launcher.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentPreset {
-    pub name: String,
-    pub program: String,
-    #[serde(default)]
-    pub args: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShellConfig {
     pub program: String,
-    #[serde(default)]
-    pub args: String,
 }
 
 impl Default for ShellConfig {
     fn default() -> Self {
         Self {
             program: std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into()),
-            args: String::new(),
         }
     }
 }
@@ -72,8 +59,7 @@ impl Default for ShellConfig {
 /// What the sidebar `+` button creates by default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewSessionDefault {
-    /// `"terminal"`, a builtin name (`claude`/`codex`/`omp`) or a custom
-    /// agent name.
+    /// `"terminal"` or a builtin name (`claude`/`codex`/`omp`).
     pub kind: String,
 }
 
@@ -94,19 +80,28 @@ pub struct Config {
     pub new_session: NewSessionDefault,
     #[serde(default)]
     pub shell: ShellConfig,
-    /// Extra args for builtin agents, keyed by program name.
-    #[serde(default)]
-    pub agent_args: BTreeMap<String, String>,
-    #[serde(default)]
-    pub custom_agents: Vec<AgentPreset>,
     /// Terminal font family; `None` = system default mono face.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_font: Option<String>,
+    /// Terminal font size (px); `None` = the stock 13px mono size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_font_size: Option<f32>,
     #[serde(default)]
     pub dark_theme: bool,
+    /// Terminal scrollback cap (lines); the grid drops history beyond
+    /// it. `None` = the stock 3000-line history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_scrollback: Option<usize>,
 }
 
+/// Stock mono size the terminal falls back to when unset.
+pub const TERMINAL_FONT_SIZE_DEFAULT: f32 = 13.;
+
+/// Terminal scrollback cap (lines) the terminal falls back to when unset.
+pub const TERMINAL_SCROLLBACK_DEFAULT: usize = 3000;
+
 // ── state.json ────────────────────────────────────────────────────────
+
 
 /// Persisted project entry: the full session list survives a restart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -125,7 +120,7 @@ pub struct ProjectConfig {
 /// One restored session row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedSession {
-    /// Launcher kind (`terminal`/`claude`/`codex`/`omp`/custom name).
+    /// Launcher kind (`terminal`/`claude`/`codex`/`omp`).
     pub kind: String,
     /// Row title (the live OSC title for agents, program name for shells).
     pub title: String,
@@ -242,26 +237,17 @@ impl Config {
     pub fn agent_menu(&self) -> Vec<String> {
         let mut items = vec!["terminal".to_string()];
         items.extend(BUILTIN_AGENTS.iter().map(|(_, p)| p.to_string()));
-        items.extend(self.custom_agents.iter().map(|a| a.name.clone()));
         items
     }
 
     /// Resolve a kind key to a spawnable command.
     pub fn cmd_for(&self, kind: &str) -> anyhow::Result<AgentCmd> {
         let (program, args) = if kind == "terminal" {
-            (self.shell.program.as_str(), self.shell.args.as_str())
+            (self.shell.program.as_str(), "")
         } else if BUILTIN_AGENTS.iter().any(|(_, p)| *p == kind) {
-            (
-                kind,
-                self.agent_args.get(kind).map(String::as_str).unwrap_or(""),
-            )
+            (kind, "")
         } else {
-            let agent = self
-                .custom_agents
-                .iter()
-                .find(|a| a.name == kind)
-                .ok_or_else(|| anyhow::anyhow!("Unknown session type: {kind}"))?;
-            (agent.program.as_str(), agent.args.as_str())
+            anyhow::bail!("Unknown session type: {kind}");
         };
         anyhow::ensure!(
             !program.trim().is_empty(),
@@ -285,14 +271,20 @@ impl Config {
                 .iter()
                 .find(|(_, p)| *p == other)
                 .map(|(l, _)| l.to_string())
-                .or_else(|| {
-                    self.custom_agents
-                        .iter()
-                        .find(|a| a.name == other)
-                        .map(|a| a.name.clone())
-                })
                 .unwrap_or_else(|| other.to_string()),
         }
+    }
+
+    /// Configured terminal font size (px), falling back to the stock
+    /// mono size when unset.
+    pub fn terminal_font_size(&self) -> f32 {
+        self.terminal_font_size.unwrap_or(TERMINAL_FONT_SIZE_DEFAULT)
+    }
+
+    /// Configured terminal scrollback cap (lines), falling back to the
+    /// stock history when unset.
+    pub fn terminal_scrollback(&self) -> usize {
+        self.terminal_scrollback.unwrap_or(TERMINAL_SCROLLBACK_DEFAULT)
     }
 }
 
@@ -412,23 +404,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quoted_arguments_keep_spaces_and_empty_values() {
-        let mut cfg = Config::default();
-        cfg.shell.args = "--name 'two words' \"\" path\\ with\\ spaces".into();
-        assert_eq!(
-            cfg.cmd_for("terminal").unwrap().args,
-            ["--name", "two words", "", "path with spaces"]
-        );
-        cfg.shell.args = "'unfinished".into();
-        assert!(cfg.cmd_for("terminal").is_err());
-    }
-
-    #[test]
     fn older_settings_load_with_light_theme() {
         let cfg: Config = serde_json::from_str("{}").unwrap();
         assert!(!cfg.dark_theme);
         assert_eq!(cfg.new_session.kind, "terminal");
+        // A settings file from before the font-size key still gets the
+        // stock mono size, never a 0px fallback.
+        assert_eq!(cfg.terminal_font_size(), TERMINAL_FONT_SIZE_DEFAULT);
+        // Same for the scrollback cap: an old file without the key
+        // keeps the stock 3000-line history.
+        assert_eq!(cfg.terminal_scrollback(), TERMINAL_SCROLLBACK_DEFAULT);
     }
+
 
     #[test]
     fn removed_last_project_stays_removed() {

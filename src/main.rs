@@ -130,6 +130,10 @@ fn main() {
             cx,
         );
         Theme::global_mut(cx).font_size = px(14.);
+        // Terminal cells use the theme's mono size; `Theme::change`
+        // just reset it from the registry defaults, so re-apply the
+        // configured value (falls back to the stock 13px).
+        Theme::global_mut(cx).mono_font_size = px(config.terminal_font_size());
         // Where the main window lives, so the global ⌘Q fallback can
         // route through the window's confirm dialog + graceful shutdown.
         cx.set_global(ExitHook(None));
