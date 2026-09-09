@@ -35,8 +35,14 @@ License: Apache-2.0, GPL-free throughout. Design doc: `DESIGN.md`.
 
 ## Running — LaunchServices only (macOS 26)
 
-`scripts/ddu-app.sh` copies the release binary into `target/ddu.app` and
-`open`s it. Always launch this way.
+- Dev: `scripts/dev.sh` — builds, bundles `target/ddu-dev.app` as "Day Day
+  Up Dev" (`dev.just.ddu.dev`), isolates state under
+  `~/Library/Application Support/ddu-dev/`, then `open`s it.
+- Install: `scripts/install.sh [--open]` — builds and bundles straight
+  into `/Applications` as "Day Day Up" (`dev.just.ddu`; `DDU_INSTALL_DIR`
+  overrides). Shared builder: `scripts/make-bundle.sh`. The distinct
+  bundle ids let dev and installed run side by side without LaunchServices
+  activating the wrong one; `open` never mixes their state either.
 
 **Never** start the binary directly as a background child (`nohup`, `hub exec`,
 raw spawn) — on macOS 26 an unactivated process: (a) never gets
@@ -76,7 +82,7 @@ the footer when Enter should confirm. One-off informational dialogs
   granted here; synthetic clicks are NOT — no accessibility). Prove liveness
   by state change: edit a tracked file → right diff panel must show it within
   ~3 s; compare screenshot hashes across the change.
-- Settings window: `DDU_VERIFY_SETTINGS=<page_ix> bash scripts/ddu-app.sh`
+- Settings window: `DDU_VERIFY_SETTINGS=<page_ix> bash scripts/dev.sh`
   bakes the flag into the bundle launcher; the app then auto-opens the
   Settings window on that page (0-based) for screenshots. Relaunch without
   the env var to regenerate a clean launcher.

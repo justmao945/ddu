@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui_kit::component::*;
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -152,9 +153,9 @@ pub(crate) const WINDOW_MIN_HEIGHT: f32 = 400.;
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Global shortcuts: ⌘N new session, ⌘B sessions, ⌘T file tree,
-        // ⌘R changes, ⌘W close.
+        // ⌘R changes, ⌘W close. (⌘, OpenSettings lives at app level in
+        // main.rs so the Settings menu item can resolve its ⌘, hint.)
         cx.bind_keys([
-            KeyBinding::new("cmd-,", OpenSettings, None),
             // ⌘N spawns the default launcher in the active project
             // (guarded: with no projects there is nothing to spawn
             // into); ⌘O adds a project via the folder picker. ⌘T
@@ -370,6 +371,23 @@ impl AppView {
             }
         } else {
             this.spawn_session_of(&cfg.new_session.kind, window, cx);
+        }
+        // Dev hooks (synthetic clicks/keys aren't available in the
+        // harness environment; same spirit as DDU_VERIFY_SETTINGS):
+        // - DDU_VERIFY_EXIT=1 freezes the Exiting overlay right after
+        //   startup — flags set, nothing escalated, so the card stays
+        //   up for screenshot verification.
+        // - DDU_VERIFY_CLOSE=1 closes the current session through the
+        //   normal ⌘W path (request_close_session) a tick after the
+        //   restore, exercising single-session close headlessly.
+        if std::env::var_os("DDU_VERIFY_EXIT").is_some() {
+            this.shutting_down = true;
+        }
+        if std::env::var_os("DDU_VERIFY_CLOSE").is_some() {
+            cx.defer_in(window, |this, window, cx| {
+                let (p, six) = (this.current_project, this.current_session);
+                this.request_close_session(p, six, window, cx);
+            });
         }
         // Seed the diff pane from the restored current session —
         // selection, collapsed dirs and the tree-layer height are all
@@ -616,6 +634,14 @@ impl Render for AppView {
             // while agents are interrupted and their resume ids saved.
             .when(self.shutting_down, |el| {
                 let n = self.running_terms().len();
+                let detail = if n > 0 {
+                    format!(
+                        "Stopping {n} session{} and saving resume ids…",
+                        if n == 1 { "" } else { "s" }
+                    )
+                } else {
+                    "Saving session ids…".to_string()
+                };
                 el.child(
                     div()
                         .absolute()
@@ -624,16 +650,35 @@ impl Render for AppView {
                         .items_center()
                         .justify_center()
                         .bg(gpui_kit::black().opacity(0.45))
-                        .text_color(gpui_kit::white())
-                        .text_sm()
-                        .child(if n > 0 {
-                            format!(
-                                "Exiting — stopping {n} session{}…",
-                                if n == 1 { "" } else { "s" }
-                            )
-                        } else {
-                            "Exiting — saving session ids…".to_string()
-                        }),
+                        .child(
+                            // The card, not bare text: the message must
+                            // read at a glance while the window dies.
+                            v_flex()
+                                .items_center()
+                                .gap_2()
+                                .px_8()
+                                .py_6()
+                                .rounded_lg()
+                                .bg(cx.theme().popover)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .shadow_lg()
+                                .child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_base()
+                                        .text_color(cx.theme().popover_foreground)
+                                        .child(Spinner::new())
+                                        .child("Exiting…"),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(detail),
+                                ),
+                        ),
                 )
             })
     }

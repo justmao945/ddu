@@ -141,11 +141,18 @@ fn main() {
         // Application menu. The keymap binding for `Quit` (cmd-q) must
         // exist before the menu is built — the menu item resolves its
         // shortcut from the keymap — so it is registered at app level
-        // here. ⌘Q then routes through the window's confirm dialog →
-        // graceful shutdown, not AppKit's terminate (which this app's
-        // platform plumbing never completes).
-        cx.bind_keys([KeyBinding::new("cmd-q", app::Quit, None)]);
-        cx.set_menus([Menu::new("ddu").items(vec![MenuItem::action("Quit", app::Quit)])]);
+        // here. `OpenSettings` is too: `set_menus` runs before any window
+        // exists, so the per-window bindings in `AppView::new` are not yet
+        // in the keymap and the Settings item would lose its ⌘, hint.
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", app::Quit, None),
+            KeyBinding::new("cmd-,", app::OpenSettings, None),
+        ]);
+        cx.set_menus([Menu::new("ddu").items(vec![
+            MenuItem::action("Settings…", app::OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action("Quit", app::Quit),
+        ])]);
         // Global quit fallback: menu dispatch may not reach the window
         // view's action handlers (focus chain), so catch `Quit` here and
         // drive the window's view directly; a plain save+exit only when
@@ -174,7 +181,7 @@ fn main() {
         // guard latches on the window's occlusion state at creation, and a
         // background-launched (unactivated) process misses it — the window
         // then freezes after its first frame and no later activation
-        // recovers it (see scripts/ddu-app.sh comments).
+        // recovers it (see scripts/make-bundle.sh comments).
         cx.activate(true);
 
         open_main_window(cx);

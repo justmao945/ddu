@@ -2,13 +2,15 @@
 //! native window, opened from the title-bar gear or ⌘,. General
 //! (theme, default session) and Terminal (shell, font, scrollback)
 //! live here; future config appends as new pages.
+use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::IconName;
 use gpui_kit::component::Root;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::group_box::GroupBoxVariant;
-use gpui_kit::component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_kit::component::label::Label;
+use gpui_kit::component::setting::{RenderOptions, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -19,9 +21,50 @@ mod theme;
 // icons and tints from the ui root).
 pub(super) use crate::ui::{agent_icon, agent_menu_row, agent_tint};
 
-use self::shell::{default_session_field, shell_program_field};
+/// Width shared by every select-style control (theme, default session,
+/// shell program) so the three read as one right-aligned column.
+pub(super) const CONTROL_W: f32 = 220.;
+
+/// One settings row with a uniform anatomy: the title and its control
+/// share the first line (control right-aligned), and the description
+/// spans the full width beneath. The stock `SettingItem::Item` keeps
+/// the description beside the title on the left, so rows are rendered
+/// custom — search/reset behavior stays intact via the item keywords.
+pub(super) fn item<R, E>(title: &'static str, description: &'static str, control: R) -> SettingItem
+where
+    R: Fn(&RenderOptions, &mut Window, &mut App) -> E + 'static,
+    E: IntoElement + 'static,
+{
+    SettingItem::render(move |options, window, cx| {
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .child(Label::new(title).text_sm())
+                    // `flex_none` wrapper: controls like the spinner's
+                    // frame are `flex_1` and would otherwise grow to fill
+                    // the row instead of their own width.
+                    .child(div().flex_none().child(control(options, window, cx))),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(description),
+            )
+    })
+    .keywords([title, description])
+}
+
+use self::shell::{default_session_item, shell_program_item};
 use self::theme::{
-    terminal_font_field, terminal_scrollback_field, terminal_size_field, theme_field,
+    terminal_font_item, terminal_scrollback_item, terminal_size_item, theme_item,
 };
 pub(crate) use self::theme::bump_font_size;
 
@@ -54,6 +97,10 @@ impl Render for SettingsWindow {
             .track_focus(&self.focus)
             .key_context("SettingsWindow")
             .on_action(|_: &crate::app::CloseSettings, window, _| window.remove_window())
+            // Menu dispatch follows the focus chain — while the settings
+            // window itself is focused, "Settings…" lands here and just
+            // brings the existing window forward.
+            .on_action(|_: &crate::app::OpenSettings, _, cx| open(cx))
             // ⌘+/⌘− zoom the terminal font from the settings window too.
             .on_action(|_: &crate::app::FontLarger, _, cx| bump_font_size(1., cx))
             .on_action(|_: &crate::app::FontSmaller, _, cx| bump_font_size(-1., cx))
@@ -78,20 +125,11 @@ impl Render for SettingsWindow {
                         SettingPage::new("General")
                             .header_style(&page_header_style())
                             .icon(IconName::Settings)
+                            .group(SettingGroup::new().title("Appearance").item(theme_item()))
                             .group(
-                                SettingGroup::new().title("Appearance").item(
-                                    SettingItem::new("Theme", theme_field())
-                                        .description("Color scheme for the interface."),
-                                ),
-                            )
-                            .group(
-                                SettingGroup::new().title("Sessions").item(
-                                    SettingItem::new(
-                                        "Default type",
-                                        default_session_field(),
-                                    )
-                                    .description("What the sidebar + button creates."),
-                                ),
+                                SettingGroup::new()
+                                    .title("Sessions")
+                                    .item(default_session_item()),
                             ),
                     )
                     .page(
@@ -99,31 +137,20 @@ impl Render for SettingsWindow {
                             .header_style(&page_header_style())
                             .icon(IconName::SquareTerminal)
                             .group(
-                                SettingGroup::new().title("Shell").item(
-                                    SettingItem::new("Program", shell_program_field())
-                                        .layout(Axis::Vertical)
-                                        .description("Program for Terminal sessions."),
-                                ),
+                                SettingGroup::new()
+                                    .title("Shell")
+                                    .item(shell_program_item()),
                             )
                             .group(
                                 SettingGroup::new().title("Font").items([
-                                    SettingItem::new("Font", terminal_font_field())
-                                        .layout(Axis::Vertical)
-                                        .description(
-                                            "Typeface for all sessions. System default uses the platform monospace font.",
-                                        ),
-                                    SettingItem::new("Size", terminal_size_field()).description(
-                                        "Mono font size for all sessions, in points (8–32). ⌘+ / ⌘− zoom anywhere.",
-                                    ),
+                                    terminal_font_item(),
+                                    terminal_size_item(),
                                 ]),
                             )
                             .group(
-                                SettingGroup::new().title("Scrollback").item(
-                                    SettingItem::new("Lines", terminal_scrollback_field())
-                                        .description(
-                                            "Maximum history kept per session; older lines are dropped. Applies to new sessions.",
-                                        ),
-                                ),
+                                SettingGroup::new()
+                                    .title("Scrollback")
+                                    .item(terminal_scrollback_item()),
                             ),
                     ),
             )
@@ -146,16 +173,21 @@ pub(crate) fn button() -> impl IntoElement {
 }
 
 /// Open the settings window, or bring the existing one forward — the
-/// gear and ⌘, never spawn a duplicate.
+/// gear, ⌘, and the app-menu Settings item never spawn a duplicate.
 pub(crate) fn open(cx: &mut App) {
     let existing = cx
         .try_global::<SettingsWindowSlot>()
         .and_then(|slot| slot.0);
     if let Some(handle) = existing
-        && handle
-            .update(cx, |_, window, _| window.activate_window())
-            .is_ok()
+        // The window may be on the update stack — a menu/⌘, dispatch
+        // routed to the settings window itself arrives inside its own
+        // update, where `handle.update` fails ("window not found") even
+        // though the window is alive. In that case it is already being
+        // activated, so treat any live window as "already open" instead
+        // of falling through and spawning a duplicate.
+        && cx.windows().iter().any(|h| *h == handle)
     {
+        let _ = handle.update(cx, |_, window, _| window.activate_window());
         return;
     }
     // Centered on the primary display (gpui has no parent-relative

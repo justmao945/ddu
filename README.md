@@ -38,11 +38,12 @@ Requirements: macOS 13+ and a Rust toolchain. Agent sessions need the `claude` o
 ```sh
 git clone https://github.com/justmao945/ddu.git
 cd ddu
-cargo build --release
-scripts/ddu-app.sh
+scripts/dev.sh
 ```
 
-`scripts/ddu-app.sh` packages the release binary into `target/ddu.app` and opens it through LaunchServices — always launch the app this way. Set `DDU_DIR` to open a different workspace root (defaults to `~/Code/ddu`).
+`scripts/dev.sh` builds the release binary, packages it into `target/ddu-dev.app` as "Day Day Up Dev" (`dev.just.ddu.dev`), and opens it through LaunchServices — always launch the app this way. Dev state is isolated under `~/Library/Application Support/ddu-dev/`, so it never mixes with an installed copy's state. Set `DDU_DIR` to open a different workspace root (defaults to `~/Code/ddu`).
+
+To install the app into `/Applications` under the official identity ("Day Day Up", `dev.just.ddu`), run `scripts/install.sh` (add `--open` to launch it right away; `DDU_INSTALL_DIR` overrides the destination). The dev and installed bundles have different ids, so both can run side by side.
 
 ## Under the hood
 

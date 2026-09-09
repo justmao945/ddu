@@ -250,7 +250,9 @@ impl AppView {
         let Some(session) = self.projects.get(p).and_then(|pr| pr.sessions.get(six)) else {
             return;
         };
-        if !session.status.is_running() {
+        // Plain terminals skip the dialog too: a shell holds no
+        // conversation state, closing it needs no confirmation.
+        if !session.status.is_running() || session.kind == "terminal" {
             self.close_session(p, six, window, cx);
             return;
         }
@@ -287,9 +289,10 @@ impl AppView {
     /// gracefully: the escalation (Esc → 2×Ctrl-C → 2×Ctrl-D → kill)
     /// makes the child exit and print its resume banner; the id is
     /// captured and saved — and the row STAYS as a resumable Done
-    /// entry. A dead row has nothing left to save and is removed
-    /// outright; removing a current session shifts the selection to
-    /// the nearest neighbor.
+    /// entry. A plain terminal just gets one Ctrl-C (stops a
+    /// foreground job) before its PTY drops. Dead rows and closed
+    /// terminals are removed outright; removing a current session
+    /// shifts the selection to the nearest neighbor.
     pub(crate) fn close_session(
         &mut self,
         p: usize,
@@ -306,19 +309,53 @@ impl AppView {
             return;
         };
         if let (Some(term), true) = (&session.term, session.status.is_running()) {
-            // Save the resume id BEFORE the stop sequence: if the
-            // agent dies without printing its banner (the kill at the
-            // end of the escalation), the id from its earlier output
-            // is already on disk.
-            term.update(cx, |s, _| s.capture_resume_id());
-            self.persist(cx);
-            // The exit event persists the row again with the banner id.
-            Self::escalate_close(vec![term.clone()], cx);
-            cx.notify();
-            return;
+            if session.kind == "terminal" {
+                // Plain shell: nothing resumable at stake. One Ctrl-C
+                // stops a foreground job, then the PTY drops — no
+                // agent stop escalation; the row is removed at once.
+                crate::config::debug_log(&format!(
+                    "close: terminal ctrl-c + kill (row {}:{six})",
+                    p
+                ));
+                term.update(cx, |s, _| s.ctrl(0x03));
+                let term = term.clone();
+                cx.spawn(async move |this, cx| {
+                    // A beat so the Ctrl-C lands before the PTY dies.
+                    cx.background_executor()
+                        .timer(Duration::from_millis(200))
+                        .await;
+                    this.update(cx, |_, cx| term.update(cx, |s, _| s.kill()))?;
+                    anyhow::Ok(())
+                })
+                .detach();
+            } else {
+                // Save the resume id BEFORE the stop sequence: if the
+                // agent dies without printing its banner (the kill at
+                // the end of the escalation), the id from its earlier
+                // output is already on disk.
+                term.update(cx, |s, _| s.capture_resume_id());
+                self.persist(cx);
+                // The exit event persists the row again with the banner id.
+                Self::escalate_close(vec![term.clone()], cx);
+                cx.notify();
+                return;
+            }
         }
 
-        // Dead row: drop it.
+        // Dead rows and closed terminals: drop the row outright.
+        self.remove_session_row(p, six, window, cx);
+    }
+
+    /// Remove a session row outright — a dead one, or a terminal whose
+    /// PTY just got the stop. Removing the current session shifts the
+    /// selection to the nearest neighbor.
+    fn remove_session_row(
+        &mut self,
+        p: usize,
+        six: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let was_current = p == self.current_project && six == self.current_session;
         let became_empty;
         {
