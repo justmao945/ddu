@@ -8,6 +8,7 @@ use super::PANEL_HEADER_PX;
 use super::diff_tree::plus_minus;
 use crate::app::AppView;
 use crate::diff::{DiffFile, DiffLine};
+use gpui_kit::base::SelectableText;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
@@ -209,15 +210,9 @@ fn diff_line(id: usize, line: &DiffLine, cx: &mut Context<AppView>) -> impl Into
         .flex()
         .items_start()
         .min_w_full()
-        .font_family(mono)
+        .font_family(mono.clone())
         .text_xs()
         .when_some(tint, |el, tint| el.bg(tint))
-        // Double-click copies the raw line (no gutter chrome).
-        .on_click(move |ev, _, cx| {
-            if ev.click_count() == 2 {
-                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            }
-        })
         .child(gutter(old, cx))
         .child(gutter(new, cx))
         .child(
@@ -232,9 +227,21 @@ fn diff_line(id: usize, line: &DiffLine, cx: &mut Context<AppView>) -> impl Into
                 .flex_shrink_0()
                 .pl_2()
                 .pr_3()
-                .whitespace_nowrap()
-                .text_color(cx.theme().foreground.opacity(0.85))
-                .child(line.text.clone()),
+                // Each line's text is its own window-selection
+                // participant, ordered by `document_order`, so drag
+                // selection spans lines and ⌘C copies them joined
+                // with newlines (no gutter or sign in the copy).
+                .child(
+                    SelectableText::new(("diff-text", id), text)
+                        .document_order(id as u64)
+                        .text_style(TextStyleRefinement {
+                            font_family: Some(mono),
+                            font_size: Some(rems(0.75).into()),
+                            color: Some(cx.theme().foreground.opacity(0.85)),
+                            white_space: Some(WhiteSpace::Nowrap),
+                            ..Default::default()
+                        }),
+                ),
         )
 }
 
@@ -327,4 +334,190 @@ fn empty(text: &str, cx: &mut Context<AppView>) -> impl IntoElement {
         .text_color(cx.theme().foreground.opacity(0.4))
         // Wrap instead of clipping when the panel is narrow.
         .child(div().max_w_full().child(text.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::base::{ScrollbarMode, SelectableText, TextSelection, TextSelectionLayer};
+    use gpui_kit::component::theme::Theme;
+    use gpui_kit::base::v_flex;
+    use gpui_kit::{
+        Context, IntoElement, Modifiers, MouseButton, ParentElement, Render, Styled,
+        TestAppContext, TextStyleRefinement, WhiteSpace, Window, div, gpui, point, px, red,
+    };
+
+    /// The diff pane's line text: its own selection participant with
+    /// `document_order` in reading order, shaped exactly like the real
+    /// rows (mono, 12px, nowrap) so layout and copy mirror the surface.
+    fn line_text(order: usize, text: &str) -> impl IntoElement {
+        SelectableText::new(("diff-text", order), text)
+            .document_order(order as u64)
+            .text_style(TextStyleRefinement {
+                font_family: Some("Menlo".into()),
+                font_size: Some(px(12.).into()),
+                color: Some(red()),
+                white_space: Some(WhiteSpace::Nowrap),
+                ..Default::default()
+            })
+    }
+
+    struct DiffTextRoot;
+
+    impl Render for DiffTextRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(TextSelectionLayer).child(
+                v_flex()
+                    .child(div().w(px(300.)).h(px(20.)).child(line_text(0, "alpha beta")))
+                    .child(div().w(px(300.)).h(px(20.)).child(line_text(1, "gamma delta"))),
+            )
+        }
+    }
+
+    #[test]
+    fn drag_selection_spans_lines_and_copy_joins_with_newline() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 =
+                    TestAppContext::build(dispatcher, Some("diff_selection_selectable_text"));
+                let cx = &mut cx0;
+                let (_view, vcx) = cx.add_window_view(|_, _| DiffTextRoot);
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+
+                // Rows are pinned: line 1 at y∈[0,20), line 2 at
+                // y∈[20,40). Drag from line 1 into line 2: both
+                // participants project the band (the middle/mid lines
+                // come out whole — per-character projection is
+                // gpui-base's own contract), and the window selection
+                // joins the two lines with a newline in document order.
+                vcx.simulate_mouse_down(
+                    point(px(2.), px(3.)),
+                    MouseButton::Left,
+                    Modifiers::none(),
+                );
+                vcx.simulate_mouse_move(
+                    point(px(150.), px(25.)),
+                    Some(MouseButton::Left),
+                    Modifiers::none(),
+                );
+                vcx.simulate_mouse_up(
+                    point(px(150.), px(25.)),
+                    MouseButton::Left,
+                    Modifiers::none(),
+                );
+
+                let copied = vcx.update(|window, cx| TextSelection::selected_text(window, cx));
+                assert_eq!(copied, "alpha beta\ngamma delta");
+
+                // Clicking elsewhere clears the selection.
+                vcx.simulate_mouse_down(
+                    point(px(150.), px(200.)),
+                    MouseButton::Left,
+                    Modifiers::none(),
+                );
+                vcx.simulate_mouse_up(
+                    point(px(150.), px(200.)),
+                    MouseButton::Left,
+                    Modifiers::none(),
+                );
+                let cleared = vcx.update(|window, cx| TextSelection::selected_text(window, cx));
+                assert_eq!(cleared, "");
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    #[test]
+    fn selection_tracks_cursor_across_frame_loop() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 =
+                    TestAppContext::build(dispatcher, Some("diff_selection_frame_loop"));
+                let cx = &mut cx0;
+                let (_view, vcx) = cx.add_window_view(|_, _| DiffTextRoot);
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+
+                // A live drag is an interleaved (event → render) stream:
+                // each render re-registers the window-level selection
+                // listeners, so every move event lands and the selection
+                // follows the cursor step by step. (With stale listeners
+                // only the first move after a render would be handled,
+                // freezing the selection until an unrelated repaint.)
+                vcx.simulate_mouse_down(
+                    point(px(2.), px(3.)),
+                    MouseButton::Left,
+                    Modifiers::none(),
+                );
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                vcx.simulate_mouse_move(
+                    point(px(60.), px(3.)),
+                    Some(MouseButton::Left),
+                    Modifiers::none(),
+                );
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                vcx.simulate_mouse_move(
+                    point(px(60.), px(25.)),
+                    Some(MouseButton::Left),
+                    Modifiers::none(),
+                );
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                vcx.simulate_mouse_up(
+                    point(px(60.), px(25.)),
+                    MouseButton::Left,
+                    Modifiers::none(),
+                );
+
+                let copied = vcx.update(|window, cx| TextSelection::selected_text(window, cx));
+                assert_eq!(copied, "alpha beta\ngamma delta");
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    #[test]
+    fn startup_forces_hover_show_mode_on_base_scrollbars() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 =
+                    TestAppContext::build(dispatcher, Some("scrollbar_hover_show_mode"));
+                let cx = &mut cx0;
+                cx.update(|cx| {
+                    gpui_kit::init(cx);
+                    // Mirrors main.rs startup: theme change, then the
+                    // app-level scrollbar-mode override.
+                    Theme::change(Theme::global(cx).mode, None, cx);
+                    Theme::set_scrollbar_mode(ScrollbarMode::Hover, cx);
+                });
+
+                cx.update(|cx| {
+                    assert_eq!(Theme::global(cx).scrollbar_mode, ScrollbarMode::Hover);
+                    let base = gpui_kit::base::Theme::global(cx);
+                    assert_eq!(base.scrollbar.mode(), ScrollbarMode::Hover);
+                });
+            }),
+        );
+    }
+
 }

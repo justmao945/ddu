@@ -134,6 +134,14 @@ fn main() {
         // just reset it from the registry defaults, so re-apply the
         // configured value (falls back to the stock 13px).
         Theme::global_mut(cx).mono_font_size = px(config.terminal_font_size());
+        // Overlay scrollbars reveal on hover, macOS-style. The terminal's
+        // custom scrollbar already always hover-reveals; the Base scrollbars
+        // (diff tree, diff pane) default to `ScrollbarMode::Scrolling` (the
+        // gpui-component default / OS "when scrolling" setting), which shows
+        // only after a scroll — the pane's horizontal scrollbar then feels
+        // undiscoverable. `Theme::change` preserves this field, so the
+        // setting survives theme switches.
+        Theme::set_scrollbar_mode(gpui_kit::base::ScrollbarMode::Hover, cx);
         // Where the main window lives, so the global ⌘Q fallback can
         // route through the window's confirm dialog + graceful shutdown.
         cx.set_global(ExitHook(None));

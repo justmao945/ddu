@@ -9,6 +9,8 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use gpui_kit::base::input;
+use gpui_kit::base::{TextSelection, TextSelectionLayer};
 use gpui_kit::component::*;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -104,6 +106,14 @@ pub struct AppView {
     /// The tree-selected file driving the right pane; `None` shows the
     /// pane's empty state. Clicking a file sets this and opens the pane.
     pub(crate) diff_file: Option<usize>,
+    /// Left-button drag in progress (window-level). The
+    /// `TextSelectionLayer` picks up mouse events through
+    /// `Window::on_mouse_event`, whose listeners exist only for one
+    /// frame after a render — they die unless the window keeps
+    /// repainting. Keeping the gesture alive with a refresh on every
+    /// move (terminals do the same via element callbacks, which are
+    /// persistent) is what makes diff drag-selection track the cursor.
+    pub(crate) selection_active: bool,
     /// Persisted selected-file path, pinned against the first loaded
     /// diff (files move between sessions), then cleared.
     pub(crate) diff_seed_path: Option<String>,
@@ -193,6 +203,10 @@ impl AppView {
             // ⌘C copies the mouse selection when one exists (the
             // handler propagates otherwise); PTYs never see it.
             KeyBinding::new("cmd-c", TermCopy, Some("Terminal")),
+            // Outside the terminal, ⌘C copies the active diff-pane
+            // text selection (window-scoped `TextSelection`); the
+            // handler propagates when nothing is selected.
+            KeyBinding::new("cmd-c", input::Copy, None),
             // The standalone settings window: Escape/⌘W close it (the
             // deeper context beats the global ⌘W → CloseSession).
             KeyBinding::new("escape", CloseSettings, Some("SettingsWindow")),
@@ -246,6 +260,7 @@ impl AppView {
             last_sidebar_size: None,
             last_diff_size: None,
             diff_file: None,
+            selection_active: false,
             diff_seed_path: None,
             diff_tree_height_seed: None,
             session_seq: 0,
@@ -470,6 +485,38 @@ impl Render for AppView {
             .track_focus(&self.window_focus)
             .size_full()
             .bg(cx.theme().background)
+            // Left-drag gesture fence: keep the window repainting while a
+            // selection drag is in flight. `TextSelectionLayer` observes
+            // mouse events via `Window::on_mouse_event`, whose listeners
+            // live only for one frame after a render — without a steady
+            // frame stream the remaining move events of a drag are dropped
+            // and selection freezes until some unrelated repaint. Terminal
+            // selection uses persistent element callbacks, so it never had
+            // this problem; this fence gives the window-level listeners the
+            // same continuous frame stream.
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, _| {
+                    this.selection_active = true;
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, window, _| {
+                if this.selection_active {
+                    window.refresh();
+                }
+            }))
+            .on_mouse_up(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| {
+                    this.selection_active = false;
+                }),
+            )
+            .on_mouse_up_out(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| {
+                    this.selection_active = false;
+                }),
+            )
             .on_action(cx.listener(|_, _: &OpenSettings, _, cx| ui::settings::open(cx)))
             .on_action(|_: &FontLarger, _, cx| ui::settings::bump_font_size(1., cx))
             .on_action(|_: &FontSmaller, _, cx| ui::settings::bump_font_size(-1., cx))
@@ -536,6 +583,21 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &Quit, window, cx| {
                 this.request_quit(window, cx);
             }))
+            // ⌘C outside the terminal: copy the diff pane's window
+            // text selection (the terminal has its own TermCopy path
+            // via its deeper key context).
+            .on_action(|_: &input::Copy, window, cx| {
+                let text = TextSelection::selected_text(window, cx);
+                if text.is_empty() {
+                    cx.propagate();
+                    return;
+                }
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            })
+            // Window-scoped text selection (the diff pane's
+            // `SelectableText` runs register here). Must prepaint
+            // before any of them — first child of the root.
+            .child(TextSelectionLayer)
             .child(ui::title_bar::render(self, cx))
             .child({
                 // Two nested splitters. The sidebar column owns a status
