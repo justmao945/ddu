@@ -18,16 +18,22 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         .min_w_0()
         .bg(cx.theme().background)
         .child(match this.current_term() {
-            Some(term) => surface(term, cx).into_any_element(),
+            Some(term) => surface(this, term, cx).into_any_element(),
             None => empty_state(this, cx).into_any_element(),
         })
 }
 
 /// The focus-tracked terminal surface for one live session.
-fn surface(term: Entity<TermSession>, cx: &mut Context<AppView>) -> impl IntoElement {
+fn surface(
+    this: &AppView,
+    term: Entity<TermSession>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let focus = term.read(cx).focus.clone();
     let exited = term.read(cx).exit();
-    let resume_id = term.read(cx).resume_id().map(String::from);
+    // The live run's own id wins; a run that never printed one still
+    // offers the row's earlier conversation.
+    let resume_id = this.current_resume_id(cx);
     let weak = term.downgrade();
 
     div()
@@ -446,7 +452,7 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     // its Resume action from here — the PTY never came back.
     let can_resume = this
         .current_session()
-        .and_then(|s| s.cmd.resume.clone())
+        .and_then(|s| s.resume_id.clone())
         .is_some();
     let resumed_label = this
         .current_session()

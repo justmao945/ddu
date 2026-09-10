@@ -30,52 +30,7 @@ impl AppView {
                 s.diff_tree_height = Some(h);
             }
         }
-        let mut snapshot = cx.global::<crate::config::State>().clone();
-        snapshot.hidden_sessions = !self.show_sessions;
-        snapshot.sidebar_width = self.last_sidebar_size.map(|w| w.as_f32());
-        snapshot.diff_width = self.last_diff_size.map(|w| w.as_f32());
-        snapshot.current_project = self.current_project;
-        snapshot.show_diff = self.show_diff;
-        snapshot.show_diff_tree = self.show_diff_tree;
-        snapshot.window = self.window_placement;
-        // Always `Some` once this window persists: the saved list
-        // (even empty) is the authoritative workspace on next launch.
-        snapshot.projects = Some(
-            self.projects
-                .iter()
-                .zip(&self.expanded)
-                .map(|(p, ex)| crate::config::ProjectConfig {
-                    name: p.name.clone(),
-                    path: p.path.clone(),
-                    expanded: *ex,
-                    // The whole session list survives the restart. The
-                    // resume id comes from the agent's captured output
-                    // (the live id beats a stale command hint).
-                    sessions: p
-                        .sessions
-                        .iter()
-                        .map(|s| crate::config::SavedSession {
-                            kind: s.kind.clone(),
-                            title: s.title.clone(),
-                            resume: s
-                                .term
-                                .as_ref()
-                                .and_then(|t| {
-                                    // Agents keep running at window close:
-                                    // scan the output tail now, or the
-                                    // next launch has nothing to resume.
-                                    t.update(cx, |term, _| term.capture_resume_id());
-                                    t.read(cx).resume_id().map(String::from)
-                                })
-                                .or_else(|| s.cmd.resume.clone()),
-                            selected_file: s.diff_selected.clone(),
-                            closed_dirs: s.diff_closed.iter().cloned().collect(),
-                            tree_height: s.diff_tree_height,
-                        })
-                        .collect(),
-                })
-                .collect(),
-        );
+        let snapshot = self.snapshot(cx);
         crate::config::debug_log(&format!(
             "persist: sessions={:?} current=({},{})",
             snapshot
@@ -96,14 +51,75 @@ impl AppView {
         cx.set_global(snapshot);
     }
 
+    /// The workspace as it goes to disk: every project with its session
+    /// rows (a row still running is marked `live` so the next launch
+    /// spawns it again), the panel geometry and the window frame.
+    pub(super) fn snapshot(&self, cx: &mut App) -> crate::config::State {
+        let mut snapshot = cx.global::<crate::config::State>().clone();
+        snapshot.hidden_sessions = !self.show_sessions;
+        snapshot.sidebar_width = self.last_sidebar_size.map(|w| w.as_f32());
+        snapshot.diff_width = self.last_diff_size.map(|w| w.as_f32());
+        snapshot.current_project = self.current_project;
+        snapshot.show_diff = self.show_diff;
+        snapshot.show_diff_tree = self.show_diff_tree;
+        snapshot.window = self.window_placement;
+        // Always `Some` once this window persists: the saved list
+        // (even empty) is the authoritative workspace on next launch.
+        snapshot.projects = Some(
+            self.projects
+                .iter()
+                .zip(&self.expanded)
+                .map(|(p, ex)| crate::config::ProjectConfig {
+                    name: p.name.clone(),
+                    path: p.path.clone(),
+                    expanded: *ex,
+                    // The whole session list survives the restart, with
+                    // the rows that were still running marked `live` so
+                    // the next launch spawns them again. An agent's id
+                    // comes from its captured output (the live id beats
+                    // the row's last known one); shells never carry one.
+                    sessions: p
+                        .sessions
+                        .iter()
+                        .map(|s| crate::config::SavedSession {
+                            kind: s.kind.clone(),
+                            title: s.title.clone(),
+                            resume: if s.is_agent() {
+                                s.term
+                                    .as_ref()
+                                    .and_then(|t| {
+                                        // Agents keep running at window
+                                        // close: scan the output tail
+                                        // now, or the next launch has
+                                        // nothing to resume.
+                                        t.update(cx, |term, _| term.capture_resume_id());
+                                        t.read(cx).resume_id().map(String::from)
+                                    })
+                                    .or_else(|| s.resume_id.clone())
+                            } else {
+                                None
+                            },
+                            live: Some(s.status.is_running() || s.was_live),
+                            selected_file: s.diff_selected.clone(),
+                            closed_dirs: s.diff_closed.iter().cloned().collect(),
+                            tree_height: s.diff_tree_height,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        );
+        snapshot
+    }
+
     /// Rebuild every project's session rows from the persisted
-    /// snapshot. Agents restore as `Done` rows carrying their resume
-    /// id (the selected one auto-resumes from [`Self::new`]); shell
-    /// rows respawn live in the project the window opens on — a shell
-    /// persists nothing but its existence, so a fresh one matches the
-    /// pre-close state — and idle as restartable `Done` rows in the
-    /// other projects. Rows whose launcher kind was removed from the
-    /// settings are dropped; the selection clamps to what remains.
+    /// snapshot. A row that was still running when the workspace was
+    /// last saved (`live`) comes back running in its own project — an
+    /// agent resumed with its captured conversation id, a shell fresh
+    /// (a shell persists nothing but its existence, so a fresh one
+    /// matches the pre-close state). Rows that had already finished
+    /// restore as `Done` rows waiting for a click. Rows whose launcher
+    /// kind was removed from the settings are dropped; the selection
+    /// clamps to what remains.
     pub(super) fn restore_sessions(
         &mut self,
         state: &crate::config::State,
@@ -124,7 +140,16 @@ impl AppView {
                     p.name,
                     p.sessions
                         .iter()
-                        .map(|s| format!("{}@{}", s.kind, s.resume.as_deref().unwrap_or("-")))
+                        .map(|s| format!(
+                            "{}@{}{}",
+                            s.kind,
+                            s.resume.as_deref().unwrap_or("-"),
+                            match s.live {
+                                Some(true) => "+live",
+                                Some(false) => "+done",
+                                None => "",
+                            }
+                        ))
                         .collect::<Vec<_>>()
                         .join(",")
                 ))
@@ -153,72 +178,57 @@ impl AppView {
                 let tree_height = s
                     .tree_height
                     .filter(|h| *h >= TREE_MIN_H && *h <= TREE_MAX_H);
-                if s.kind == "terminal" {
-                    let live = ix == current;
-                    let (status, term) = if live {
-                        match TermSession::spawn(&cmd.spec(&cwd), cx) {
-                            Ok(term) => {
-                                let program = cmd.program.clone();
-                                cx.subscribe_in(
-                                    &term,
-                                    window,
-                                    move |this, emitter, event: &TermEvent, window, cx| match event
-                                    {
-                                        TermEvent::Wakeup => cx.notify(),
-                                        TermEvent::Exit(code) => this.on_session_exit(
-                                            emitter.clone(),
-                                            *code,
-                                            &program,
-                                            window,
-                                            cx,
-                                        ),
-                                    },
-                                )
-                                .detach();
-                                (AgentStatus::Running, Some(term))
-                            }
-                            Err(err) => {
-                                eprintln!("[ddu] Failed to restore {}: {err}", cmd.label());
-                                (AgentStatus::Error(err.to_string()), None)
-                            }
+                let (status, term) = if restores_running(&s, ix == current) {
+                    let spec = match s.resume.as_deref() {
+                        Some(id) if s.kind != "terminal" => cmd.resume_spec(&cwd, id),
+                        _ => cmd.spec(&cwd),
+                    };
+                    match TermSession::spawn(&spec, cx) {
+                        Ok(term) => {
+                            let program = cmd.program.clone();
+                            cx.subscribe_in(
+                                &term,
+                                window,
+                                move |this, emitter, event: &TermEvent, window, cx| match event {
+                                    TermEvent::Wakeup => cx.notify(),
+                                    TermEvent::Exit(code) => this.on_session_exit(
+                                        emitter.clone(),
+                                        *code,
+                                        &program,
+                                        window,
+                                        cx,
+                                    ),
+                                },
+                            )
+                            .detach();
+                            (AgentStatus::Running, Some(term))
                         }
-                    } else {
-                        (AgentStatus::Done(0), None)
-                    };
-                    project.sessions.push(crate::session::AgentSession {
-                        id: format!("restored-{ix}-{seq}"),
-                        title: s.title.clone(),
-                        status,
-                        cmd,
-                        kind: s.kind,
-                        started: now,
-                        ended: if term.is_none() { Some(now) } else { None },
-                        term,
-                        cwd,
-                        diff_selected: selected,
-                        diff_closed: closed,
-                        diff_tree_height: tree_height,
-                    });
+                        Err(err) => {
+                            eprintln!("[ddu] Failed to restore {}: {err}", cmd.label());
+                            (AgentStatus::Error(err.to_string()), None)
+                        }
+                    }
                 } else {
-                    let cmd = match &s.resume {
-                        Some(id) => cmd.with_resume(id.clone()),
-                        None => cmd,
-                    };
-                    project.sessions.push(crate::session::AgentSession {
-                        id: format!("restored-{ix}-{seq}"),
-                        title: s.title.clone(),
-                        status: AgentStatus::Done(0),
-                        cmd,
-                        kind: s.kind,
-                        started: now,
-                        ended: Some(now),
-                        term: None,
-                        cwd,
-                        diff_selected: selected,
-                        diff_closed: closed,
-                        diff_tree_height: tree_height,
-                    });
-                }
+                    (AgentStatus::Done(0), None)
+                };
+                project.sessions.push(crate::session::AgentSession {
+                    id: format!("restored-{ix}-{seq}"),
+                    title: s.title.clone(),
+                    status,
+                    cmd,
+                    resume_id: s.resume.clone(),
+                    // A row that comes back running is live in its own
+                    // right now; `status` carries that until a close.
+                    was_live: false,
+                    kind: s.kind,
+                    started: now,
+                    ended: if term.is_none() { Some(now) } else { None },
+                    term,
+                    cwd,
+                    diff_selected: selected,
+                    diff_closed: closed,
+                    diff_tree_height: tree_height,
+                });
             }
         }
         self.session_seq = seq;
@@ -272,5 +282,198 @@ impl AppView {
             });
         })
         .detach();
+    }
+}
+
+/// Whether a persisted row comes back running on this launch: it was
+/// live at the last close. Workspaces saved before the `live` flag
+/// existed carry `None`, and there a shell in the project the window
+/// opens on still respawns — its long-standing behavior (a shell
+/// persists nothing but its existence, so a fresh one matches the
+/// pre-close state); agents of such files stay `Done` rows, since a
+/// finished conversation must not start on its own.
+fn restores_running(s: &crate::config::SavedSession, opening_project: bool) -> bool {
+    match s.live {
+        Some(live) => live,
+        None => s.kind == "terminal" && opening_project,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::SavedSession;
+
+    fn row(kind: &str, resume: Option<&str>, live: bool) -> SavedSession {
+        SavedSession {
+            kind: kind.into(),
+            title: kind.into(),
+            resume: resume.map(String::from),
+            live: Some(live),
+            selected_file: None,
+            closed_dirs: vec![],
+            tree_height: None,
+        }
+    }
+
+    /// A workspace saved before the flag existed: no liveness on any row.
+    fn legacy_row(kind: &str) -> SavedSession {
+        SavedSession {
+            live: None,
+            ..row(kind, None, false)
+        }
+    }
+
+    /// The user-visible contract of a launch: everything that was still
+    /// running comes back running, in every project, and nothing that
+    /// had finished starts on its own.
+    #[test]
+    fn only_rows_that_were_live_come_back_running() {
+        // Live agent: back, with the conversation to resume.
+        assert!(super::restores_running(
+            &row("omp", Some("01a075e1-346f-7b92-b832-745a71ee00ed"), true),
+            false
+        ));
+        // Live agent whose id never got captured: back as a fresh chat.
+        assert!(super::restores_running(&row("claude", None, true), false));
+        // Finished agent: stays a Done row, even when selected.
+        assert!(!super::restores_running(
+            &row("omp", Some("01a075e1-346f-7b92-b832-745a71ee00ed"), false),
+            true
+        ));
+        // Live shell in a background project: back too.
+        assert!(super::restores_running(&row("terminal", None, true), false));
+        // A shell the user exited stays exited — the explicit `false`
+        // must beat the legacy rule below, or every launch resurrects
+        // rows nobody asked for.
+        assert!(!super::restores_running(&row("terminal", None, false), true));
+    }
+
+    /// Workspaces written before the `live` flag know nothing about
+    /// liveness: the shell in the project the window opens on respawns
+    /// as it always did, everything else waits.
+    #[test]
+    fn legacy_workspaces_keep_their_old_launch_behavior() {
+        assert!(super::restores_running(&legacy_row("terminal"), true));
+        assert!(!super::restores_running(&legacy_row("terminal"), false));
+        assert!(!super::restores_running(&legacy_row("omp"), true));
+    }
+
+    /// End to end through the real launch path. Every row that was
+    /// running when the workspace was saved comes back running — in
+    /// whichever project, not just the one the window opens on — while a
+    /// row that had already finished stays a `Done` row carrying its
+    /// conversation, even when it is the selected one. The saved
+    /// snapshot then marks the same liveness again, so the behavior
+    /// repeats every launch.
+    #[test]
+    fn a_live_row_restores_running_and_is_saved_live_again() {
+        use crate::app::AppView;
+        use crate::config::{Config, ProjectConfig, ShellConfig, State};
+        use crate::session::AgentStatus;
+        use gpui_kit::{TestAppContext, gpui};
+
+        let dir = std::env::temp_dir().join("ddu-restore-test");
+        let agent_id = "01a075e1-346f-7b92-b832-745a71ee00ed";
+        let finished_agent = SavedSession {
+            kind: "omp".into(),
+            title: "omp".into(),
+            resume: Some(agent_id.into()),
+            live: Some(false),
+            selected_file: None,
+            closed_dirs: vec![],
+            tree_height: None,
+        };
+        // A shell in a project the window does NOT open on: the old
+        // restore left those as `Done` rows, which is exactly the
+        // "click Resume to start it" complaint.
+        let live_shell = SavedSession {
+            kind: "terminal".into(),
+            title: "zsh".into(),
+            resume: None,
+            live: Some(true),
+            selected_file: None,
+            closed_dirs: vec![],
+            tree_height: None,
+        };
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let mut cx0 = TestAppContext::build(dispatcher, Some("restore_live_rows"));
+                let cx = &mut cx0;
+                cx.update(gpui_kit::init);
+                cx.update(|cx| {
+                    // `cat` keeps the restored shell trivially alive;
+                    // the agent row never spawns, so its real binary is
+                    // moot.
+                    cx.set_global(Config {
+                        shell: ShellConfig {
+                            program: "cat".into(),
+                        },
+                        ..Default::default()
+                    });
+                    cx.set_global(crate::config::LoadWarnings(vec![]));
+                    cx.set_global(State {
+                        projects: Some(vec![
+                            ProjectConfig {
+                                name: "ddu".into(),
+                                path: dir.clone(),
+                                expanded: true,
+                                sessions: vec![finished_agent],
+                            },
+                            ProjectConfig {
+                                name: "other".into(),
+                                path: dir.clone(),
+                                expanded: true,
+                                sessions: vec![live_shell],
+                            },
+                        ]),
+                        ..Default::default()
+                    });
+                });
+                let (view, vcx) = cx.add_window_view(|window, cx| AppView::new(window, cx));
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                let (dead, live) = vcx.update(|_, cx| {
+                    let v = view.read(cx);
+                    (
+                        v.projects[0].sessions[0].clone(),
+                        v.projects[1].sessions[0].clone(),
+                    )
+                });
+                assert!(live.term.is_some(), "the live shell comes back");
+                assert_eq!(live.status, AgentStatus::Running);
+                assert!(dead.term.is_none(), "the finished agent stays put");
+                assert_eq!(dead.status, AgentStatus::Done(0));
+                assert_eq!(
+                    dead.resume_id.as_deref(),
+                    Some(agent_id),
+                    "its conversation stays resumable"
+                );
+
+                // The next save records the liveness that this launch
+                // sees: the running shell stays `live`, the finished
+                // agent does not.
+                let saved = vcx.update(|_, cx| view.update(cx, |v, cx| v.snapshot(cx)));
+                let projects = saved.projects.as_ref().unwrap();
+                assert_eq!(projects[0].sessions[0].live, Some(false), "finished stays finished");
+                assert_eq!(
+                    projects[0].sessions[0].resume.as_deref(),
+                    Some(agent_id),
+                    "the conversation id survives the save"
+                );
+                assert_eq!(
+                    projects[1].sessions[0].live,
+                    Some(true),
+                    "the running shell is saved live"
+                );
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
     }
 }

@@ -20,9 +20,10 @@ License: Apache-2.0, GPL-free throughout. Design docs: `docs/DESIGN.md` (the app
   `~/Library/Application Support/ddu/`: `settings.json` (user
   settings, one-to-one with the Settings window) and `state.json`
   (runtime workspace snapshot: projects, panel widths, per-project
-  diff state, last agent resume hint). Loads/saves check errors;
-  corrupt files are backed up with `.corrupt-<ts>` and defaults are
-  used.
+  diff state, last agent resume hint, and per-row `live` — the rows
+  still running at the last save, which the next launch respawns).
+  Loads/saves check errors; corrupt files are backed up with
+  `.corrupt-<ts>` and defaults are used.
 - `src/diff/` — `git.rs` git2 working-tree diff (cap 5000 lines/file), polled
   with a seq guard against stale results; `mod.rs` data model.
 - `src/terminal/` — `mod.rs` portable-pty pump + subscriber-channel wakeup
@@ -92,8 +93,22 @@ the footer when Enter should confirm. One-off informational dialogs
 
 - Single GPUI import surface: `use gpui_kit::*;` plus specific component
   modules. Never invent gpui APIs; follow gpui-kit/gpui-component sources.
+- Scroll regions: the `.vertical_scrollbar(...)` host must be an un-padded
+  ancestor, never the tracked element itself — the overlay is an
+  `absolute inset_0` CHILD of whatever hosts it, so hosting it on a
+  padded `track_scroll` element counts that padding as content and leaves
+  phantom scroll range (a scrollbar over a list that fits). That host
+  must also be a flex container (`v_flex`), or the `flex_1` scroller
+  inside never gets a bounded height and long content is clipped instead
+  of scrolling.
 - Terminal wakeups flow as `PumpMsg` events through a subscriber channel;
   never poll-render.
+- Sidebar hover slots (`hovered_session`/`hovered_project`) update through
+  `session_panel::toggle_hover`, never by assigning in the `on_hover`
+  callback: mouse listeners bubble in reverse paint order, so the row
+  being left reports its leave AFTER the row being entered reports hover —
+  an unconditional clear drops the fresh entry and the row's action
+  buttons never appear while moving down the list.
 - Global shortcuts live in `AppView::new` (`src/app.rs`): ⌘T/⌘N new
   session (same action, guarded against an empty workspace), ⌘O add
   project (shares `add_project`'s folder-picker flow), ⌘,/⌘B/⌘R/⌘W.

@@ -17,6 +17,30 @@ use crate::session::{AgentSession, AgentStatus};
 /// Height of a two-line session row.
 const SESSION_ROW_PX: f32 = 40.;
 
+/// Update a shared hover slot from one element's `on_hover` callback,
+/// returning whether it changed (i.e. whether a repaint is needed).
+///
+/// gpui's hover set is inclusive, but mouse listeners bubble in REVERSE
+/// paint order: moving the pointer from row A to row B fires B's enter
+/// *before* A's leave. A leave that cleared the slot unconditionally
+/// would stomp the fresh entry (and B's action button, mounted from the
+/// slot, would never appear when moving down the list). So a leave only
+/// clears the slot while it still names the leaving row.
+fn toggle_hover<T: Copy + PartialEq>(slot: &mut Option<T>, hovering: bool, target: T) -> bool {
+    if hovering {
+        if *slot == Some(target) {
+            return false;
+        }
+        *slot = Some(target);
+        true
+    } else if *slot == Some(target) {
+        *slot = None;
+        true
+    } else {
+        false
+    }
+}
+
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     // Two layers split by a draggable divider: the project/session
     // tree on top (takes the leftover height), the diff file tree
@@ -42,10 +66,27 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                 // leaves.
                 .child(
                     resizable_panel().child(
-                        div()
+                        // A flex column, not a plain `div()`: the tree
+                        // below is a `flex_1` item, and only a flex
+                        // parent actually constrains it to the panel
+                        // height — otherwise it grew to its content and
+                        // a long session list was clipped instead of
+                        // scrolling.
+                        v_flex()
+                            .relative()
                             .size_full()
                             .min_h_0()
                             .overflow_hidden()
+                            // The scrollbar overlay lives on this
+                            // wrapper, NOT on the tracked element: an
+                            // absolutely positioned overlay is counted
+                            // as scrolled content, and with the
+                            // wrapper's padding measured a second time
+                            // it left the tree a phantom ~16px of
+                            // scroll range — a scrollbar over a list
+                            // that does not overflow. Same shape as the
+                            // diff tree's host below.
+                            .vertical_scrollbar(&this.sessions_scroll)
                             .child(tree(this, cx)),
                     ),
                 )
@@ -84,7 +125,6 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .min_h_0()
         .overflow_y_scroll()
         .track_scroll(&this.sessions_scroll)
-        .vertical_scrollbar(&this.sessions_scroll)
         .p_2()
         .gap_0p5()
         .children((0..this.projects.len()).map(move |p| {
@@ -114,9 +154,7 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                         .cursor_pointer()
                         .hover(move |el| el.bg(hov_bg))
                         .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
-                            let next = if *hovering { Some(p) } else { None };
-                            if this.hovered_project != next {
-                                this.hovered_project = next;
+                            if toggle_hover(&mut this.hovered_project, *hovering, p) {
                                 cx.notify();
                             }
                         }))
@@ -252,9 +290,7 @@ fn session_row(
             }
         })
         .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
-            let next = if *hovering { Some((p, six)) } else { None };
-            if this.hovered_session != next {
-                this.hovered_session = next;
+            if toggle_hover(&mut this.hovered_session, *hovering, (p, six)) {
                 cx.notify();
             }
         }))
@@ -445,4 +481,101 @@ fn more_menu(_this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoE
                 });
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toggle_hover;
+
+    /// Moving down the list: the entered row reports hover first, the
+    /// row being left reports its leave afterwards (reverse paint
+    /// order). The stale leave must not clear the fresh slot — that is
+    /// exactly how a row lost its Close button.
+    #[test]
+    fn stale_leave_does_not_clear_a_fresh_hover_slot() {
+        let mut slot: Option<(usize, usize)> = None;
+        assert!(toggle_hover(&mut slot, true, (0, 2)));
+        assert!(!toggle_hover(&mut slot, false, (0, 0)), "stale leave");
+        assert_eq!(slot, Some((0, 2)), "the entered row keeps the slot");
+
+        // A repeated enter changes nothing.
+        assert!(!toggle_hover(&mut slot, true, (0, 2)));
+        // The row's own leave does clear it.
+        assert!(toggle_hover(&mut slot, false, (0, 2)));
+        assert_eq!(slot, None);
+        // Leaving twice (or leaving a row that never had it) is a no-op.
+        assert!(!toggle_hover(&mut slot, false, (0, 2)));
+    }
+
+    /// The sidebar's scroll range must match the list, not the panel's
+    /// own padding: a handful of rows that fit the panel scrolls by
+    /// zero (a scrollbar there is the bug), while a list taller than
+    /// the panel scrolls by the real overflow instead of growing past
+    /// the panel and being clipped.
+    #[test]
+    fn session_tree_scroll_range_follows_the_list() {
+        use crate::app::AppView;
+        use crate::config::{Config, ProjectConfig, SavedSession, State};
+        use gpui_kit::base::ScrollbarMode;
+        use gpui_kit::component::theme::Theme;
+        use gpui_kit::{Entity, TestAppContext, gpui};
+
+        fn saved_agent() -> SavedSession {
+            SavedSession {
+                kind: "omp".into(),
+                title: "omp".into(),
+                resume: None,
+                live: Some(false),
+                selected_file: None,
+                closed_dirs: vec![],
+                tree_height: None,
+            }
+        }
+
+        /// Build a window whose only project holds `sessions` finished
+        /// agent rows (no PTYs are spawned) and report the tree's
+        /// maximum scroll offset.
+        fn scroll_range(cx: &mut TestAppContext, sessions: usize) -> f32 {
+            cx.update(|cx| {
+                cx.set_global(Config::default());
+                cx.set_global(crate::config::LoadWarnings(vec![]));
+                cx.set_global(State {
+                    projects: Some(vec![ProjectConfig {
+                        name: "p".into(),
+                        path: std::env::temp_dir().join("ddu-sidebar-test"),
+                        expanded: true,
+                        sessions: (0..sessions).map(|_| saved_agent()).collect(),
+                    }]),
+                    ..Default::default()
+                });
+            });
+            let (view, vcx): (Entity<AppView>, _) =
+                cx.add_window_view(|window, cx| AppView::new(window, cx));
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            f32::from(vcx.update(|_, cx| view.read(cx).sessions_scroll.max_offset().y))
+        }
+
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 = TestAppContext::build(dispatcher, Some("sidebar_scroll_range"));
+                let cx = &mut cx0;
+                cx.update(gpui_kit::init);
+                cx.update(|cx| {
+                    Theme::set_scrollbar_mode(ScrollbarMode::Hover, cx);
+                });
+                // Three rows sit far inside any panel: nothing to scroll.
+                assert_eq!(scroll_range(cx, 3), 0.);
+                // Forty rows overflow it: the tree scrolls by the overflow.
+                assert!(scroll_range(cx, 40) > 0.);
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
 }

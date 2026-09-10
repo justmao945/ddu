@@ -13,9 +13,9 @@
 - **Three-pane workspace** — projects and agent sessions on the left, a real terminal in the center, the project's live git diff on the right. Panes are resizable; the side panels collapse when you don't need them.
 - **Real terminals, not a text box** — every session runs in a PTY with streaming ANSI color, scrollback, and live resize, so agent CLIs behave exactly as they do in your shell.
 - **Live git diff** — working tree vs. HEAD: modified, staged, and untracked files with per-file `+`/`−` stats and the current branch, refreshed automatically as your agents edit.
-- **Session lifecycle** — spawn, kill, and restart sessions; get notified when an agent exits or fails. ddu keeps each session's conversation id, so an agent chat can be resumed later (`claude --resume` / `codex resume`).
+- **Session lifecycle** — spawn, kill, and restart sessions; get notified when an agent exits or fails. ddu keeps each session's conversation id, so an agent chat can be resumed later (`claude --resume` / `codex resume`) — and the sessions that were still running when you quit come back running on the next launch, agents resumed from that id.
 - **Settings window** — theme, shell, and terminal font, in a dedicated window (`⌘,`).
-- **Persistent workspace** — projects, panel layout, and per-project diff state survive relaunches (`~/Library/Application Support/ddu/`).
+- **Persistent workspace** — projects, panel layout, and per-project diff state survive relaunches (`~/Library/Application Support/ddu/`), and every session that was still running is started again.
 
 ## Keyboard shortcuts
 

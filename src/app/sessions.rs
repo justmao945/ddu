@@ -101,6 +101,8 @@ impl AppView {
                 title,
                 status,
                 cmd,
+                resume_id: None,
+                was_live: false,
                 kind: kind.to_string(),
                 started: std::time::Instant::now(),
                 ended: if term.is_none() {
@@ -216,8 +218,13 @@ impl AppView {
                     matched = true;
                     session.status = status.clone();
                     session.ended = Some(ended);
-                    // The resume id stays on the term; `persist` reads
-                    // it from there when saving the session list.
+                    // Agents carry a conversation id; a shell's output
+                    // may still contain the word "resume", so only an
+                    // agent row collects one.
+                    session.resume_id = session
+                        .is_agent()
+                        .then(|| emitter.read(cx).resume_id().map(String::from))
+                        .flatten();
                 }
             }
         }
@@ -495,11 +502,13 @@ impl AppView {
         self.begin_shutdown(cx);
     }
 
-    /// Kick off the shutdown sequence: save every live session's
-    /// resume id first (a later kill must not lose it), then run the
-    /// stop escalation on all of them at once.
+    /// Kick off the shutdown sequence: remember which rows are still
+    /// alive (they must come back running on the next launch), save
+    /// every live session's resume id first (a later kill must not
+    /// lose it), then run the stop escalation on all of them at once.
     fn begin_shutdown(&mut self, cx: &mut Context<Self>) {
         crate::config::debug_log("begin_shutdown: capture ids, escalate");
+        self.mark_live_rows();
         let terms = self.running_terms();
         for term in &terms {
             term.update(cx, |s, _| s.capture_resume_id());
@@ -507,6 +516,20 @@ impl AppView {
         self.persist(cx);
         Self::escalate_close(terms, cx);
         cx.notify();
+    }
+
+    /// Remember every row whose PTY is still alive: it must come back
+    /// running on the next launch. Ordered BEFORE the stop escalation —
+    /// once the children exit, their rows are `Done` and only this flag
+    /// still knows they were live at close.
+    fn mark_live_rows(&mut self) {
+        for project in self.projects.iter_mut() {
+            for session in project.sessions.iter_mut() {
+                if session.status.is_running() {
+                    session.was_live = true;
+                }
+            }
+        }
     }
 
     /// Graceful-stop sequence for live terms, shared by single-session
@@ -590,19 +613,25 @@ impl AppView {
     /// (`--resume <id>`), using the id captured from the last run's
     /// output. No-ops when the last run captured none.
     pub(crate) fn resume_current_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let resume_id = self.current_session().and_then(|s| {
-            s.term
-                .as_ref()
-                .and_then(|t| t.read(cx).resume_id().map(String::from))
-                .or_else(|| s.cmd.resume.clone())
-        });
-        let Some(id) = resume_id else {
+        let Some(id) = self.current_resume_id(cx) else {
             crate::config::debug_log("resume: NO ID — aborting");
             eprintln!("[ddu] No session id found in the last run's output.");
             return;
         };
         crate::config::debug_log(&format!("resume: respawning with id={id}"));
         self.respawn_current_session(Some(id), window, cx);
+    }
+
+    /// The current row's conversation id: the live run's captured id
+    /// when the PTY is around, else the id stored on the row (restored
+    /// rows and dead ones keep it without a terminal).
+    pub(crate) fn current_resume_id(&self, cx: &App) -> Option<String> {
+        self.current_session().and_then(|s| {
+            s.term
+                .as_ref()
+                .and_then(|t| t.read(cx).resume_id().map(String::from))
+                .or_else(|| s.resume_id.clone())
+        })
     }
 
     /// Shared body of restart/resume: kill the old PTY (if alive) and
@@ -620,16 +649,17 @@ impl AppView {
             return;
         };
         let cwd = session.cwd.clone();
-        let cmd = match resume {
-            Some(id) => session.cmd.clone().with_resume(id),
-            None => session.cmd.clone(),
+        let spec = match &resume {
+            Some(id) => session.cmd.resume_spec(&cwd, id),
+            None => session.cmd.spec(&cwd),
         };
+        let program = session.cmd.program.clone();
+        let title = session.cmd.basename();
         if let Some(old) = session.term.take() {
             old.update(cx, |s, _| s.kill());
         }
-        let (status, term) = match TermSession::spawn(&cmd.spec(&cwd), cx) {
+        let (status, term) = match TermSession::spawn(&spec, cx) {
             Ok(term) => {
-                let program = cmd.program.clone();
                 cx.subscribe_in(
                     &term,
                     window,
@@ -653,8 +683,11 @@ impl AppView {
         };
         if let Some(session) = project.sessions.get_mut(self.current_session) {
             session.status = status;
-            session.title = cmd.basename();
+            session.title = title;
             session.term = term;
+            // The previous run is gone for good: only this new one's
+            // liveness matters from here on.
+            session.was_live = false;
             session.started = std::time::Instant::now();
             session.ended = if session.term.is_none() {
                 Some(std::time::Instant::now())
@@ -682,5 +715,89 @@ mod tests {
         assert_eq!(index_after_removal(1, 2, 3), 1);
         assert_eq!(index_after_removal(3, 3, 3), 2);
         assert_eq!(index_after_removal(0, 0, 0), 0);
+    }
+
+    /// A graceful quit must leave the rows that were alive marked for the
+    /// next launch. The shutdown's own saves run AFTER the children exit,
+    /// when every row already reads `Done` — so the mark has to be taken
+    /// up front, or a relaunch silently restores nothing and the user has
+    /// to click Resume on each row.
+    #[test]
+    fn shutdown_keeps_live_rows_marked_for_the_next_launch() {
+        use crate::app::AppView;
+        use crate::config::{Config, ProjectConfig, SavedSession, ShellConfig, State};
+        use crate::session::AgentStatus;
+        use gpui_kit::{TestAppContext, gpui};
+
+        let live_row = SavedSession {
+            kind: "terminal".into(),
+            title: "zsh".into(),
+            resume: None,
+            live: Some(true),
+            selected_file: None,
+            closed_dirs: vec![],
+            tree_height: None,
+        };
+        let finished_row = SavedSession {
+            kind: "omp".into(),
+            title: "omp".into(),
+            resume: Some("01a075e1-346f-7b92-b832-745a71ee00ed".into()),
+            live: Some(false),
+            selected_file: None,
+            closed_dirs: vec![],
+            tree_height: None,
+        };
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let mut cx0 = TestAppContext::build(dispatcher, Some("shutdown_liveness"));
+                let cx = &mut cx0;
+                cx.update(gpui_kit::init);
+                cx.update(|cx| {
+                    cx.set_global(Config {
+                        shell: ShellConfig {
+                            program: "cat".into(),
+                        },
+                        ..Default::default()
+                    });
+                    cx.set_global(crate::config::LoadWarnings(vec![]));
+                    cx.set_global(State {
+                        projects: Some(vec![ProjectConfig {
+                            name: "p".into(),
+                            path: std::env::temp_dir(),
+                            expanded: true,
+                            sessions: vec![live_row, finished_row],
+                        }]),
+                        ..Default::default()
+                    });
+                });
+                let (view, vcx) = cx.add_window_view(|window, cx| AppView::new(window, cx));
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                // The quit begins while the shell is still alive.
+                vcx.update(|_, cx| view.update(cx, |v, _| v.mark_live_rows()));
+                // Its child then exits during the shutdown sequence.
+                vcx.update(|_, cx| {
+                    view.update(cx, |v, _| {
+                        v.projects[0].sessions[0].status = AgentStatus::Done(0);
+                    })
+                });
+                let saved = vcx.update(|_, cx| view.update(cx, |v, cx| v.snapshot(cx)));
+                let rows = &saved.projects.as_ref().unwrap()[0].sessions;
+                assert_eq!(
+                    rows[0].live,
+                    Some(true),
+                    "the row that was alive must come back"
+                );
+                assert_eq!(rows[1].live, Some(false), "the finished row must not");
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
     }
 }

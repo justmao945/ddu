@@ -127,6 +127,15 @@ pub struct SavedSession {
     /// Agent session id for `--resume`; `None` for shell rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<String>,
+    /// Whether the row was running when the workspace was last saved:
+    /// `Some(true)` comes back running next launch (as
+    /// `--resume <resume>` for an agent), `Some(false)` stays `Done` and
+    /// waits for a click. `None` — files written before this flag
+    /// existed — falls back to the old rule in
+    /// [`crate::app::AppView::restore_sessions`]; every save writes an
+    /// explicit value from then on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<bool>,
     /// The file this session had selected in the diff tree (path;
     /// re-pinned to an index on load).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -259,7 +268,6 @@ impl Config {
         Ok(AgentCmd {
             program: program.trim().into(),
             args,
-            resume: None,
         })
     }
 
@@ -451,6 +459,7 @@ mod tests {
                 kind: "omp".into(),
                 title: "omp".into(),
                 resume: Some("id-1".into()),
+                live: Some(true),
                 selected_file: None,
                 closed_dirs: vec![],
                 tree_height: Some(260.),

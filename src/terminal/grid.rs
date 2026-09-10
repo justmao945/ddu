@@ -90,7 +90,7 @@ pub fn extract_resume_id(text: &str) -> Option<String> {
                 }
             }
             if matched.is_some() {
-                if let Some(id) = take_id(rest) {
+                if let Some(id) = take_id(rest, false) {
                     return Some(id);
                 }
             }
@@ -104,25 +104,30 @@ pub fn extract_resume_id(text: &str) -> Option<String> {
         while let Some(pos) = lower[search_from..].find("resume") {
             let abs = search_from + pos;
             let rest = lower[abs + "resume".len()..].trim_start();
-            let after_flag = rest
-                .strip_prefix("--")
-                .and_then(|r| {
-                    r.strip_prefix("resume")
-                        .or_else(|| r.strip_prefix("continue"))
-                })
-                .or_else(|| rest.strip_prefix("-r"))
-                .or_else(|| {
-                    // `codex resume <id>` — the id follows with no
-                    // flag at all.
-                    if rest.starts_with(|c: char| c.is_ascii_alphanumeric()) {
-                        Some(rest)
-                    } else {
-                        None
+            // `strict` marks the flag-less form below.
+            let (after_flag, strict) = match rest.strip_prefix("--") {
+                Some(r) => (
+                    r.strip_prefix("resume").or_else(|| r.strip_prefix("continue")),
+                    false,
+                ),
+                None => match rest.strip_prefix("-r") {
+                    Some(r) => (Some(r), false),
+                    None => {
+                        // `codex resume <id>` — the id follows with no
+                        // flag at all. Prose reads the same way ("you
+                        // can resume functions later"), so this form
+                        // only takes the hyphenated id shape every
+                        // agent prints, never a bare English word.
+                        let bare = rest
+                            .starts_with(|c: char| c.is_ascii_alphanumeric())
+                            .then_some(rest);
+                        (bare, true)
                     }
-                });
+                },
+            };
             if let Some(after) = after_flag {
                 let after = after.trim_start_matches([' ', ':', '=', '-']);
-                if let Some(id) = take_id(after) {
+                if let Some(id) = take_id(after, strict) {
                     return Some(id);
                 }
             }
@@ -132,16 +137,21 @@ pub fn extract_resume_id(text: &str) -> Option<String> {
     None
 }
 
-/// Consume an id-like token at the start of `rest`.
-fn take_id(rest: &str) -> Option<String> {
+/// Consume an id-like token at the start of `rest`. `strict` demands
+/// the hyphenated shape agents actually print over a mere word: the
+/// flag-less `codex resume <id>` form reads exactly like prose ("you
+/// can resume functions later"), so it must not take an English word.
+fn take_id(rest: &str, strict: bool) -> Option<String> {
     let id: String = rest
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     let id = id.replace('_', "");
     // UUIDs and slugs: at least 8 chars, not all digits (a line
-    // like "session id: 42" is a counter, not a session).
-    if id.len() >= 8 && id.chars().any(|c| !c.is_ascii_digit()) {
+    // like "session id: 42" is a counter, not a session); the strict
+    // form additionally wants the hyphen and a digit every id carries.
+    let shaped = !strict || (id.contains('-') && id.contains(|c: char| c.is_ascii_digit()));
+    if shaped && id.len() >= 8 && id.chars().any(|c| !c.is_ascii_digit()) {
         Some(id)
     } else {
         None
@@ -413,6 +423,17 @@ mod tests {
         assert_eq!(extract_resume_id("no ids here"), None);
         assert_eq!(
             extract_resume_id("2026-09-06 12:00:00 something unrelated"),
+            None
+        );
+        // Prose using the word "resume" reads like the flag-less
+        // `codex resume <id>` form; it must not donate a word as an id
+        // (a real session once saved `functions`).
+        assert_eq!(
+            extract_resume_id("then the agent can resume functions afterwards"),
+            None
+        );
+        assert_eq!(
+            extract_resume_id("Use /resume to continue this conversation"),
             None
         );
     }

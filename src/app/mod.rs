@@ -353,11 +353,11 @@ impl AppView {
                     .unwrap_or(true)
             });
         }
-        // Restore the persisted session lists (agents as restartable
-        // Done rows, shells live in the open project); the saved
-        // selection then decides whether the window resumes an agent
-        // or lands on a live shell. With nothing saved, fall back to
-        // the configured default launcher.
+        // Restore the persisted session lists — every row that was still
+        // running comes back live (see `restore_sessions`), the finished
+        // ones idle as resumable `Done` rows. The saved selection then
+        // only decides focus. With nothing saved, fall back to the
+        // configured default launcher.
         if state
             .projects
             .as_ref()
@@ -369,17 +369,7 @@ impl AppView {
             } else {
                 let n = this.projects[this.current_project].sessions.len();
                 this.current_session = state.current_session.min(n.saturating_sub(1));
-                let selected = this.current_session().cloned();
-                let resumes = selected.is_some_and(|s| {
-                    s.term.is_none()
-                        && s.cmd.resume.is_some()
-                        && matches!(s.status, AgentStatus::Done(_))
-                });
-                if resumes {
-                    cx.defer_in(window, |this, window, cx| {
-                        this.resume_current_session(window, cx);
-                    });
-                } else if let Some(term) = this.current_term() {
+                if let Some(term) = this.current_term() {
                     let focus = term.read(cx).focus.clone();
                     focus.focus(window, cx);
                 }
