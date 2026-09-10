@@ -45,6 +45,15 @@ License: Apache-2.0, GPL-free throughout. Design docs: `docs/DESIGN.md` (the app
   overrides). Shared builder: `scripts/make-bundle.sh`. The distinct
   bundle ids let dev and installed run side by side without LaunchServices
   activating the wrong one; `open` never mixes their state either.
+- Replacing a running copy: both scripts go through `scripts/lib.sh`
+  (`app_pids` / `stop_app`, shared by `dev.sh` and `install.sh`). NEVER
+  `pgrep`/`pkill` here — they hide the caller and all its ancestors, and
+  the app being replaced is usually an ancestor (these scripts are run
+  from a ddu terminal session), so the kill silently no-ops and `open`
+  just re-activates the stale instance. `stop_app` refuses (status 2) in
+  that ancestor case: the caller is running inside the app, so killing it
+  would take the shell down mid-script. The generated `launch.sh` must
+  keep `exec` as its LAST line — anything appended after it never runs.
 
 **Never** start the binary directly as a background child (`nohup`, `hub exec`,
 raw spawn) — on macOS 26 an unactivated process: (a) never gets

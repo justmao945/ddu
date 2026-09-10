@@ -12,7 +12,9 @@
 # and explicit DDU_STATE_PATH / DDU_SETTINGS_PATH pass through and are
 # baked into the bundle launcher (see scripts/make-bundle.sh).
 set -e
-cd "$(dirname "$0")/.."
+SCRIPTS=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPTS/lib.sh"
+cd "$SCRIPTS/.."
 
 cargo build --release
 
@@ -24,14 +26,19 @@ mkdir -p "$(dirname "$DDU_STATE_PATH")" "$(dirname "$DDU_SETTINGS_PATH")"
 
 scripts/make-bundle.sh target/ddu-dev.app "Day Day Up Dev" dev.just.ddu.dev
 
-# `open` only ACTIVATES an already-running app — kill our own previous
+# `open` only ACTIVATES an already-running app — stop our own previous
 # instance first so the fresh build actually appears. Never touches the
 # installed copy: different bundle id, different path.
-pkill -f "target/ddu-dev.app/Contents/MacOS/ddu.bin" 2>/dev/null || true
-n=0
-while pgrep -f "target/ddu-dev.app/Contents/MacOS/ddu.bin" >/dev/null 2>&1; do
-  n=$((n + 1))
-  [ "$n" -gt 50 ] && { pkill -9 -f "target/ddu-dev.app/Contents/MacOS/ddu.bin"; break; }
-done
+rc=0
+stop_app target/ddu-dev.app || rc=$?
+if [ "$rc" = 2 ]; then
+    # The dev copy hosts this shell: it keeps the old binary until it is
+    # quit, and `open` below would only re-activate it.
+    echo "fresh build is bundled at target/ddu-dev.app; quit the running copy and reopen to use it" >&2
+    exit 0
+elif [ "$rc" != 0 ]; then
+    echo "could not stop the running dev copy — quit it and rerun" >&2
+    exit 1
+fi
 
 DDU_DIR="${DDU_DIR:-$HOME/Code/ddu}" exec open "$@" target/ddu-dev.app

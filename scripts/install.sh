@@ -7,7 +7,9 @@
 #
 # Usage: scripts/install.sh [--open]   (--open launches the fresh install)
 set -e
-cd "$(dirname "$0")/.."
+SCRIPTS=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPTS/lib.sh"
+cd "$SCRIPTS/.."
 
 OPEN=
 for arg in "$@"; do
@@ -24,12 +26,14 @@ APP="$DEST/ddu.app"
 
 # Quit the copy being replaced so it doesn't keep running the old binary
 # from a deleted bundle.
-pkill -f "$APP/Contents/MacOS/ddu.bin" 2>/dev/null || true
-n=0
-while pgrep -f "$APP/Contents/MacOS/ddu.bin" >/dev/null 2>&1; do
-  n=$((n + 1))
-  [ "$n" -gt 50 ] && { pkill -9 -f "$APP/Contents/MacOS/ddu.bin"; break; }
-done
+running=
+rc=0
+stop_app "$APP" || rc=$?
+case $rc in
+    0) ;;
+    2) running=1 ;;
+    *) echo "could not stop the running copy — quit it and rerun" >&2; exit 1 ;;
+esac
 
 rm -rf "$APP"
 scripts/make-bundle.sh "$APP" "Day Day Up" dev.just.ddu || {
@@ -38,14 +42,13 @@ scripts/make-bundle.sh "$APP" "Day Day Up" dev.just.ddu || {
 }
 echo "installed: $APP"
 
-if [ -n "$OPEN" ]; then
+if [ -n "$OPEN" ] && [ -z "$running" ]; then
   # Retire any legacy same-identity instance (the old target/ddu.app flow) —
   # a live same-bundle-id copy would make `open` activate it instead of ours.
-  pkill -f "target/ddu.app/Contents/MacOS/ddu.bin" 2>/dev/null || true
-  n=0
-  while pgrep -f "target/ddu.app/Contents/MacOS/ddu.bin" >/dev/null 2>&1; do
-    n=$((n + 1))
-    [ "$n" -gt 50 ] && { pkill -9 -f "target/ddu.app/Contents/MacOS/ddu.bin"; break; }
-  done
+  stop_app target/ddu.app || true
   open "$APP"
+elif [ -n "$running" ]; then
+  # This shell runs inside the app being replaced: `open` would just
+  # re-activate that stale instance, so say what to do instead.
+  echo "the running copy keeps the old binary — quit it (⌘Q) and reopen to use the new build" >&2
 fi

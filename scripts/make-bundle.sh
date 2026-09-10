@@ -65,14 +65,13 @@ fi
 for v in \$(env | sed -n 's/^\\(DDU_[A-Za-z0-9_]*\\)=.*/\\1/p'); do
   eval "export \$v"
 done
-exec "\$(dirname "\$0")/ddu.bin"
 LAUNCH
 # Dev hooks baked at bundle time (see main.rs / app/mod.rs): auto-open
 # Settings on a page, freeze the Exiting overlay, close the current
 # session, point at a scratch state file, or enable the debug trace.
-# IMPORTANT: appended OUTSIDE the heredoc — inside it, ${v:+A="$v"}
-# expansion strips the inner quotes (verified), which truncates
-# unquoted values containing spaces (e.g. "Application Support").
+# Written OUTSIDE the heredoc — inside it, ${v:+A="$v"} expansion strips
+# the inner quotes (verified), which truncates unquoted values containing
+# spaces (e.g. "Application Support").
 {
   [ -n "${DDU_VERIFY_SETTINGS:-}" ] && printf 'export DDU_VERIFY_SETTINGS="%s"\n' "$DDU_VERIFY_SETTINGS"
   [ -n "${DDU_VERIFY_EXIT:-}" ] && printf 'export DDU_VERIFY_EXIT="%s"\n' "$DDU_VERIFY_EXIT"
@@ -81,4 +80,11 @@ LAUNCH
   [ -n "${DDU_SETTINGS_PATH:-}" ] && printf 'export DDU_SETTINGS_PATH="%s"\n' "$DDU_SETTINGS_PATH"
   [ -n "${DDU_DEBUG:-}" ] && printf 'export DDU_DEBUG="%s"\n' "$DDU_DEBUG"
 } >> "$APP/Contents/MacOS/launch.sh"
+# The exec MUST stay the launcher's last line. Appending anything after it
+# (the baked exports used to land here) writes code the shell never
+# reaches, so the values were silently ignored and every launch fell back
+# to whatever environment LaunchServices happened to provide.
+cat >> "$APP/Contents/MacOS/launch.sh" <<'LAUNCH_TAIL'
+exec "$(dirname "$0")/ddu.bin"
+LAUNCH_TAIL
 chmod +x "$APP/Contents/MacOS/launch.sh"
