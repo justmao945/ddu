@@ -3,7 +3,8 @@
 Multi-agent workspace: left = projects + agent sessions, center = PTY terminal
 (runs `terminal` / `claude` / `codex` CLIs), right = live git diff. Rust +
 `gpui-kit = "0.6"` (re-exports `gpui-pre 0.3.3` + `gpui-component 0.6`).
-License: Apache-2.0, GPL-free throughout. Design doc: `DESIGN.md`.
+License: Apache-2.0, GPL-free throughout. Design docs: `docs/DESIGN.md` (the app),
+`docs/AGENT_CORE.md` (in-process agent core — design, not yet implemented).
 
 ## Source map
 

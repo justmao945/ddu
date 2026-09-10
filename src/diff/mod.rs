@@ -1,12 +1,12 @@
 //! Git diff model for the right pane: types shared with the view plus
-//! the [`git`] query layer (DESIGN.md §7).
+//! the [`git`] query layer (docs/DESIGN.md §7).
 //!
 //! Scope: project-level HEAD→workdir diff (staged + unstaged +
 //! untracked). Per-session worktree scoping comes later.
 
 pub mod git;
 
-/// Hard cap on collected diff lines per file (DESIGN §11); the stat
+/// Hard cap on collected diff lines per file (docs/DESIGN.md §11); the stat
 /// counts keep going so `+a/-b` stays truthful.
 pub const MAX_LINES_PER_FILE: usize = 5000;
 

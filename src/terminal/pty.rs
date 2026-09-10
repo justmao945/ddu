@@ -10,7 +10,7 @@ use portable_pty::{
     Child, ChildKiller, CommandBuilder, MasterPty, PtyPair, PtySize, native_pty_system,
 };
 
-/// Immutable spawn spec for one agent process (DESIGN.md §9).
+/// Immutable spawn spec for one agent process (docs/DESIGN.md §9).
 #[derive(Clone, Debug)]
 pub struct PtySpawn {
     pub program: String,

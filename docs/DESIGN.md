@@ -23,7 +23,9 @@ Start as a single crate, split by capability into modules (per the gpui-kit Codi
 ```text
 ddu/
   Cargo.toml
-  DESIGN.md
+  docs/
+    DESIGN.md         # this document
+    AGENT_CORE.md     # in-process agent core (design)
   src/
     main.rs           # app shell: init + open_window + Root, composition only
     app.rs            # AppView: three-pane assembly + global state ownership
@@ -142,6 +144,7 @@ struct AgentCmd { program: String, args: Vec<String>, cwd: PathBuf, env: Vec<(St
 * Session start = spawn from snapshot, cwd = project path (later worktree: one branch + one directory per session).
 * kill = close writer + kill child + cancel pump Task; restart = re-spawn same cmd, either clearing or keeping scrollback (pick one; default keep + separator line).
 * Output parsing: MVP treats output as a byte stream, no structured agent-event parsing; "task status extraction" (reading plan/tool-call lines) comes later.
+* **Native agents (designed, not implemented):** `AGENT_CORE.md` specifies a second backend that runs **in one process** — conversations between equal peers instead of PTY-spawned CLIs. It supersedes this section for native agents; the PTY path here stays for shells and external CLIs (`claude`, `codex`).
 
 ## 10. Config / Persistence / Shortcuts / Theme / Notifications
 

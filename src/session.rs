@@ -1,5 +1,5 @@
 //! Session domain model: projects, agent sessions and the command
-//! presets used to spawn them (DESIGN.md §5, §9).
+//! presets used to spawn them (docs/DESIGN.md §5, §9).
 
 use gpui_kit::Entity;
 use std::path::{Path, PathBuf};
@@ -176,7 +176,7 @@ pub struct Project {
 }
 
 /// The workspace the app starts with: the directory it was launched
-/// from (per DESIGN §10 the full project list becomes persistent state
+/// from (per docs/DESIGN.md §10 the full project list becomes persistent state
 /// in a later milestone).
 pub fn initial_projects() -> Vec<Project> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
