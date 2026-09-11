@@ -12,7 +12,7 @@ git2 = "0.19"
 gpui-kit = "0.6"
 parking_lot = "0.12"
 portable-pty = "0.9"
-rustix = { version = "0.38", features = ["std"] }
+rustix = { version = "0.38", features = ["std", "event"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 shlex = "1.3"

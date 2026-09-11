@@ -101,6 +101,19 @@ impl PtyProcess {
         &self.writer
     }
 
+    /// Raw fd of the PTY master, for the reader thread's wake-pacing
+    /// poll ([`super::grid::spawn_pump`]). `None` off Unix, where the
+    /// reader falls back to one wakeup per read.
+    #[cfg(unix)]
+    pub(crate) fn poll_fd(&self) -> Option<i32> {
+        self.master.as_raw_fd()
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn poll_fd(&self) -> Option<i32> {
+        None
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) {
         let _ = self.master.resize(PtySize {
             rows,

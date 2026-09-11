@@ -5,6 +5,7 @@
 use std::io::Read;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener};
 
@@ -20,6 +21,49 @@ use portable_pty::Child;
 use super::TermMatch;
 use super::attention::{Attention, Scanner};
 use super::pty::{PtyProcess, PtySpawn, PtyWriter};
+
+/// Minimum spacing between reader-thread wakeups while output flows.
+/// The PTY can return a few bytes per `read`, and a wakeup per read
+/// would ping the UI task at MHz rates under a flood; this caps the
+/// ping at ~60 Hz. Spacing is enforced on the reader (see
+/// [`spawn_pump`]) so the pump's own repaint throttle still has
+/// headroom, and the poll deadline there guarantees a trailing wakeup
+/// for the tail chunk.
+const READER_WAKE_MIN: Duration = Duration::from_millis(16);
+
+/// Block until `fd` is readable or `timeout` lapses (None = forever).
+/// `Closed` covers EBADF (the master can be dropped before the child
+/// dies on session teardown — the reader must exit, not spin) and any
+/// other hard error. EINTR retries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollOutcome {
+    Readable,
+    NotReady,
+    Closed,
+}
+
+#[cfg(unix)]
+fn poll_readable(fd: i32, timeout: Option<Duration>) -> PollOutcome {
+    use rustix::event::{PollFd, PollFlags, poll};
+    use rustix::fd::BorrowedFd;
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    let mut fds = [PollFd::new(&borrowed, PollFlags::IN)];
+    let millis = timeout.map_or(-1, |t| t.as_millis().min(i32::MAX as u128) as i32);
+    loop {
+        match poll(&mut fds, millis) {
+            Ok(0) => return PollOutcome::NotReady,
+            Ok(_) => return PollOutcome::Readable,
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(rustix::io::Errno::BADF) => return PollOutcome::Closed,
+            Err(_) => return PollOutcome::Closed,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn poll_readable(_fd: i32, _timeout: Option<Duration>) -> PollOutcome {
+    PollOutcome::Readable
+}
 
 /// Messages from the pump threads to the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +280,7 @@ pub struct TermGrid {
     pub dark: Arc<AtomicBool>,
     /// Rolling tail of raw PTY output (resume-id extraction at exit).
     pub recent: Arc<RecentOutput>,
+    wake: async_channel::Sender<PumpMsg>,
     cols: u16,
     rows: u16,
 }
@@ -253,7 +298,7 @@ impl TermGrid {
         let recent = Arc::new(RecentOutput::new(64 * 1024));
         let proxy = EventProxy {
             writer: writer.clone(),
-            wake,
+            wake: wake.clone(),
             meta: meta.clone(),
             dark: dark.clone(),
         };
@@ -271,6 +316,7 @@ impl TermGrid {
             writer,
             dark,
             recent,
+            wake,
             cols,
             rows,
         }
@@ -316,6 +362,9 @@ impl TermGrid {
         for &byte in bytes {
             parser.advance(&mut *term, byte);
         }
+        // The reader thread wakes the pump after each chunk; planted
+        // content must do the same or the UI never learns about it.
+        let _ = self.wake.try_send(PumpMsg::Wakeup);
     }
 }
 
@@ -382,16 +431,22 @@ pub fn search_grid(
 
 /// Spawn the two pump threads for a freshly started [`PtyProcess`].
 ///
-/// * Reader thread: `read → parse per byte → coalesced Wakeup`, exits on
+/// * Reader thread: `read → parse per byte → paced Wakeup`, exits on
 ///   EOF (child closed its output). The same bytes also feed the
 ///   [`Scanner`], whose signals go out on `attention` (a dropped signal
-///   only costs one notification).
+///   only costs one notification). A flooding child can return a few
+///   bytes per read, and one wakeup per read would ping the UI task at
+///   MHz rates, so wakeups ride [`READER_WAKE_MIN`] while output flows
+///   (the pump throttles repaints further). The poll deadline
+///   guarantees a trailing wakeup for the final chunk before a pause,
+///   so a suppressed tail never waits for more output.
 /// * Waiter thread: blocks on `child.wait()`, then reports `Exit`.
 pub fn spawn_pump(
     term: Arc<FairMutex<Term<EventProxy>>>,
     wake: async_channel::Sender<PumpMsg>,
     recent: Arc<RecentOutput>,
     mut reader: Box<dyn Read + Send>,
+    poll_fd: Option<i32>,
     mut child: Box<dyn Child + Send + Sync>,
     attention: async_channel::Sender<Attention>,
 ) {
@@ -403,9 +458,39 @@ pub fn spawn_pump(
             let mut scanner = Scanner::new();
             let mut signals = Vec::new();
             let mut buf = [0u8; 8192];
+            let mut last_wake = Instant::now();
+            let mut dirty = false;
             loop {
+                if let Some(fd) = poll_fd {
+                    let timeout = if dirty {
+                        Some(READER_WAKE_MIN.saturating_sub(last_wake.elapsed()))
+                    } else {
+                        None
+                    };
+                    match poll_readable(fd, timeout) {
+                        PollOutcome::Readable => {}
+                        PollOutcome::NotReady => {
+                            // Poll deadline with unpainted content: flush
+                            // the suppressed tail now.
+                            if dirty {
+                                let _ = reader_wake.try_send(PumpMsg::Wakeup);
+                                dirty = false;
+                                last_wake = Instant::now();
+                            }
+                            continue;
+                        }
+                        // Master dropped before the child died (session
+                        // teardown): leave the wait to the waiter thread.
+                        PollOutcome::Closed => break,
+                    }
+                }
                 match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) | Err(_) => {
+                        if dirty {
+                            let _ = reader_wake.try_send(PumpMsg::Wakeup);
+                        }
+                        break;
+                    }
                     Ok(n) => {
                         recent.push(&buf[..n]);
                         signals.clear();
@@ -419,7 +504,12 @@ pub fn spawn_pump(
                                 parser.advance(&mut *term, byte);
                             }
                         }
-                        let _ = reader_wake.try_send(PumpMsg::Wakeup);
+                        dirty = true;
+                        if poll_fd.is_none() || last_wake.elapsed() >= READER_WAKE_MIN {
+                            let _ = reader_wake.try_send(PumpMsg::Wakeup);
+                            dirty = false;
+                            last_wake = Instant::now();
+                        }
                     }
                 }
             }
@@ -458,6 +548,7 @@ pub fn spawn_session(
         wake,
         grid.recent.clone(),
         reader,
+        process.poll_fd(),
         child,
         attention,
     );

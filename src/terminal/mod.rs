@@ -41,6 +41,17 @@ const RESIZE_DEBOUNCE: Duration = Duration::from_millis(140);
 /// How long the overlay thumb stays up after the last scroll/hover
 /// activity (same 2s hold the Base scrollbars in the diff panes use).
 const SCROLLBAR_IDLE: Duration = Duration::from_secs(2);
+/// Minimum spacing between stream-driven repaints. A flooding child
+/// emits a wakeup per read chunk, and each one would repaint the whole
+/// window at display-link rate — during a stream the main thread
+/// spends a large share of its time in `Window::draw` (measured ~40%
+/// under a 5 MB/s flood). The pump paints the first wakeup of a burst
+/// immediately and the rest at most once per interval, flushed by a
+/// trailing timer so the burst still ends on the freshest frame.
+/// Idle wakeups (a keystroke echo) find the window elapsed and repaint
+/// immediately; interaction-driven repaints (scroll/select/paste) are
+/// emitted from entity methods and never pass through this throttle.
+const STREAM_FRAME_MIN: Duration = Duration::from_millis(33);
 /// Hard cap on find-bar hits; past it the counter just shows the cap.
 const SEARCH_MAX_MATCHES: usize = 500;
 /// Output-driven match rescans ride this one-shot timer so a stream of
@@ -221,15 +232,43 @@ impl TermSession {
         });
 
         // Foreground pump: coalesced wakeups → notify; exit → event.
+        // Stream floods are repaint-throttled (see STREAM_FRAME_MIN):
+        // the first wakeup of a burst paints immediately, the rest are
+        // flushed once per interval by a trailing timer.
         let weak = entity.downgrade();
         cx.spawn(async move |cx| {
+            // `last_frame` is read through the (fake-clock-aware)
+            // executor clock so throttle behavior is testable; the
+            // cells are single-threaded foreground state.
+            let last_frame = Rc::new(Cell::new(None::<Instant>));
+            let flush_armed = Rc::new(Cell::new(false));
             while let Ok(msg) = wake_rx.recv().await {
                 match msg {
                     grid::PumpMsg::Wakeup => {
-                        let _ = weak.update(cx, |_, cx| {
-                            cx.notify();
-                            cx.emit(TermEvent::Wakeup);
-                        });
+                        let now = cx.background_executor().now();
+                        let prev = last_frame.get();
+                        if prev.map_or(true, |t| now.duration_since(t) >= STREAM_FRAME_MIN) {
+                            last_frame.set(Some(now));
+                            let _ = weak.update(cx, |_, cx| {
+                                cx.notify();
+                                cx.emit(TermEvent::Wakeup);
+                            });
+                        } else if !flush_armed.replace(true) {
+                            let weak = weak.clone();
+                            let last_frame = last_frame.clone();
+                            let flush_armed = flush_armed.clone();
+                            let delay = STREAM_FRAME_MIN - now.duration_since(prev.unwrap());
+                            cx.spawn(async move |cx| {
+                                cx.background_executor().timer(delay).await;
+                                flush_armed.set(false);
+                                last_frame.set(Some(cx.background_executor().now()));
+                                let _ = weak.update(cx, |_, cx| {
+                                    cx.notify();
+                                    cx.emit(TermEvent::Wakeup);
+                                });
+                            })
+                            .detach();
+                        }
                     }
                     grid::PumpMsg::Exit(code) => {
                         let _ = weak.update(cx, |s, cx| {
@@ -1561,6 +1600,75 @@ mod tests {
                     "cat never echoed the committed IME text; grid: {:?}",
                     compact(cx.update(|cx| grid_text(&session, cx)))
                 );
+            }),
+        );
+    }
+
+    /// Stream repaint throttle: a burst of output wakeups inside one
+    /// frame window repaints once immediately plus one trailing flush,
+    /// not once per chunk; after the window passes the next wakeup
+    /// repaints immediately. Driven through `inject_bytes` (same
+    /// grid→channel path as the reader thread) with the pump's
+    /// executor clock faked, so the timing is exact. `cat` stays
+    /// silent — no reader-thread wakeups race the test scheduler.
+    #[test]
+    fn stream_repaints_are_throttled() {
+        use super::STREAM_FRAME_MIN;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 =
+                    TestAppContext::build(dispatcher, Some("stream_repaints_are_throttled"));
+                let cx = &mut cx0;
+                let session = cx
+                    .update(|cx| {
+                        cx.set_global(Theme::default());
+                        cx.set_global(crate::config::Config::default());
+                        TermSession::spawn(
+                            &PtySpawn {
+                                program: "cat".into(),
+                                args: vec![],
+                                cwd: std::env::temp_dir(),
+                            },
+                            cx,
+                        )
+                    })
+                    .expect("spawn cat");
+                let paints = Rc::new(Cell::new(0usize));
+                cx.update(|cx| {
+                    let paints = paints.clone();
+                    cx.observe(&session, move |_, _| paints.set(paints.get() + 1)).detach();
+                });
+                cx.run_until_parked();
+                paints.set(0);
+
+                // Eight chunks in one frame window (drained one by one:
+                // the capacity-1 wake channel coalesces a burst the pump
+                // never gets to between sends): the first repaints now,
+                // the other seven coalesce behind one flush.
+                for _ in 0..8 {
+                    cx.update(|cx| session.read(cx).inject_bytes(b"line\r\n"));
+                    cx.run_until_parked();
+                }
+                assert_eq!(paints.get(), 1, "burst repaints once immediately");
+
+                cx.executor().advance_clock(STREAM_FRAME_MIN);
+                cx.run_until_parked();
+                assert_eq!(paints.get(), 2, "trailing flush repaints the burst tail");
+
+                // Past the window the next chunk repaints immediately.
+                cx.executor().advance_clock(STREAM_FRAME_MIN);
+                cx.update(|cx| session.read(cx).inject_bytes(b"later\r\n"));
+                cx.run_until_parked();
+                assert_eq!(paints.get(), 3, "idle wakeup repaints immediately");
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
             }),
         );
     }
