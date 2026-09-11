@@ -170,80 +170,175 @@ const CENTER_MIN: f32 = 400.;
 pub(crate) const WINDOW_MIN_WIDTH: f32 = SIDEBAR_MIN + CENTER_MIN + DIFF_MIN + 8.;
 pub(crate) const WINDOW_MIN_HEIGHT: f32 = 400.;
 
+/// The full key binding table, in one place so `bind_keys` and the
+/// routing regression test share it. Bindings for the same keystroke
+/// form a fallback chain: gpui dispatches them in precedence order
+/// (deepest matching context slice first, ties to the later entry)
+/// until one handler stops propagation — see gpui's
+/// `bindings_for_input` / `dispatch_key`.
+fn key_bindings() -> Vec<KeyBinding> {
+    vec![
+        // ⌘N spawns the default launcher in the active project
+        // (guarded: with no projects there is nothing to spawn
+        // into); ⌘O adds a project via the folder picker. ⌘T
+        // toggles the diff file tree under the project tree.
+        KeyBinding::new("cmd-n", NewSession, None),
+        KeyBinding::new("cmd-o", AddProject, None),
+        KeyBinding::new("cmd-t", ToggleDiffTree, None),
+        KeyBinding::new("cmd-b", ToggleSessions, None),
+        KeyBinding::new("cmd-r", ToggleDiff, None),
+        KeyBinding::new("cmd-w", CloseSession, None),
+        // ⌘+/⌘− (with their shifted variants) zoom the terminal
+        // font size; persisted like the settings field.
+        KeyBinding::new("cmd-=", FontLarger, None),
+        KeyBinding::new("cmd-+", FontLarger, None),
+        KeyBinding::new("cmd--", FontSmaller, None),
+        KeyBinding::new("cmd-_", FontSmaller, None),
+        // ⌘1..⌘9: select the Nth session in the current project.
+        // Prefixed "cmd" so bare digits keep reaching the PTY.
+        KeyBinding::new("cmd-1", SelectSession1, None),
+        KeyBinding::new("cmd-2", SelectSession2, None),
+        KeyBinding::new("cmd-3", SelectSession3, None),
+        KeyBinding::new("cmd-4", SelectSession4, None),
+        KeyBinding::new("cmd-5", SelectSession5, None),
+        KeyBinding::new("cmd-6", SelectSession6, None),
+        KeyBinding::new("cmd-7", SelectSession7, None),
+        KeyBinding::new("cmd-8", SelectSession8, None),
+        KeyBinding::new("cmd-9", SelectSession9, None),
+        // Terminal-scoped: these beat gpui-component Root's global
+        // Tab/Shift-Tab focus cycling (deeper key context wins), so
+        // the PTY gets real tab/backtab bytes and focus never jumps
+        // to sidebar buttons mid-session. ⌘V is unbound globally.
+        KeyBinding::new("tab", TermTab, Some("Terminal")),
+        KeyBinding::new("shift-tab", TermBacktab, Some("Terminal")),
+        KeyBinding::new("cmd-v", TermPaste, Some("Terminal")),
+        // ⌘C copies the mouse selection when one exists (the
+        // handler propagates otherwise); PTYs never see it.
+        KeyBinding::new("cmd-c", TermCopy, Some("Terminal")),
+        // Outside the terminal, ⌘C copies the active diff-pane
+        // text selection (window-scoped `TextSelection`); the
+        // handler propagates when nothing is selected.
+        KeyBinding::new("cmd-c", input::Copy, None),
+        // Two find bars share ⌘F by focus. gpui ranks a binding by
+        // the deepest stack slice its predicate needs: a named
+        // context sitting at the focused element scores len, a
+        // predicate-less binding always scores len, and ties go to
+        // the later binding — so a bare None here would permanently
+        // out-rank the Terminal binding below. `!Terminal` matches
+        // one slice *shallower* than `Terminal` itself (the largest
+        // slice excluding it), so the positive binding always wins
+        // by exactly one level whenever the terminal surface or its
+        // find bar holds focus, and the diff binding wins anywhere
+        // else ("Terminal" absent from every slice). When a bar's
+        // input already holds focus its own action refocuses it
+        // with the query selected, matching platform find bars.
+        KeyBinding::new("cmd-f", TermSearch, Some("Terminal")),
+        KeyBinding::new("cmd-f", DiffSearch, Some("!Terminal")),
+        // The diff pane's find bar: once its input holds focus the
+        // "DiffSearch" context is on the dispatch path. Enter/
+        // Shift-Enter come from the input itself (it dispatches
+        // the `Enter` action), handled on the bar in
+        // `ui::diff_panel`.
+        KeyBinding::new("cmd-g", DiffSearchNext, Some("DiffSearch")),
+        KeyBinding::new("cmd-shift-g", DiffSearchPrev, Some("DiffSearch")),
+        // The terminal bar's match-cycling: its "TerminalSearch"
+        // context (set on the bar in `ui::terminal`) is deeper
+        // than the surface's "Terminal", so these win while its
+        // input holds focus.
+        KeyBinding::new("cmd-g", TermSearchNext, Some("TerminalSearch")),
+        KeyBinding::new("cmd-shift-g", TermSearchPrev, Some("TerminalSearch")),
+        // The standalone settings window: Escape/⌘W close it (the
+        // deeper context beats the global ⌘W → CloseSession).
+        KeyBinding::new("escape", CloseSettings, Some("SettingsWindow")),
+        KeyBinding::new("cmd-w", CloseSettings, Some("SettingsWindow")),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_bindings;
+    use gpui_kit::{KeyContext, Keymap, Keystroke};
+
+    /// Highest-precedence action gpui would dispatch for `keystroke`
+    /// given a context stack (bottom → top, as the dispatch tree
+    /// builds it).
+    fn winner(keystroke: &str, stack: &[&str]) -> String {
+        let keymap = Keymap::new(key_bindings());
+        let contexts = stack
+            .iter()
+            .map(|c| KeyContext::parse(c).unwrap())
+            .collect::<Vec<_>>();
+        let keystrokes = vec![Keystroke::parse(keystroke).unwrap()];
+        let (bindings, _) = keymap.bindings_for_input(&keystrokes, &contexts);
+        bindings
+            .first()
+            .map(|b| b.action().name())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// ⌘F must open the search bar of whichever pane holds focus.
+    /// Regression: the diff binding used a predicate-less context,
+    /// which ties any named context on depth and wins the
+    /// later-binding tiebreak — so ⌘F in the terminal opened the
+    /// diff pane's bar.
+    #[test]
+    fn cmd_f_routes_by_focus() {
+        // Terminal surface focused.
+        assert_eq!(winner("cmd-f", &["Root", "Terminal"]), "ddu::TermSearch");
+        // Terminal find bar's input focused (its own context on top
+        // of the surface's).
+        assert_eq!(
+            winner("cmd-f", &["Root", "Terminal", "TerminalSearch"]),
+            "ddu::TermSearch"
+        );
+        // Diff find bar's input focused.
+        assert_eq!(
+            winner("cmd-f", &["Root", "DiffSearch"]),
+            "ddu::DiffSearch"
+        );
+        // Anything else (sidebar rows don't take focus, so the
+        // gpui-component Root context stays on the path).
+        assert_eq!(winner("cmd-f", &["Root"]), "ddu::DiffSearch");
+        // Note: gpui's `Not` predicate never evaluates against an
+        // empty context stack (its eval guards on a non-empty slice),
+        // but the dispatch path always includes at least the Root
+        // context, so the unbound case can't occur in the app.
+    }
+
+    /// ⌘C fallback chain: the diff-pane copy runs first and yields
+    /// to the terminal copy when a terminal selection exists.
+    #[test]
+    fn cmd_c_falls_back_to_terminal() {
+        let names = |stack: &[&str]| {
+            let keymap = Keymap::new(key_bindings());
+            let contexts = stack
+                .iter()
+                .map(|c| KeyContext::parse(c).unwrap())
+                .collect::<Vec<_>>();
+            let keystrokes = vec![Keystroke::parse("cmd-c").unwrap()];
+            let (bindings, _) = keymap.bindings_for_input(&keystrokes, &contexts);
+            bindings
+                .iter()
+                .map(|b| b.action().name().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&["Root", "Terminal"]),
+            vec!["input::Copy", "ddu::TermCopy"]
+        );
+        assert_eq!(names(&["Root"]), vec!["input::Copy"]);
+    }
+}
+
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Global shortcuts: ⌘N new session, ⌘B sessions, ⌘T file tree,
         // ⌘R changes, ⌘W close. (⌘, OpenSettings lives at app level in
         // main.rs so the Settings menu item can resolve its ⌘, hint.)
-        cx.bind_keys([
-            // ⌘N spawns the default launcher in the active project
+        cx.bind_keys(key_bindings());
             // (guarded: with no projects there is nothing to spawn
             // into); ⌘O adds a project via the folder picker. ⌘T
-            // toggles the diff file tree under the project tree.
-            KeyBinding::new("cmd-n", NewSession, None),
-            KeyBinding::new("cmd-o", AddProject, None),
-            KeyBinding::new("cmd-t", ToggleDiffTree, None),
-            KeyBinding::new("cmd-b", ToggleSessions, None),
-            KeyBinding::new("cmd-r", ToggleDiff, None),
-            KeyBinding::new("cmd-w", CloseSession, None),
-            // ⌘+/⌘− (with their shifted variants) zoom the terminal
-            // font size; persisted like the settings field.
-            KeyBinding::new("cmd-=", FontLarger, None),
-            KeyBinding::new("cmd-+", FontLarger, None),
-            KeyBinding::new("cmd--", FontSmaller, None),
-            KeyBinding::new("cmd-_", FontSmaller, None),
-            // ⌘1..⌘9: select the Nth session in the current project.
-            // Prefixed "cmd" so bare digits keep reaching the PTY.
-            KeyBinding::new("cmd-1", SelectSession1, None),
-            KeyBinding::new("cmd-2", SelectSession2, None),
-            KeyBinding::new("cmd-3", SelectSession3, None),
-            KeyBinding::new("cmd-4", SelectSession4, None),
-            KeyBinding::new("cmd-5", SelectSession5, None),
-            KeyBinding::new("cmd-6", SelectSession6, None),
-            KeyBinding::new("cmd-7", SelectSession7, None),
-            KeyBinding::new("cmd-8", SelectSession8, None),
-            KeyBinding::new("cmd-9", SelectSession9, None),
-            // Terminal-scoped: these beat gpui-component Root's global
-            // Tab/Shift-Tab focus cycling (deeper key context wins), so
-            // the PTY gets real tab/backtab bytes and focus never jumps
-            // to sidebar buttons mid-session. ⌘V is unbound globally.
-            KeyBinding::new("tab", TermTab, Some("Terminal")),
-            KeyBinding::new("shift-tab", TermBacktab, Some("Terminal")),
-            KeyBinding::new("cmd-v", TermPaste, Some("Terminal")),
-            // ⌘C copies the mouse selection when one exists (the
-            // handler propagates otherwise); PTYs never see it.
-            KeyBinding::new("cmd-c", TermCopy, Some("Terminal")),
-            // Outside the terminal, ⌘C copies the active diff-pane
-            // text selection (window-scoped `TextSelection`); the
-            // handler propagates when nothing is selected.
-            KeyBinding::new("cmd-c", input::Copy, None),
-            // Two find bars share ⌘F by focus. While the terminal
-            // surface holds focus its deeper "Terminal" context makes
-            // this the winning binding (the PTY gets its own search
-            // over the scrollback); anywhere else in the window the
-            // global binding below opens the diff pane's bar. When a
-            // bar's input already holds focus its own action refocuses
-            // it with the query selected, matching platform find bars.
-            KeyBinding::new("cmd-f", TermSearch, Some("Terminal")),
-            KeyBinding::new("cmd-f", DiffSearch, None),
-            // The diff pane's find bar: once its input holds focus the
-            // "DiffSearch" context is on the dispatch path. Enter/
-            // Shift-Enter come from the input itself (it dispatches
-            // the `Enter` action), handled on the bar in
-            // `ui::diff_panel`.
-            KeyBinding::new("cmd-g", DiffSearchNext, Some("DiffSearch")),
-            KeyBinding::new("cmd-shift-g", DiffSearchPrev, Some("DiffSearch")),
-            // The terminal bar's match-cycling: its "TerminalSearch"
-            // context (set on the bar in `ui::terminal`) is deeper
-            // than the surface's "Terminal", so these win while its
-            // input holds focus.
-            KeyBinding::new("cmd-g", TermSearchNext, Some("TerminalSearch")),
-            KeyBinding::new("cmd-shift-g", TermSearchPrev, Some("TerminalSearch")),
-            // The standalone settings window: Escape/⌘W close it (the
-            // deeper context beats the global ⌘W → CloseSession).
-            KeyBinding::new("escape", CloseSettings, Some("SettingsWindow")),
-            KeyBinding::new("cmd-w", CloseSettings, Some("SettingsWindow")),
-        ]);
 
         let cfg = cx.global::<crate::config::Config>().clone();
         let state = cx.global::<crate::config::State>().clone();
