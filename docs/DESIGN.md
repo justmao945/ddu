@@ -157,6 +157,20 @@ struct AgentCmd { program: String, args: Vec<String>, cwd: PathBuf, env: Vec<(St
 * Shortcuts: `cmd-1/2/3` focus the three panes, `cmd-t` new session, `cmd-w` close session (with `AlertDialog` kill confirmation), `cmd-b` collapse right pane. Via `actions! + bind_keys`.
 * Theme: everything via `cx.theme()` tokens, no hardcoded colors; terminal SGR colors map onto the theme palette.
 * Notifications: agent exit/error via `push_notification`; kill via `open_alert_dialog` (title names the object, confirm button names the outcome, e.g. Remove "xxx").
+* Desktop notifications (macOS): an interactive agent CLI never "finishes" at the
+  process level, so the signal is the agent's own hand-back marker in the PTY
+  stream — `BEL`, `OSC 9 ; <text>` (iTerm2/WezTerm/Ghostty) or
+  `OSC 777 ; notify ; <title> ; <body>` (urxvt). `terminal/attention.rs` scans
+  the raw bytes beside the alacritty parser and emits `TermEvent::Attention`;
+  `AppView` raises `show_system_notification` (gpui → `UNUserNotificationCenter`,
+  one tag per session row so a newer marker replaces the older toast) unless the
+  window is active *and* that session is the one on screen. ConEmu progress
+  (`OSC 9 ; 4 ; …`) is filtered — it means "busy", not "yours". Setting:
+  Settings → General → Notifications. macOS only hands a notification to a
+  process whose code identity is the app's: `make-bundle.sh` signs the
+  exec'd `ddu.bin` with the bundle id, then seals the bundle (ad-hoc; no
+  certificate), so an unsigned build reaches `show_system_notification`
+  and the OS drops it (`UNErrorDomain Code=1`).
 
 ## 11. Performance and Correctness
 
@@ -171,6 +185,7 @@ struct AgentCmd { program: String, args: Vec<String>, cwd: PathBuf, env: Vec<(St
 * ~~M3 Real diff~~ ✅ shipped: `diff/` queries HEAD→workdir (staged + unstaged + untracked) via git2; 3s poll + manual refresh; branch label; stat counts; 5000-line cap per file.
 * M4 Session management: open ✅ / kill ✅ / restart ✅ / exit notifications ✅ / confirmations ✅ / persistence — **state.json persistence remains**.
 * M5 File tree + worktree + polish: explorer, per-session worktrees, shortcuts (partially: cmd-t / cmd-b / cmd-w live), theme.
+* Desktop notifications ✅ shipped: `terminal/attention.rs` decodes the agent's own hand-back markers (`BEL` / `OSC 9` / `OSC 777`) off the PTY stream, `AppView` posts one `show_system_notification` per row unless that terminal is the one on screen; Settings → General toggles it.
 
 ## 13. Risks
 

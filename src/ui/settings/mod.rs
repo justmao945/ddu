@@ -14,6 +14,7 @@ use gpui_kit::component::setting::{RenderOptions, SettingGroup, SettingItem, Set
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+mod notify;
 mod shell;
 mod theme;
 
@@ -62,6 +63,7 @@ where
     .keywords([title, description])
 }
 
+use self::notify::notify_item;
 use self::shell::{default_session_item, shell_program_item};
 use self::theme::{
     terminal_font_item, terminal_scrollback_item, terminal_size_item, theme_item,
@@ -130,6 +132,11 @@ impl Render for SettingsWindow {
                                 SettingGroup::new()
                                     .title("Sessions")
                                     .item(default_session_item()),
+                            )
+                            .group(
+                                SettingGroup::new()
+                                    .title("Notifications")
+                                    .item(notify_item()),
                             ),
                     )
                     .page(

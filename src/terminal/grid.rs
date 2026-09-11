@@ -15,6 +15,7 @@ use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use parking_lot::Mutex;
 use portable_pty::Child;
 
+use super::attention::{Attention, Scanner};
 use super::pty::{PtyProcess, PtySpawn, PtyWriter};
 
 /// Messages from the pump threads to the UI.
@@ -305,7 +306,9 @@ impl TermGrid {
 /// Spawn the two pump threads for a freshly started [`PtyProcess`].
 ///
 /// * Reader thread: `read → parse per byte → coalesced Wakeup`, exits on
-///   EOF (child closed its output).
+///   EOF (child closed its output). The same bytes also feed the
+///   [`Scanner`], whose signals go out on `attention` (a dropped signal
+///   only costs one notification).
 /// * Waiter thread: blocks on `child.wait()`, then reports `Exit`.
 pub fn spawn_pump(
     term: Arc<FairMutex<Term<EventProxy>>>,
@@ -313,18 +316,26 @@ pub fn spawn_pump(
     recent: Arc<RecentOutput>,
     mut reader: Box<dyn Read + Send>,
     mut child: Box<dyn Child + Send + Sync>,
+    attention: async_channel::Sender<Attention>,
 ) {
     let reader_wake = wake.clone();
     std::thread::Builder::new()
         .name("ddu-pty-read".into())
         .spawn(move || {
             let mut parser: Processor<StdSyncHandler> = Processor::new();
+            let mut scanner = Scanner::new();
+            let mut signals = Vec::new();
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         recent.push(&buf[..n]);
+                        signals.clear();
+                        scanner.scan(&buf[..n], &mut signals);
+                        for signal in signals.drain(..) {
+                            let _ = attention.try_send(signal);
+                        }
                         {
                             let mut term = term.lock();
                             for &byte in &buf[..n] {
@@ -360,11 +371,19 @@ pub fn spawn_session(
     wake: async_channel::Sender<PumpMsg>,
     dark: bool,
     scrollback: usize,
+    attention: async_channel::Sender<Attention>,
 ) -> anyhow::Result<(TermGrid, PtyProcess)> {
     let (process, reader, child) = PtyProcess::spawn(cmd, cols, rows)?;
     let grid = TermGrid::new(cols, rows, process.writer().clone(), wake.clone(), scrollback);
     grid.dark.store(dark, Ordering::Relaxed);
-    spawn_pump(grid.term.clone(), wake, grid.recent.clone(), reader, child);
+    spawn_pump(
+        grid.term.clone(),
+        wake,
+        grid.recent.clone(),
+        reader,
+        child,
+        attention,
+    );
     Ok((grid, process))
 }
 
@@ -455,13 +474,14 @@ mod tests {
     #[cfg(unix)]
     fn pty_roundtrip_and_exit() {
         let (wake, rx) = async_channel::bounded::<PumpMsg>(1);
+        let (attention, _attention_rx) = async_channel::bounded::<Attention>(16);
         let cmd = PtySpawn {
             program: "/bin/sh".into(),
             args: vec![],
             cwd: std::env::temp_dir(),
         };
         let (grid, _process) =
-            spawn_session(&cmd, 80, 24, wake, true, 1000).expect("spawn sh");
+            spawn_session(&cmd, 80, 24, wake, true, 1000, attention).expect("spawn sh");
 
         assert!(
             wait_until(&grid.term, "$", Duration::from_secs(5)),
@@ -490,6 +510,38 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The agent-side "your turn" marker survives the whole trip — PTY
+    /// bytes → pump scanner → attention channel — which is what the
+    /// desktop notification rides on.
+    #[test]
+    #[cfg(unix)]
+    fn pty_attention_signals_reach_the_pump() {
+        let (wake, _rx) = async_channel::bounded::<PumpMsg>(1);
+        let (attention, attention_rx) = async_channel::bounded::<Attention>(16);
+        let cmd = PtySpawn {
+            program: "/bin/sh".into(),
+            args: vec![],
+            cwd: std::env::temp_dir(),
+        };
+        let (grid, _process) =
+            spawn_session(&cmd, 80, 24, wake, true, 1000, attention).expect("spawn sh");
+        assert!(
+            wait_until(&grid.term, "$", Duration::from_secs(5)),
+            "shell prompt never appeared"
+        );
+
+        grid.write(b"printf '\\033]9;turn complete\\007'\r");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = None;
+        while seen.is_none() && Instant::now() < deadline {
+            seen = attention_rx.try_recv().ok();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let signal = seen.expect("OSC 9 attention never reached the pump");
+        assert_eq!(signal.body, "turn complete");
+        assert_eq!(signal.title, None);
     }
 }
 

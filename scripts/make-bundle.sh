@@ -88,3 +88,17 @@ cat >> "$APP/Contents/MacOS/launch.sh" <<'LAUNCH_TAIL'
 exec "$(dirname "$0")/ddu.bin"
 LAUNCH_TAIL
 chmod +x "$APP/Contents/MacOS/launch.sh"
+
+# macOS checks the code identity of the *process* before it lets an app
+# post notifications (and use other bundle-scoped services). A bare
+# linker signature is not an identity: usernotificationsd answers
+# requestAuthorization/addRequest with "Entitlement
+# 'com.apple.private.usernotifications.bundle-identifiers' required",
+# the framework reports UNErrorDomain Code=1 and nothing is ever shown.
+# The running process here is the exec'd ddu.bin, so the *binary* — not
+# just the bundle — must carry the app's identifier. Sign it with the
+# bundle id FIRST, then seal the bundle: `--deep` would re-sign the
+# binary with a derived identifier and undo the match (sign the bundle
+# without it). Ad-hoc is enough; no Apple certificate is needed.
+codesign --force --sign - -i "$ID" "$APP/Contents/MacOS/ddu.bin"
+codesign --force --sign - "$APP"

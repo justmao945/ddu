@@ -88,6 +88,10 @@ pub struct Config {
     pub terminal_font_size: Option<f32>,
     #[serde(default)]
     pub dark_theme: bool,
+    /// Desktop notification when an agent signals "your turn" (the
+    /// `BEL`/`OSC 9`/`OSC 777` markers of its TUI). `None` = on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_on_attention: Option<bool>,
     /// Terminal scrollback cap (lines); the grid drops history beyond
     /// it. `None` = the stock 3000-line history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -293,6 +297,12 @@ impl Config {
     /// stock history when unset.
     pub fn terminal_scrollback(&self) -> usize {
         self.terminal_scrollback.unwrap_or(TERMINAL_SCROLLBACK_DEFAULT)
+    }
+
+    /// Whether an agent's "your turn" marker raises a desktop
+    /// notification — on unless switched off in Settings.
+    pub fn notify_on_attention(&self) -> bool {
+        self.notify_on_attention != Some(false)
     }
 }
 

@@ -3,6 +3,7 @@
 //!
 //! * [`pty`]   — process + master handles (spawn/resize/kill)
 //! * [`grid`]  — `Term` behind a `FairMutex` + the two pump threads
+//! * [`attention`] — `BEL`/`OSC 9`/`OSC 777` markers in the byte stream
 //! * [`input`] — keystroke → escape-sequence encoding
 //! * [`element`] — the grid painter (custom `Element`)
 //! * [`boxart`] — vector box-drawing/block chars (no font gaps)
@@ -11,6 +12,7 @@
 //! grid and process, receives pump wakeups, and emits [`TermEvent`]
 //! when the child exits.
 
+mod attention;
 mod boxart;
 mod element;
 mod grid;
@@ -28,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::*;
 
+pub use attention::Attention;
 pub use pty::PtySpawn;
 
 /// Minimum gap between grid+PTY reflows while a drag is resizing.
@@ -37,10 +40,14 @@ const RESIZE_DEBOUNCE: Duration = Duration::from_millis(140);
 const SCROLLBAR_IDLE: Duration = Duration::from_secs(2);
 
 /// Terminal events emitted to subscribers (the app shell).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermEvent {
     /// Grid changed (coalesced); subscribers should re-render.
     Wakeup,
+    /// The child printed a "the user is needed" marker (`BEL` /
+    /// `OSC 9` / `OSC 777`) — agents emit one when a turn ends, a
+    /// question is asked or a run fails. See [`attention`].
+    Attention(attention::Attention),
     /// Child exited with the raw exit code (0 = success).
     Exit(i32),
 }
@@ -103,6 +110,10 @@ impl TermSession {
         let (cols, rows) = (80, 24);
         let scrollback = cx.global::<crate::config::Config>().terminal_scrollback();
         let (wake_tx, wake_rx) = async_channel::bounded::<grid::PumpMsg>(1);
+        // Attention markers are events, not repaint hints: they get
+        // their own queue so the capacity-1 wakeup coalescing can never
+        // swallow a notification.
+        let (attention_tx, attention_rx) = async_channel::bounded::<attention::Attention>(16);
         let (grid, process) = grid::spawn_session(
             cmd,
             cols,
@@ -110,6 +121,7 @@ impl TermSession {
             wake_tx,
             gpui_kit::component::theme::Theme::global(cx).is_dark(),
             scrollback,
+            attention_tx,
         )?;
 
         let entity = cx.new(|cx| {
@@ -175,6 +187,22 @@ impl TermSession {
                         });
                         break;
                     }
+                }
+            }
+            anyhow::Ok(())
+        })
+        .detach();
+
+        // Attention pump: the reader thread's BEL/OSC markers, one
+        // subscriber event each. Runs until the entity is gone.
+        let weak = entity.downgrade();
+        cx.spawn(async move |cx| {
+            while let Ok(signal) = attention_rx.recv().await {
+                if weak
+                    .update(cx, |_, cx| cx.emit(TermEvent::Attention(signal)))
+                    .is_err()
+                {
+                    break;
                 }
             }
             anyhow::Ok(())
@@ -1042,7 +1070,7 @@ mod tests {
                 cx.update(|cx| {
                     let events = events.clone();
                     cx.subscribe(&session, move |_, event: &super::TermEvent, _| {
-                        events.borrow_mut().push(*event);
+                        events.borrow_mut().push(event.clone());
                     })
                     .detach();
                 });

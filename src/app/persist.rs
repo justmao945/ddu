@@ -191,6 +191,12 @@ impl AppView {
                                 window,
                                 move |this, emitter, event: &TermEvent, window, cx| match event {
                                     TermEvent::Wakeup => cx.notify(),
+                                    TermEvent::Attention(signal) => this.on_session_attention(
+                                        emitter.clone(),
+                                        signal,
+                                        window,
+                                        cx,
+                                    ),
                                     TermEvent::Exit(code) => this.on_session_exit(
                                         emitter.clone(),
                                         *code,

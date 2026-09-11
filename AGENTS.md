@@ -28,7 +28,9 @@ License: Apache-2.0, GPL-free throughout. Design docs: `docs/DESIGN.md` (the app
   with a seq guard against stale results; `mod.rs` data model.
 - `src/terminal/` — `mod.rs` portable-pty pump + subscriber-channel wakeup
   events; `grid.rs` alacritty_terminal grid + parser; `element.rs` custom
-  paint element (char-cell metrics, TextRuns, SGR colors).
+  paint element (char-cell metrics, TextRuns, SGR colors); `attention.rs`
+  streams `BEL`/`OSC 9`/`OSC 777` markers out of the raw bytes (the signal
+  behind the agent-finished desktop notification).
 - `src/ui/` — panels: `session_panel`, `terminal`, `diff_panel`,
   `status_bar`, `title_bar`, `settings_window` (standalone native window,
   singleton via a global slot). Shared metrics/mappings in
@@ -54,6 +56,14 @@ License: Apache-2.0, GPL-free throughout. Design docs: `docs/DESIGN.md` (the app
   that ancestor case: the caller is running inside the app, so killing it
   would take the shell down mid-script. The generated `launch.sh` must
   keep `exec` as its LAST line — anything appended after it never runs.
+- `make-bundle.sh` ad-hoc signs every bundle: `ddu.bin` first, with the
+  bundle id as its code identifier, then the bundle without `--deep`.
+  macOS keys bundle-scoped services (desktop notifications) off the
+  running process's code identity; the process is the exec'd `ddu.bin`,
+  so an unsigned build calls `show_system_notification` and macOS drops
+  it (`UNErrorDomain Code=1`, usernotificationsd "not allowed"). No
+  Apple certificate is involved — ad-hoc is enough, and the ordering
+  matters (`--deep` would re-sign the binary with a derived id).
 
 **Never** start the binary directly as a background child (`nohup`, `hub exec`,
 raw spawn) — on macOS 26 an unactivated process: (a) never gets
