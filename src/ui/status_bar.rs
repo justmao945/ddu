@@ -81,7 +81,7 @@ fn toggle_diff(this: &AppView, cx: &mut Context<AppView>) -> Button {
         .ghost()
         .small()
         .tooltip("Toggle changes (⌘R)")
-        .on_click(cx.listener(|this, _, _, cx| this.toggle_diff(cx)))
+        .on_click(cx.listener(|this, _, window, cx| this.toggle_diff(window, cx)))
 }
 
 /// Collapse/expand the diff file tree layer under the project tree.

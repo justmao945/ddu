@@ -3,7 +3,38 @@
 
 use std::time::Duration;
 
+use gpui_kit::component::input::InputState;
+
 use super::*;
+
+/// State behind the diff pane's find bar (⌘F). `open` folds the bar's
+/// whole lifecycle: closed → hidden, matches stay empty.
+pub(crate) struct DiffSearch {
+    pub input: Entity<InputState>,
+    pub open: bool,
+    /// Child-row indices into the pane's scroll container (see
+    /// [`crate::diff::match_rows`]); one entry per occurrence, so the
+    /// highlight set dedupes while the counter counts.
+    pub matches: Vec<usize>,
+    /// Index into `matches` the counter shows and the scroll targets.
+    pub current: usize,
+}
+
+impl DiffSearch {
+    pub fn new(window: &mut Window, cx: &mut Context<AppView>) -> Self {
+        let input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_placeholder("Find in diff", window, cx);
+            input
+        });
+        Self {
+            input,
+            open: false,
+            matches: Vec::new(),
+            current: 0,
+        }
+    }
+}
 
 impl AppView {
     pub(super) fn reset_diff(&mut self) {
@@ -11,11 +42,78 @@ impl AppView {
         self.diff_error = None;
         self.diff_file = None;
         self.diff_tree_closed.clear();
+        self.diff_search.matches.clear();
         self.diff_tree_scroll.set_offset(point(px(0.), px(0.)));
         self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
     }
 
-    pub(super) fn apply_diff(&mut self, result: anyhow::Result<GitDiff>) {
+    /// Open the find bar (or refocus it when already open); the whole
+    /// query is selected so typing replaces it.
+    pub(crate) fn open_diff_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.diff_search.open = true;
+        self.diff_search.input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        self.refresh_diff_search(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn close_diff_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.diff_search.open = false;
+        self.diff_search.matches.clear();
+        self.diff_search.current = 0;
+        // Hand focus back to the window fallback so global shortcuts
+        // keep a dispatch path and the terminal cursor goes hollow.
+        self.window_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Step through matches, wrapping at both ends. `back` walks
+    /// Shift-Enter / ⌘⇧G direction.
+    pub(crate) fn diff_search_step(&mut self, back: bool, cx: &mut Context<Self>) {
+        let len = self.diff_search.matches.len();
+        if len == 0 {
+            return;
+        }
+        self.diff_search.current = if back {
+            (self.diff_search.current + len - 1) % len
+        } else {
+            (self.diff_search.current + 1) % len
+        };
+        self.diff_search_jump(cx);
+    }
+
+    /// Recompute matches from the input's current value against the
+    /// selected file. Called on keystrokes, diff refreshes and file
+    /// switches; with `jump`, the first match is scrolled into view
+    /// (query edits), otherwise the current index is kept clamped.
+    pub(crate) fn refresh_diff_search(&mut self, cx: &mut Context<Self>) {
+        self.diff_search.matches.clear();
+        if self.diff_search.open {
+            if let (Some(diff), Some(ix)) = (&self.diff, self.diff_file) {
+                if let Some(file) = diff.files.get(ix) {
+                    let query = self.diff_search.input.read(cx).value().to_string();
+                    self.diff_search.matches = crate::diff::match_rows(file, &query);
+                }
+            }
+        }
+        self.diff_search.current = self
+            .diff_search
+            .current
+            .min(self.diff_search.matches.len().saturating_sub(1));
+        cx.notify();
+    }
+
+    /// Point the scroll container at the current match's row.
+    pub(crate) fn diff_search_jump(&mut self, cx: &mut Context<Self>) {
+        if let Some(&row) = self.diff_search.matches.get(self.diff_search.current) {
+            self.diff_hunks_scroll.scroll_to_item(row);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn apply_diff(&mut self, result: anyhow::Result<GitDiff>, cx: &mut Context<Self>) {
         // The live selection's path: `None` stays `None` (no click =
         // empty pane — the poll never auto-selects a file).
         let selected = self
@@ -49,6 +147,9 @@ impl AppView {
             }
         }
         self.diff_seed_path = None;
+        // The 3s poll can rewrite the open file under an active
+        // search: keep matches and counter truthful.
+        self.refresh_diff_search(cx);
     }
 
     /// Kick off one diff reload; results newer than any in-flight one
@@ -72,7 +173,7 @@ impl AppView {
             }
             let _ = this.update(cx, |v, cx| {
                 if v.diff_seq == seq {
-                    v.apply_diff(result);
+                    v.apply_diff(result, cx);
                     cx.notify();
                 }
             });
@@ -98,7 +199,7 @@ impl AppView {
                     .await;
                 this.update(cx, |v, cx| {
                     if v.diff_seq == seq {
-                        v.apply_diff(result);
+                        v.apply_diff(result, cx);
                         cx.notify();
                     }
                 })?;

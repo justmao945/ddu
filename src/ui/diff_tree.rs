@@ -328,7 +328,7 @@ fn file_row(
         .cursor_pointer()
         .map(|el| if active { el.bg(active_bg) } else { el })
         .hover(move |el| el.bg(if active { active_bg } else { hov_bg }))
-        .on_click(cx.listener(move |this, _, _, cx| {
+        .on_click(cx.listener(move |this, _, window, cx| {
             // Selecting a file IS opening the right pane: a closed
             // pane springs open on the first click.
             let changed = this.diff_file != Some(ix);
@@ -336,8 +336,11 @@ fn file_row(
                 this.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
             }
             this.diff_file = Some(ix);
+            // An open find bar re-anchors to the newly shown file
+            // (the query persists across files).
+            this.refresh_diff_search(cx);
             if !this.show_diff {
-                this.set_diff(true, cx);
+                this.set_diff(true, window, cx);
             } else {
                 cx.notify();
             }

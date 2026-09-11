@@ -41,6 +41,9 @@ gpui_kit::actions!(
         FontLarger,
         FontSmaller,
         Quit,
+        DiffSearch,
+        DiffSearchNext,
+        DiffSearchPrev,
         SelectSession1,
         SelectSession2,
         SelectSession3,
@@ -124,6 +127,10 @@ pub struct AppView {
     pub(crate) session_seq: usize,
     pub(crate) diff: Option<GitDiff>,
     pub(crate) diff_error: Option<String>,
+    /// The right pane's find bar (⌘F): input entity, match list and
+    /// cycle position. Lives in [`diff`]'s module; always constructed,
+    /// the `open` flag folds its visibility.
+    pub(crate) diff_search: diff::DiffSearch,
     /// Guards against stale poll results overwriting newer ones.
     diff_seq: u64,
     /// Graceful shutdown in flight: live agents were interrupted; when
@@ -207,6 +214,15 @@ impl AppView {
             // text selection (window-scoped `TextSelection`); the
             // handler propagates when nothing is selected.
             KeyBinding::new("cmd-c", input::Copy, None),
+            // The diff pane's find bar: ⌘F opens it anywhere in the
+            // window; once its input holds focus the "DiffSearch"
+            // context is on the dispatch path, giving ⌘G/⌘⇧G the
+            // match-cycling roles. Enter/Shift-Enter come from the
+            // input itself (it dispatches the `Enter` action), handled
+            // on the bar in `ui::diff_panel`.
+            KeyBinding::new("cmd-f", DiffSearch, None),
+            KeyBinding::new("cmd-g", DiffSearchNext, Some("DiffSearch")),
+            KeyBinding::new("cmd-shift-g", DiffSearchPrev, Some("DiffSearch")),
             // The standalone settings window: Escape/⌘W close it (the
             // deeper context beats the global ⌘W → CloseSession).
             KeyBinding::new("escape", CloseSettings, Some("SettingsWindow")),
@@ -266,6 +282,7 @@ impl AppView {
             session_seq: 0,
             diff: None,
             diff_error: None,
+            diff_search: diff::DiffSearch::new(window, cx),
             diff_seq: 0,
             shutting_down: false,
             quit_after_shutdown: false,
@@ -336,6 +353,29 @@ impl AppView {
             },
         )
         .detach();
+        // Find-bar keystrokes: recompute matches against the open
+        // file. `InputEvent::Change` fires on every edit, so the
+        // counter/highlight track typing live; AppView isn't borrowed
+        // while the input emits, so a direct refresh is safe (unlike
+        // the splitter handlers above, which can re-enter).
+        {
+            let input = this.diff_search.input.clone();
+            cx.subscribe_in(
+                &input,
+                window,
+                |this, _, event: &input::InputEvent, _, cx| {
+                    if matches!(event, input::InputEvent::Change) {
+                        this.refresh_diff_search(cx);
+                        if !this.diff_search.matches.is_empty() {
+                            this.diff_search.current = 0;
+                            this.diff_hunks_scroll
+                                .scroll_to_item(this.diff_search.matches[0]);
+                        }
+                    }
+                },
+            )
+            .detach();
+        }
         // Record the window frame (move/resize/zoom/fullscreen) as it
         // changes; `persist` writes it, and a debounced save covers a
         // crash between the change and the next explicit persist.
@@ -385,6 +425,10 @@ impl AppView {
         // - DDU_VERIFY_CLOSE=1 closes the current session through the
         //   normal ⌘W path (request_close_session) a tick after the
         //   restore, exercising single-session close headlessly.
+        // - DDU_VERIFY_SEARCH=<query> waits for the first poll's diff,
+        //   selects the first changed file, opens the find bar with the
+        //   query and jumps to the first match — screenshots show the
+        //   counter, highlights and scroll without synthetic input.
         if std::env::var_os("DDU_VERIFY_EXIT").is_some() {
             this.shutting_down = true;
         }
@@ -393,6 +437,72 @@ impl AppView {
                 let (p, six) = (this.current_project, this.current_session);
                 this.request_close_session(p, six, window, cx);
             });
+        }
+        if let Some(query) = std::env::var("DDU_VERIFY_SEARCH").ok().filter(|q| !q.is_empty()) {
+            // Headless verification of the find bar (pixels/AX aren't
+            // permitted in this harness; the hook drives the real
+            // paths and dumps observed state). Readiness is polled on
+            // a BACKGROUND timer — a self-rearming `defer_in` here
+            // pumped a frame per defer at display-link rate, starved
+            // the main runloop (the 3s diff poll could never land)
+            // and spun at ~100% CPU: frozen app, high energy.
+            let weak = cx.weak_entity();
+            window
+                .spawn(cx, async move |cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                        match weak.read_with(cx, |v, _| {
+                            v.diff.as_ref().is_some_and(|d| !d.files.is_empty())
+                        }) {
+                            Ok(true) => break,
+                            Ok(false) => continue,
+                            // AppView gone: window is closing.
+                            Err(_) => return,
+                        }
+                    }
+                    let weak_arm = weak.clone();
+                    let _ = cx.update(move |window, app_cx| {
+                        let _ = weak_arm.update(app_cx, |this, cx| {
+                            this.diff_file = Some(0);
+                            this.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
+                            this.open_diff_search(window, cx);
+                            this.diff_search.input.update(cx, |input, cx| {
+                                input.set_value(query, window, cx);
+                            });
+                            this.refresh_diff_search(cx);
+                            this.diff_search_jump(cx);
+                        });
+                    });
+                    // Let prepaint apply the scroll, then write what
+                    // the running app actually shows: matches, counter
+                    // row, scroll offset, and the scroll container's
+                    // direct-child count (== row count only if rows
+                    // render flat, as the search scroll expects).
+                    for _ in 0..8 {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                    }
+                    let _ = cx.update(move |_, app_cx| {
+                        let _ = weak.read_with(app_cx, |this, cx| {
+                            let search = &this.diff_search;
+                            let json = format!(
+                                "{{\"query\":{:?},\"open\":{},\"selected\":{:?},\"matches\":{},\"current\":{},\"scroll_y\":{},\"scroll_children\":{}}}",
+                                search.input.read(cx).value().to_string(),
+                                search.open,
+                                this.diff_file.and_then(|ix| this.diff.as_ref().and_then(|d| d.files.get(ix)).map(|f| f.path.clone())),
+                                search.matches.len(),
+                                search.current,
+                                this.diff_hunks_scroll.offset().y,
+                                this.diff_hunks_scroll.children_count(),
+                            );
+                            let _ = std::fs::write("/tmp/ddu-search-verify.json", json);
+                        });
+                    });
+                })
+                .detach();
         }
         // Seed the diff pane from the restored current session —
         // selection, collapsed dirs and the tree-layer height are all
@@ -565,8 +675,21 @@ impl Render for AppView {
                 this.request_close_session(p, six, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSessions, _, cx| this.toggle_sessions(cx)))
-            .on_action(cx.listener(|this, _: &ToggleDiff, _, cx| this.toggle_diff(cx)))
+            .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleDiffTree, _, cx| this.toggle_diff_tree(cx)))
+            // The diff pane's find bar. ⌘G/⌘⇧G resolve only while the
+            // bar's input holds focus (the "DiffSearch" key context);
+            // the handlers live here, not on the bar, so they keep
+            // working if focus drifts to the pane mid-search.
+            .on_action(cx.listener(|this, _: &DiffSearch, window, cx| {
+                this.open_diff_search(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DiffSearchNext, _, cx| {
+                this.diff_search_step(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DiffSearchPrev, _, cx| {
+                this.diff_search_step(true, cx);
+            }))
             // ⌘Q: confirm dialog, then graceful shutdown — live agents
             // get Ctrl-C, their resume ids land in state.json, then the
             // process exits.

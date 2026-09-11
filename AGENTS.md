@@ -107,6 +107,14 @@ the footer when Enter should confirm. One-off informational dialogs
   bakes the flag into the bundle launcher; the app then auto-opens the
   Settings window on that page (0-based) for screenshots. Relaunch without
   the env var to regenerate a clean launcher.
+- Diff search: `DDU_VERIFY_SEARCH=<query> bash scripts/dev.sh` waits for
+  the first diff poll, selects the first changed file, opens the find bar
+  (⌘F) with the query and dumps the observed state (match count, scroll
+  offset, scroll-container child count) to `/tmp/ddu-search-verify.json`.
+  The hook polls readiness on a background timer — a self-rearming
+  `defer_in` pumps a frame per defer at display-link rate, starving the
+  main runloop (frozen app, ~100% CPU). Dev hooks that need to re-check
+  state must never re-arm per frame.
 
 ## Conventions
 

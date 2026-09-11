@@ -68,7 +68,8 @@ done
 LAUNCH
 # Dev hooks baked at bundle time (see main.rs / app/mod.rs): auto-open
 # Settings on a page, freeze the Exiting overlay, close the current
-# session, point at a scratch state file, or enable the debug trace.
+# session, drive the diff-pane find bar, point at a scratch state file,
+# or enable the debug trace.
 # Written OUTSIDE the heredoc — inside it, ${v:+A="$v"} expansion strips
 # the inner quotes (verified), which truncates unquoted values containing
 # spaces (e.g. "Application Support").
@@ -76,6 +77,7 @@ LAUNCH
   [ -n "${DDU_VERIFY_SETTINGS:-}" ] && printf 'export DDU_VERIFY_SETTINGS="%s"\n' "$DDU_VERIFY_SETTINGS"
   [ -n "${DDU_VERIFY_EXIT:-}" ] && printf 'export DDU_VERIFY_EXIT="%s"\n' "$DDU_VERIFY_EXIT"
   [ -n "${DDU_VERIFY_CLOSE:-}" ] && printf 'export DDU_VERIFY_CLOSE="%s"\n' "$DDU_VERIFY_CLOSE"
+  [ -n "${DDU_VERIFY_SEARCH:-}" ] && printf 'export DDU_VERIFY_SEARCH="%s"\n' "$DDU_VERIFY_SEARCH"
   [ -n "${DDU_STATE_PATH:-}" ] && printf 'export DDU_STATE_PATH="%s"\n' "$DDU_STATE_PATH"
   [ -n "${DDU_SETTINGS_PATH:-}" ] && printf 'export DDU_SETTINGS_PATH="%s"\n' "$DDU_SETTINGS_PATH"
   [ -n "${DDU_DEBUG:-}" ] && printf 'export DDU_DEBUG="%s"\n' "$DDU_DEBUG"

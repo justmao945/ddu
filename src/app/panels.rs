@@ -34,8 +34,8 @@ impl AppView {
     }
 
     /// Toggle the diff panel (slot sits after the always-present center).
-    pub(crate) fn toggle_diff(&mut self, cx: &mut Context<Self>) {
-        self.set_diff(!self.show_diff, cx);
+    pub(crate) fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_diff(!self.show_diff, window, cx);
     }
 
     /// Toggle the diff file tree layer under the project tree.
@@ -45,9 +45,15 @@ impl AppView {
         cx.notify();
     }
 
-    pub(crate) fn set_diff(&mut self, on: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_diff(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         if on == self.show_diff {
             return;
+        }
+        // Hiding the pane hides the find bar with it; close it through
+        // the real path so focus returns to the window fallback instead
+        // of lingering on the now-unmounted input.
+        if !on && self.diff_search.open {
+            self.close_diff_search(window, cx);
         }
         // Inner splitter slots: the terminal is 0, the diff 1.
         const DIFF_IX: usize = 1;

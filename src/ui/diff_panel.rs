@@ -7,8 +7,10 @@
 use super::PANEL_HEADER_PX;
 use super::diff_tree::plus_minus;
 use crate::app::AppView;
-use crate::diff::{DiffFile, DiffLine};
+use crate::diff::{DiffFile, DiffLine, DiffRow};
 use gpui_kit::base::SelectableText;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{self, Input};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
@@ -30,16 +32,21 @@ pub(crate) fn render(
         .h_full()
         .w_full()
         .min_w_0()
+        // Anchor for the find bar's absolute overlay.
+        .relative()
         .overflow_hidden()
         .bg(cx.theme().background)
         // Clicking anywhere in the panel moves focus off the terminal,
-        // so its block cursor turns hollow.
+        // so its block cursor goes hollow. The find bar stops its own
+        // mouse downs (see `find_bar`) so this can't steal focus back
+        // from the input mid-keystroke.
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _, window, cx| this.window_focus.focus(window, cx)),
         )
         .when(has_file, |el| el.child(header(this, cx)))
         .child(body(this, window, cx))
+        .when(this.diff_search.open, |el| el.child(find_bar(this, cx)))
 }
 
 fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -108,7 +115,10 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
                 .overflow_scroll()
                 .track_scroll(&this.diff_hunks_scroll)
                 .p_2()
-                .child(file_diff(&diff.files[file_ix], window, cx)),
+                // Rows are the scroll container's DIRECT children: the
+                // handle indexes children positionally, which is what
+                // makes search's `scroll_to_item` work per line.
+                .children(file_rows(&diff.files[file_ix], this, window, cx)),
         )
         .scrollbar(&this.diff_hunks_scroll, scroll::ScrollbarAxis::Both)
         .context_menu({
@@ -150,44 +160,97 @@ const LINE_CHROME: f32 = 36. + 36. + 14. + 8. + 12.;
 /// Hunk header horizontal padding (`px_2` on both sides).
 const HEADER_CHROME: f32 = 16.;
 
-fn file_diff(file: &DiffFile, window: &mut Window, cx: &mut Context<AppView>) -> impl IntoElement {
+/// Lays one file out as the scroll container's direct-child rows: per
+/// hunk the `@@` header band then its lines, in [`DiffFile::rows`]
+/// order. Every row carries the file's definite `content_w`: the scroll
+/// container derives its content size from direct-child bounds (only a
+/// definite width gives the horizontal scrollbar a range, and uniform
+/// widths keep the +/- tint bands spanning it), and the row's position
+/// among these children is exactly the index `diff::match_rows` reports
+/// for it. Row indices must stay in sync with `DiffFile::rows` — both
+/// walk hunks as [header, lines…].
+fn file_rows(
+    file: &DiffFile,
+    this: &AppView,
+    window: &mut Window,
+    cx: &mut Context<AppView>,
+) -> Vec<AnyElement> {
     let content_w = measure_content_width(file, window, cx);
-    // Explicit width + min_w_full: the scroll container derives its
-    // content size from child layout bounds, and taffy fit-content-clamps
-    // auto-width children to the viewport, so only a definite width gives
-    // the horizontal scrollbar a range. Rows stretch to it (min_w_full),
-    // keeping the +/- tint spanning the whole scrollable width.
-    let mut hunks = v_flex().gap_2().w(content_w).min_w_full().flex_shrink_0();
+    // Uniform definite row width: the scroll container derives its
+    // content size from direct-child bounds (only a definite width
+    // gives the horizontal scrollbar a range), and equal widths keep
+    // the +/- tint bands spanning it.
+    let mut rows: Vec<AnyElement> = Vec::new();
     if file.hunks.is_empty() {
-        hunks = hunks.child(super::meta_text(
-            "No text changes to display (binary, empty file, or metadata change).",
-            cx,
-        ));
+        rows.push(
+            into_row(
+                super::meta_text(
+                    "No text changes to display (binary, empty file, or metadata change).",
+                    cx,
+                ),
+                content_w,
+            )
+            .into_any_element(),
+        );
     }
-    let mut line_no = 0usize;
-    for hunk in &file.hunks {
-        let mut h = v_flex()
-            .items_start()
-            .child(hunk_header(hunk.header.clone(), cx));
-        for line in &hunk.lines {
-            let id = line_no;
-            line_no += 1;
-            h = h.child(diff_line(id, line, cx));
-        }
-        hunks = hunks.child(h);
+    let matches = &this.diff_search.matches;
+    let current_row = matches.get(this.diff_search.current).copied();
+    // Rendering straight off `rows()` is what keeps the rendered child
+    // order (and thus every row's scroll index) identical to the walk
+    // `match_rows` numbers — one iterator, no parallel bookkeeping.
+    let mut row_ix = 0usize;
+    let mut hunk_ix = 0usize;
+    for row in file.rows() {
+        let element = match row {
+            DiffRow::Header(header) => {
+                let el = into_row(hunk_header(header.to_string(), hunk_ix > 0, cx), content_w)
+                    .into_any_element();
+                hunk_ix += 1;
+                el
+            }
+            DiffRow::Line(line) => {
+                let hit = matches.binary_search(&row_ix).is_ok();
+                into_row(
+                    diff_line(row_ix, line, hit, current_row == Some(row_ix), cx),
+                    content_w,
+                )
+                .into_any_element()
+            }
+        };
+        rows.push(element);
+        row_ix += 1;
     }
     if file.truncated {
-        hunks = hunks.child(super::meta_text(
-            "Preview limited to 5,000 lines. Change totals include the entire file.",
-            cx,
-        ));
+        rows.push(
+            into_row(
+                super::meta_text(
+                    "Preview limited to 5,000 lines. Change totals include the entire file.",
+                    cx,
+                ),
+                content_w,
+            )
+            .into_any_element(),
+        );
     }
-    hunks
+    rows
+}
+
+/// Every row carries the file's definite width plus the full-width
+/// minimum, so row bands stay uniform and the scroll container gets a
+/// real content size from its direct children.
+fn into_row<E: Styled>(el: E, w: Pixels) -> E {
+    el.w(w).min_w_full().flex_shrink_0()
 }
 
 /// Width the content column needs so the longest line never clips.
 /// Candidates are ranked by a display-cell estimate (non-ASCII ~2 cells),
-fn diff_line(id: usize, line: &DiffLine, cx: &mut Context<AppView>) -> impl IntoElement {
+fn diff_line(
+    id: usize,
+    line: &DiffLine,
+    hit: bool,
+    current: bool,
+    cx: &mut Context<AppView>,
+) -> Stateful<Div> {
     let (old, new) = (
         line.old_no.map(|n| n.to_string()).unwrap_or_default(),
         line.new_no.map(|n| n.to_string()).unwrap_or_default(),
@@ -196,6 +259,17 @@ fn diff_line(id: usize, line: &DiffLine, cx: &mut Context<AppView>) -> impl Into
         '+' => Some(cx.theme().green.opacity(0.12)),
         '-' => Some(cx.theme().red.opacity(0.12)),
         _ => None,
+    };
+    // Find matches repaint the row: the current match strongest, every
+    // other hit subtler. Search yellow wins over the +/- tint while
+    // the bar is up — the sign glyphs still carry the +/- colors — and
+    // vanish with it, restoring the plain diff look.
+    let search_bg = if current {
+        Some(cx.theme().yellow.opacity(0.30))
+    } else if hit {
+        Some(cx.theme().yellow.opacity(0.13))
+    } else {
+        None
     };
     let mono = cx.theme().mono_font_family.clone();
     let sign_color = match line.kind {
@@ -212,7 +286,7 @@ fn diff_line(id: usize, line: &DiffLine, cx: &mut Context<AppView>) -> impl Into
         .min_w_full()
         .font_family(mono.clone())
         .text_xs()
-        .when_some(tint, |el, tint| el.bg(tint))
+        .when_some(search_bg.or(tint), |el, bg| el.bg(bg))
         .child(gutter(old, cx))
         .child(gutter(new, cx))
         .child(
@@ -296,10 +370,13 @@ fn measure_content_width(
 
 /// The `@@ …` hunk header as a full-width band: subtle background,
 /// muted mono text, spanning the whole content column like the code
-/// rows below it instead of hugging the header text.
-fn hunk_header(header: String, cx: &mut Context<AppView>) -> impl IntoElement {
+/// rows below it instead of hugging the header text. `spaced` adds the
+/// inter-hunk gap the flattened layout lost with the per-hunk wrappers
+/// (the old `gap_2` between hunk blocks becomes this top margin).
+fn hunk_header(header: String, spaced: bool, cx: &mut Context<AppView>) -> Div {
     div()
         .min_w_full()
+        .when(spaced, |el| el.mt_2())
         .mb_1()
         .px_2()
         .py_1()
@@ -309,6 +386,98 @@ fn hunk_header(header: String, cx: &mut Context<AppView>) -> impl IntoElement {
         .font_family(cx.theme().mono_font_family.clone())
         .text_color(cx.theme().foreground.opacity(0.5))
         .child(header)
+}
+
+/// The ⌘F find bar: floats over the pane's top-right so the header and
+/// content never shift. Enter/Shift-Enter and Escape arrive as actions
+/// dispatched by the input itself; the "DiffSearch" key context puts
+/// ⌘G/⌘⇧G (bound in `app`) on the dispatch path while the input holds
+/// focus, and `track_focus` keeps the context honest about when that
+/// is.
+fn find_bar(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    let search = &this.diff_search;
+    let input = search.input.clone();
+    let focus = input.read(cx).focus_handle(cx).clone();
+    let total = search.matches.len();
+    let has_query = !input.read(cx).value().is_empty();
+    let has_matches = total > 0;
+    let counter: SharedString = if !has_query {
+        "".into()
+    } else if !has_matches {
+        "No results".into()
+    } else {
+        format!("{}/{}", search.current.min(total - 1) + 1, total).into()
+    };
+
+    h_flex()
+        .id("diff-find-bar")
+        .occlude()
+        .absolute()
+        .top_2()
+        .right_3()
+        .track_focus(&focus)
+        .key_context("DiffSearch")
+        // The pane root focuses the window fallback on any mouse down;
+        // without stopping propagation a click into the input would
+        // bounce focus right back out.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+        )
+        .on_action(cx.listener(|this, enter: &input::Enter, _, cx| {
+            this.diff_search_step(enter.shift, cx);
+        }))
+        .on_action(cx.listener(|this, _: &input::Escape, window, cx| {
+            this.close_diff_search(window, cx);
+        }))
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded(cx.theme().radius)
+        .bg(cx.theme().popover)
+        .border_1()
+        .border_color(cx.theme().border)
+        .shadow_lg()
+        .child(
+            Input::new(&input)
+                .small()
+                .w(px(180.))
+                .appearance(true)
+                .focus_bordered(false)
+                .cleanable(true),
+        )
+        .child(
+            div()
+                .min_w(px(52.))
+                .text_center()
+                .text_xs()
+                .text_color(cx.theme().foreground.opacity(if has_matches { 0.55 } else { 0.35 }))
+                .child(counter),
+        )
+        .child(
+            Button::new("diff-find-prev")
+                .xsmall()
+                .ghost()
+                .icon(IconName::ChevronLeft)
+                .disabled(!has_matches)
+                .on_click(cx.listener(|this, _, _, cx| this.diff_search_step(true, cx))),
+        )
+        .child(
+            Button::new("diff-find-next")
+                .xsmall()
+                .ghost()
+                .icon(IconName::ChevronRight)
+                .disabled(!has_matches)
+                .on_click(cx.listener(|this, _, _, cx| this.diff_search_step(false, cx))),
+        )
+        .child(
+            Button::new("diff-find-close")
+                .xsmall()
+                .ghost()
+                .icon(IconName::Close)
+                .on_click(cx.listener(|this, _, window, cx| this.close_diff_search(window, cx))),
+        )
 }
 
 fn gutter(no: String, cx: &mut Context<AppView>) -> impl IntoElement {
