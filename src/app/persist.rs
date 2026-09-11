@@ -190,7 +190,10 @@ impl AppView {
                                 &term,
                                 window,
                                 move |this, emitter, event: &TermEvent, window, cx| match event {
-                                    TermEvent::Wakeup => cx.notify(),
+                                    TermEvent::Wakeup => {
+                                        emitter.update(cx, |term, cx| term.note_search_dirty(cx));
+                                        cx.notify();
+                                    }
                                     TermEvent::Attention(signal) => this.on_session_attention(
                                         emitter.clone(),
                                         signal,

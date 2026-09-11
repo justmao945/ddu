@@ -77,7 +77,10 @@ impl AppView {
                     &term,
                     window,
                     move |this, emitter, event: &TermEvent, window, cx| match event {
-                        TermEvent::Wakeup => cx.notify(),
+                        TermEvent::Wakeup => {
+                            emitter.update(cx, |term, cx| term.note_search_dirty(cx));
+                            cx.notify();
+                        }
                         TermEvent::Attention(signal) => {
                             this.on_session_attention(emitter.clone(), signal, window, cx)
                         }
@@ -724,7 +727,10 @@ impl AppView {
                     &term,
                     window,
                     move |this, emitter, event: &TermEvent, window, cx| match event {
-                        TermEvent::Wakeup => cx.notify(),
+                        TermEvent::Wakeup => {
+                            emitter.update(cx, |term, cx| term.note_search_dirty(cx));
+                            cx.notify();
+                        }
                         TermEvent::Attention(signal) => {
                             this.on_session_attention(emitter.clone(), signal, window, cx)
                         }
@@ -865,15 +871,23 @@ mod tests {
     }
 
     /// End to end for the notification path: an agent-side "your turn"
-    /// marker in a background session's output reaches the OS
-    /// notification center, named after that row.
+    /// marker from a background session reaches the OS notification
+    /// center, named after that row. The marker's byte-level trip (PTY
+    /// → scanner → channel) is covered by
+    /// `pty_attention_signals_reach_the_pump` outside the harness; here
+    /// the event is emitted straight from the session entity so nothing
+    /// crosses into the deterministic scheduler (a real shell's prompt
+    /// bytes wake the pump task from the reader thread, which the test
+    /// scheduler rejects as nondeterministic). `/bin/cat` with no args
+    /// blocks on stdin forever and never prints — both sessions stay
+    /// silent, keeping the whole run on the test thread.
     #[test]
     #[cfg(unix)]
     fn attention_raises_a_desktop_notification() {
         use crate::app::AppView;
         use crate::config::{Config, ProjectConfig, ShellConfig, State};
+        use crate::terminal::Attention;
         use gpui_kit::{TestAppContext, gpui};
-        use std::time::{Duration, Instant};
 
         gpui::run_test_once(
             0,
@@ -885,7 +899,9 @@ mod tests {
                     cx.set_app_identity("dev.just.ddu", "Day Day Up");
                     cx.set_global(Config {
                         shell: ShellConfig {
-                            program: "/bin/sh".into(),
+                            // Silent child: no prompt bytes, no
+                            // cross-thread scheduler wakeups.
+                            program: "/bin/cat".into(),
                         },
                         ..Default::default()
                     });
@@ -909,24 +925,27 @@ mod tests {
                     view.update(cx, |v, cx| {
                         v.spawn_session_of("terminal", window, cx);
                         v.select_session(0, 0, window, cx);
-                        let term = v.projects[0].sessions[1]
-                            .term
-                            .clone()
-                            .expect("second session spawned");
-                        term.read(cx)
-                            .write(b"printf '\\033]9;turn complete\\007'\r");
                     });
                 });
+                cx.update(|cx| {
+                    let term = view.update(cx, |v, _| {
+                        v.projects[0].sessions[1]
+                            .term
+                            .clone()
+                            .expect("second session spawned")
+                    });
+                    term.update(cx, |_, cx| {
+                        cx.emit(crate::terminal::TermEvent::Attention(Attention {
+                            title: None,
+                            body: "turn complete".into(),
+                        }));
+                    });
+                });
+                cx.run_until_parked();
 
-                let deadline = Instant::now() + Duration::from_secs(10);
-                let mut notes = cx.shown_system_notifications();
-                while notes.is_empty() && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(20));
-                    cx.run_until_parked();
-                    notes = cx.shown_system_notifications();
-                }
+                let notes = cx.shown_system_notifications();
                 assert_eq!(notes.len(), 1, "one toast for the marker");
-                assert_eq!(notes[0].title, "proj · sh");
+                assert_eq!(notes[0].title, "proj · cat");
                 assert_eq!(notes[0].body, "turn complete");
                 assert_eq!(notes[0].tag, "ddu-session-s-2");
 

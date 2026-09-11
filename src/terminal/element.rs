@@ -11,7 +11,7 @@ use alacritty_terminal::term::RenderableContent;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color as TermColor, CursorShape, NamedColor};
 
-use super::TermSession;
+use super::{TermMatch, TermSession};
 
 /// Line height as a factor of the mono font size.
 pub(crate) const LINE_HEIGHT_FACTOR: f32 = 1.45;
@@ -225,6 +225,12 @@ impl Element for TerminalElement {
         // Clone the grid Arc out of the entity borrow so painting can
         // take `&mut App` freely.
         let marked = session.read(cx).marked_text.clone();
+        // Find-bar hits for this frame: an Rc grab, replaced wholesale
+        // on every rescan.
+        let (search_matches, search_current) = {
+            let s = session.read(cx);
+            (s.search.matches.clone(), s.search.current)
+        };
         let term = session.read(cx).grid.term.clone();
         let term_lock = term.lock();
         let mut content = term_lock.renderable_content();
@@ -266,7 +272,16 @@ impl Element for TerminalElement {
                 size: size(m.cell_width, m.line_height),
             });
         session.read(cx).ime_cursor_bounds.set(cursor_bounds);
-        paint_grid(&mut content, &m, &palette, origin, window, cx);
+        paint_grid(
+            &mut content,
+            &m,
+            &palette,
+            origin,
+            &search_matches,
+            search_current,
+            window,
+            cx,
+        );
         paint_cursor(
             &cursor, cursor_row, &m, &palette, origin, focused, window, cx,
         );
@@ -317,6 +332,8 @@ fn paint_grid(
     m: &Metrics,
     palette: &TerminalPalette,
     origin: Point<Pixels>,
+    search: &[TermMatch],
+    search_current: usize,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -363,6 +380,44 @@ fn paint_grid(
                     },
                     bg,
                 ));
+            }
+        }
+
+        // Find-bar wash: above the cell backgrounds, below the
+        // selection wash. Hits are sorted by line, so each visible row
+        // binary-searches the slice for its absolute line (`row_ix` in
+        // grid coordinates is the row minus the scroll offset, the
+        // same mapping `cell_at` uses). Columns are cell columns, so
+        // the rect math is the cell math.
+        if !search.is_empty() {
+            let abs_line = row_ix as i32 - content.display_offset as i32;
+            let lo = search.partition_point(|hit| hit.line < abs_line);
+            let hi = search.partition_point(|hit| hit.line <= abs_line);
+            if lo < hi {
+                let yellow = cx.theme().yellow;
+                for (k, hit) in search[lo..hi].iter().enumerate() {
+                    let x0 = hit.start.min(row.len());
+                    let x1 = hit.end.min(row.len()).max(x0 + 1);
+                    let rect = Bounds {
+                        origin: point(origin.x + m.cell_width * x0 as f32, y),
+                        size: size(
+                            m.cell_width * (x1 - x0) as f32,
+                            m.line_height,
+                        ),
+                    };
+                    let current = lo + k == search_current;
+                    window.paint_quad(fill(
+                        rect,
+                        yellow.opacity(if current { 0.30 } else { 0.14 }),
+                    ));
+                    if current {
+                        // Outline so the active hit reads even on a
+                        // row full of colored cells.
+                        let mut outline = fill(rect, yellow.opacity(0.0));
+                        outline.border_color = yellow.opacity(0.85);
+                        window.paint_quad(outline);
+                    }
+                }
             }
         }
 

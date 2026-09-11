@@ -115,6 +115,12 @@ the footer when Enter should confirm. One-off informational dialogs
   `defer_in` pumps a frame per defer at display-link rate, starving the
   main runloop (frozen app, ~100% CPU). Dev hooks that need to re-check
   state must never re-arm per frame.
+- Terminal search: `DDU_VERIFY_TERMSEARCH=<query> bash scripts/dev.sh`
+  plants a marker row + filler straight into the session's grid (never
+  the PTY — an agent CLI would read a write as a prompt), opens the
+  find bar, queries, reveals and dumps `{open, matches, current,
+  display_offset}` to `/tmp/ddu-term-search-verify.json`. Same
+  background-timer discipline as above.
 
 ## Conventions
 

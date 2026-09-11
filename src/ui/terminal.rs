@@ -2,13 +2,17 @@
 //! forwards keystrokes and scroll events into the PTY and paints the
 //! grid via [`crate::terminal::element::TerminalElement`].
 
+use gpui_kit::base::input;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::app::{AppView, TermBacktab, TermCopy, TermPaste, TermTab};
+use crate::app::{
+    AppView, TermBacktab, TermCopy, TermPaste, TermSearch, TermTab,
+};
 use crate::terminal::TermSession;
 
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -31,6 +35,7 @@ fn surface(
 ) -> impl IntoElement {
     let focus = term.read(cx).focus.clone();
     let exited = term.read(cx).exit();
+    let search_open = term.read(cx).search.open;
     // The live run's own id wins; a run that never printed one still
     // offers the row's earlier conversation.
     let resume_id = this.current_resume_id(cx);
@@ -57,12 +62,18 @@ fn surface(
         }))
         .on_key_down(cx.listener({
             let weak = weak.clone();
-            move |_, event: &KeyDownEvent, _, cx| {
+            move |_, event: &KeyDownEvent, window, cx| {
                 // ⌘-chords stay reserved for app actions.
                 let Some(bytes) = TermSession::encode_keystroke(&event.keystroke) else {
                     return;
                 };
                 if let Some(term) = weak.upgrade() {
+                    // With the find bar's input focused, keys edit the
+                    // query (and Enter/Escape act there) — they must
+                    // not ALSO land in the PTY.
+                    if term.read(cx).search_input_focused(window, cx) {
+                        return;
+                    }
                     term.update(cx, |s, cx| {
                         s.write(&bytes);
                         s.scroll_to_bottom();
@@ -143,6 +154,18 @@ fn surface(
                     if term.update(cx, |s, cx| s.copy_selection(cx)) {
                         cx.stop_propagation();
                     }
+                }
+            }
+        }))
+        // ⌘F arrives here via the "Terminal"-scoped binding (deeper
+        // than the global DiffSearch one) only while this surface
+        // holds focus; opening again refocuses the input with the
+        // query selected, matching the diff pane's bar.
+        .on_action(cx.listener({
+            let weak = weak.clone();
+            move |_, _: &TermSearch, window, cx| {
+                if let Some(term) = weak.upgrade() {
+                    term.update(cx, |s, cx| s.open_search(window, cx));
                 }
             }
         }))
@@ -387,11 +410,147 @@ fn surface(
                 .flex_1()
                 .min_h_0()
                 .min_w_0()
-                .child(TermSession::element(weak, focus)),
+                .child(TermSession::element(weak.clone(), focus)),
         )
+        .when(search_open, |el| el.child(find_bar(weak.clone(), cx)))
         .when(exited.is_some(), |el| {
             el.child(exited_banner(exited, resume_id, cx))
         })
+}
+
+/// The terminal's ⌘F find bar: floats over the surface's top-right so
+/// the grid never shifts. Enter/Shift-Enter and Escape arrive as
+/// actions dispatched by the input itself; the "TerminalSearch" key
+/// context (deeper than the surface's "Terminal") puts ⌘G/⌘⇧G — bound
+/// in `app` — on the dispatch path while the input holds focus, and
+/// `track_focus` keeps the context honest about when that is.
+fn find_bar(weak: WeakEntity<TermSession>, cx: &mut Context<AppView>) -> AnyElement {
+    let Some(term) = weak.upgrade() else {
+        return div().into_any_element();
+    };
+    let (input, total, current) = {
+        let term = term.read(cx);
+        (
+            term.search
+                .input
+                .clone()
+                .expect("a visible bar implies its input was created"),
+            term.search.matches.len(),
+            term.search.current,
+        )
+    };
+    let focus = input.read(cx).focus_handle(cx).clone();
+    let has_query = !input.read(cx).value().is_empty();
+    let has_matches = total > 0;
+    let counter: SharedString = if !has_query {
+        "".into()
+    } else if !has_matches {
+        "No results".into()
+    } else {
+        format!("{}/{}", current.min(total - 1) + 1, total).into()
+    };
+
+    h_flex()
+        .id("term-find-bar")
+        .occlude()
+        .absolute()
+        .top_2()
+        .right_3()
+        .track_focus(&focus)
+        .key_context("TerminalSearch")
+        // The surface focuses the terminal on any click; without
+        // stopping propagation a click into the input would bounce
+        // focus right back out.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+        )
+        .on_action(cx.listener({
+            let weak = weak.clone();
+            move |_, enter: &input::Enter, _, cx| {
+                if let Some(term) = weak.upgrade() {
+                    term.update(cx, |s, cx| s.search_step(enter.shift, cx));
+                }
+            }
+        }))
+        .on_action(cx.listener({
+            let weak = weak.clone();
+            move |_, _: &input::Escape, window, cx| {
+                if let Some(term) = weak.upgrade() {
+                    term.update(cx, |s, cx| s.close_search(window, cx));
+                }
+            }
+        }))
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded(cx.theme().radius)
+        .bg(cx.theme().popover)
+        .border_1()
+        .border_color(cx.theme().border)
+        .shadow_lg()
+        .child(
+            Input::new(&input)
+                .small()
+                .w(px(180.))
+                .appearance(true)
+                .focus_bordered(false)
+                .cleanable(true),
+        )
+        .child(
+            div()
+                .min_w(px(52.))
+                .text_center()
+                .text_xs()
+                .text_color(cx.theme().foreground.opacity(if has_matches { 0.55 } else { 0.35 }))
+                .child(counter),
+        )
+        .child(
+            Button::new("term-find-prev")
+                .xsmall()
+                .ghost()
+                .icon(IconName::ChevronLeft)
+                .disabled(!has_matches)
+                .on_click(cx.listener({
+                    let weak = weak.clone();
+                    move |_, _, _, cx| {
+                        if let Some(term) = weak.upgrade() {
+                            term.update(cx, |s, cx| s.search_step(true, cx));
+                        }
+                    }
+                })),
+        )
+        .child(
+            Button::new("term-find-next")
+                .xsmall()
+                .ghost()
+                .icon(IconName::ChevronRight)
+                .disabled(!has_matches)
+                .on_click(cx.listener({
+                    let weak = weak.clone();
+                    move |_, _, _, cx| {
+                        if let Some(term) = weak.upgrade() {
+                            term.update(cx, |s, cx| s.search_step(false, cx));
+                        }
+                    }
+                })),
+        )
+        .child(
+            Button::new("term-find-close")
+                .xsmall()
+                .ghost()
+                .icon(IconName::Close)
+                .on_click(cx.listener({
+                    let weak = weak.clone();
+                    move |_, _, window, cx| {
+                        if let Some(term) = weak.upgrade() {
+                            term.update(cx, |s, cx| s.close_search(window, cx));
+                        }
+                    }
+                })),
+        )
+        .into_any_element()
 }
 
 /// In-flow exit strip at the bottom of the terminal: status + resume

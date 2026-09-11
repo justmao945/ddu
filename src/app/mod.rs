@@ -44,6 +44,9 @@ gpui_kit::actions!(
         DiffSearch,
         DiffSearchNext,
         DiffSearchPrev,
+        TermSearch,
+        TermSearchNext,
+        TermSearchPrev,
         SelectSession1,
         SelectSession2,
         SelectSession3,
@@ -214,15 +217,28 @@ impl AppView {
             // text selection (window-scoped `TextSelection`); the
             // handler propagates when nothing is selected.
             KeyBinding::new("cmd-c", input::Copy, None),
-            // The diff pane's find bar: ⌘F opens it anywhere in the
-            // window; once its input holds focus the "DiffSearch"
-            // context is on the dispatch path, giving ⌘G/⌘⇧G the
-            // match-cycling roles. Enter/Shift-Enter come from the
-            // input itself (it dispatches the `Enter` action), handled
-            // on the bar in `ui::diff_panel`.
+            // Two find bars share ⌘F by focus. While the terminal
+            // surface holds focus its deeper "Terminal" context makes
+            // this the winning binding (the PTY gets its own search
+            // over the scrollback); anywhere else in the window the
+            // global binding below opens the diff pane's bar. When a
+            // bar's input already holds focus its own action refocuses
+            // it with the query selected, matching platform find bars.
+            KeyBinding::new("cmd-f", TermSearch, Some("Terminal")),
             KeyBinding::new("cmd-f", DiffSearch, None),
+            // The diff pane's find bar: once its input holds focus the
+            // "DiffSearch" context is on the dispatch path. Enter/
+            // Shift-Enter come from the input itself (it dispatches
+            // the `Enter` action), handled on the bar in
+            // `ui::diff_panel`.
             KeyBinding::new("cmd-g", DiffSearchNext, Some("DiffSearch")),
             KeyBinding::new("cmd-shift-g", DiffSearchPrev, Some("DiffSearch")),
+            // The terminal bar's match-cycling: its "TerminalSearch"
+            // context (set on the bar in `ui::terminal`) is deeper
+            // than the surface's "Terminal", so these win while its
+            // input holds focus.
+            KeyBinding::new("cmd-g", TermSearchNext, Some("TerminalSearch")),
+            KeyBinding::new("cmd-shift-g", TermSearchPrev, Some("TerminalSearch")),
             // The standalone settings window: Escape/⌘W close it (the
             // deeper context beats the global ⌘W → CloseSession).
             KeyBinding::new("escape", CloseSettings, Some("SettingsWindow")),
@@ -499,6 +515,95 @@ impl AppView {
                                 this.diff_hunks_scroll.children_count(),
                             );
                             let _ = std::fs::write("/tmp/ddu-search-verify.json", json);
+                        });
+                    });
+                })
+                .detach();
+        }
+        if let Some(query) = std::env::var("DDU_VERIFY_TERMSEARCH")
+            .ok()
+            .filter(|q| !q.is_empty())
+        {
+            // Headless verification of the terminal find bar. A marker
+            // plus filler is planted straight into the grid (injecting
+            // through the parser — a PTY write would be read by the
+            // agent CLI as a prompt), the first session is awaited, the
+            // real open/query/reveal paths run, and the observed state
+            // lands in /tmp/ddu-term-search-verify.json. Same
+            // background-timer discipline as DDU_VERIFY_SEARCH: never
+            // re-arm a per-frame defer.
+            let weak = cx.weak_entity();
+            window
+                .spawn(cx, async move |cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                        match weak
+                            .read_with(cx, |view, _cx| view.current_term().is_some())
+                        {
+                            Ok(true) => break,
+                            Ok(false) => continue,
+                            Err(_) => return,
+                        }
+                    }
+                    // Two settle ticks: the grid starts at 80x24 and the
+                    // panel's first prepaint reflows it to its real
+                    // size — injecting before that lands the marker in
+                    // a history the resize then rewrites.
+                    for _ in 0..2 {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                    }
+                    let marker = "ddu-termsearch-marker";
+                    let weak_arm = weak.clone();
+                    let query_arm = query.clone();
+                    let _ = cx.update(move |window, app_cx| {
+                        let _ = weak_arm.update(app_cx, |this, cx| {
+                            let Some(term) = this.current_term() else {
+                                return;
+                            };
+                            term.update(cx, |s, cx| {
+                                let mut bytes = format!("{marker}\r\n").into_bytes();
+                                // 200 filler rows push the marker deep
+                                // into history on any panel height, so
+                                // the reveal must scroll up (a non-zero
+                                // display_offset proves it).
+                                for _ in 0..200 {
+                                    bytes.extend_from_slice(b"filler\r\n");
+                                }
+                                s.inject_bytes(&bytes);
+                                cx.emit(crate::terminal::TermEvent::Wakeup);
+                                s.open_search(window, cx);
+                                if let Some(input) = &s.search.input {
+                                    input.update(cx, |input, cx| {
+                                        input.set_value(query_arm.clone(), window, cx);
+                                    });
+                                }
+                                s.refresh_search(cx);
+                                s.search_reveal(cx);
+                            });
+                        });
+                    });
+                    // Let prepaint apply the scroll, then write what
+                    // the running app actually shows.
+                    for _ in 0..8 {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                    }
+                    let _ = cx.update(move |_, app_cx| {
+                        let _ = weak.read_with(app_cx, |this, cx| {
+                            let Some(term) = this.current_term() else {
+                                return;
+                            };
+                            let (open, matches, current, offset) =
+                                term.read(cx).search_debug();
+                            let json = format!(
+                                "{{\"query\":{query:?},\"open\":{open},\"matches\":{matches},\"current\":{current},\"display_offset\":{offset}}}"
+                            );
+                            let _ = std::fs::write("/tmp/ddu-term-search-verify.json", json);
                         });
                     });
                 })

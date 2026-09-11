@@ -9,12 +9,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use alacritty_terminal::event::{Event, EventListener};
 
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use parking_lot::Mutex;
 use portable_pty::Child;
 
+use super::TermMatch;
 use super::attention::{Attention, Scanner};
 use super::pty::{PtyProcess, PtySpawn, PtyWriter};
 
@@ -302,7 +305,81 @@ impl TermGrid {
     pub fn scroll_to_bottom(&self) {
         self.term.lock().scroll_display(Scroll::Bottom);
     }
+
+    /// Feed raw bytes through the escape parser into the grid — the
+    /// same path PTY output takes. Used by the headless verify hook
+    /// and tests to plant content without writing to the child (an
+    /// agent CLI would treat a PTY write as a prompt).
+    pub(crate) fn inject_bytes(&self, bytes: &[u8]) {
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        let mut term = self.term.lock();
+        for &byte in bytes {
+            parser.advance(&mut *term, byte);
+        }
+    }
 }
+
+/// Case-insensitive substring scan of the whole grid (history +
+/// screen), newest lines first, capped at `cap` hits. Line indices are
+/// absolute (negative = history, same convention as `cell_at`), so
+/// hits stay valid as output scrolls; each hit carries a half-open
+/// cell-column range usable directly for highlight rects. Wide-char
+/// spacer cells count as one column of `buf` so string offsets stay
+/// 1:1 with grid columns; case folding is ASCII-only so offsets can
+/// never drift from the text.
+pub fn search_grid(
+    term: &FairMutex<Term<EventProxy>>,
+    query: &str,
+    cap: usize,
+) -> Vec<TermMatch> {
+    let mut hits = Vec::new();
+    let query = query.trim();
+    if query.is_empty() || cap == 0 {
+        return hits;
+    }
+    let needle = query.to_ascii_lowercase();
+    let term = term.lock();
+    let grid = term.grid();
+    let cols = grid.columns();
+    let history = grid.history_size() as i32;
+    let screen = grid.screen_lines() as i32;
+    let mut buf = String::with_capacity(cols);
+    // Newest first: the find bar almost always targets recent output,
+    // and the cap then keeps huge scrollbacks flat-out cheap.
+    for line in (-history..screen).rev() {
+        let row = &grid[Line(line)];
+        buf.clear();
+        for col in 0..cols {
+            let cell = &row[Column(col)];
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    buf.push(' ');
+                    continue;
+                }
+            buf.push(if cell.c == '\0' { ' ' } else { cell.c });
+        }
+        let lower = buf.to_ascii_lowercase();
+        let mut from = 0;
+        while let Some(rel) = lower[from..].find(&needle) {
+            let start = from + rel;
+            hits.push(TermMatch {
+                line,
+                start,
+                end: start + needle.len(),
+            });
+            if hits.len() >= cap {
+                hits.reverse();
+                return hits;
+            }
+            from = start + needle.len().max(1);
+        }
+    }
+    hits.reverse();
+    hits
+}
+
 /// Spawn the two pump threads for a freshly started [`PtyProcess`].
 ///
 /// * Reader thread: `read → parse per byte → coalesced Wakeup`, exits on
@@ -561,17 +638,66 @@ mod zsh_probe {
     }
 
     fn feed(bytes: &[u8]) -> String {
-        let (_tx, _rx) = async_channel::bounded::<PumpMsg>(1);
+        let (tx, _rx) = async_channel::bounded::<PumpMsg>(1);
         let grid =
-            TermGrid::new(80, 24, crate::terminal::pty::PtyWriter::for_test(), _tx, 1000);
-        let mut parser: Processor<StdSyncHandler> = Processor::new();
-        {
-            let mut term = grid.term.lock();
-            for &b in bytes {
-                parser.advance(&mut *term, b);
-            }
-        }
+            TermGrid::new(80, 24, crate::terminal::pty::PtyWriter::for_test(), tx, 1000);
+        grid.inject_bytes(bytes);
         nonspace(&grid.term)
+    }
+
+    fn test_grid() -> TermGrid {
+        let (tx, _rx) = async_channel::bounded::<PumpMsg>(1);
+        TermGrid::new(80, 24, crate::terminal::pty::PtyWriter::for_test(), tx, 1000)
+    }
+
+    #[test]
+    fn grid_search_finds_case_insensitive_hits_on_screen() {
+        let grid = test_grid();
+        grid.inject_bytes(b"Hello MARKER one\r\nsecond marker here\r\n");
+        let hits = search_grid(&grid.term, "marker", 50);
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        // Absolute lines: the two rows landed on screen lines 0 and 1.
+        assert_eq!((hits[0].line, hits[0].start, hits[0].end), (0, 6, 12));
+        assert_eq!((hits[1].line, hits[1].start), (1, 7));
+        // Both case directions fold to the same hits.
+        assert_eq!(search_grid(&grid.term, "MARKER", 50).len(), 2);
+        // Query casing never matters, whitespace-only never matches.
+        assert!(search_grid(&grid.term, "", 50).is_empty());
+        assert!(search_grid(&grid.term, "   ", 50).is_empty());
+        assert!(search_grid(&grid.term, "absent", 50).is_empty());
+    }
+
+    #[test]
+    fn grid_search_marks_history_lines_negative() {
+        let grid = test_grid();
+        let mut bytes = b"ddu-marker-top\r\n".to_vec();
+        for _ in 0..30 {
+            bytes.extend_from_slice(b"filler line\r\n");
+        }
+        grid.inject_bytes(&bytes);
+        let hits = search_grid(&grid.term, "ddu-marker-top", 10);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        // 32 grid lines (the trailing CRLF opens one more) on a 24-line
+        // screen: history holds 8, so the oldest line sits at absolute
+        // line -8 and stays there as filler scrolls — the highlight
+        // coordinates paint against.
+        assert_eq!(hits[0].line, -8);
+    }
+
+    #[test]
+    fn grid_search_caps_hits_and_sorts_ascending() {
+        let grid = test_grid();
+        let mut bytes = Vec::new();
+        for _ in 0..30 {
+            bytes.extend_from_slice(b"filler line\r\n");
+        }
+        grid.inject_bytes(&bytes);
+        let hits = search_grid(&grid.term, "line", 5);
+        assert_eq!(hits.len(), 5);
+        assert!(
+            hits.windows(2).all(|w| w[0].line < w[1].line),
+            "hits must be sorted ascending: {hits:?}"
+        );
     }
 
     #[test]
