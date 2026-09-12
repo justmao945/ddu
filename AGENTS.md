@@ -105,9 +105,12 @@ the footer when Enter should confirm. One-off informational dialogs
   *app* (`dev.just.ddu`, not omp or the terminal, and a stale grant is why
   either fails; `docs/SIGNING.md`). Accessibility is cached per process, so a
   new grant only applies after the app is quit and reopened. gpui exposes
-  almost nothing to AX (a few untitled buttons): drive by coordinates
-  (`win.click`/`press`/`scroll`), keep actions reversible — a click in the
-  terminal pane types into a live agent. When `screencapture -x` itself is refused
+  almost nothing to AX — gpui's a11y is opt-in per element
+  (`Element::a11y_role`, `div.role(..)`, `aria_*`; gpui-pre wires AccessKit
+  and gpui-pre-macos bridges it to NSAccessibility) and custom-painted panes
+  never opt in, so the tree is the traffic lights plus a few untitled
+  buttons: drive by coordinates (`win.click`/`press`/`scroll`), keep actions
+  reversible — a click in the terminal pane types into a live agent. When `screencapture -x` itself is refused
   ("could not create image from display"), take pixels from the app: a
   temporary `DDU_VERIFY_SHOT=<path>` hook calling `window.render_to_image()`
   on the main thread needs `features = ["test-support"]` on the *main*
