@@ -52,6 +52,38 @@ const SCROLLBAR_IDLE: Duration = Duration::from_secs(2);
 /// immediately; interaction-driven repaints (scroll/select/paste) are
 /// emitted from entity methods and never pass through this throttle.
 const STREAM_FRAME_MIN: Duration = Duration::from_millis(33);
+/// Interval the stream throttle stretches to when a frame's terminal
+/// paint is expensive (see [`stream_interval`]).
+const STREAM_FRAME_MAX: Duration = Duration::from_millis(66);
+/// Paint cost (ms, per frame) at which the interval takes its next step,
+/// paired with the interval it steps to: 20 fps at 2.5 ms of terminal
+/// paint, 15 fps at 6 ms.
+///
+/// Sizing: this element's paint is roughly 40% of a window redraw, so
+/// 2.5 ms of paint is a ~6 ms frame — a fifth of a core at 30 fps, spent
+/// on output nobody reads character-by-character. Both CPU and GPU scale
+/// with frames drawn, so once the per-frame cost is bounded the frame
+/// rate is the one lever left; short of a view split it is also the only
+/// one that touches the whole-window redraw. Interaction (keystrokes,
+/// scroll, selection) never passes through this throttle, so
+/// responsiveness is unaffected.
+const STREAM_FRAME_STEPS: [(f32, Duration); 2] =
+    [(2.5, Duration::from_millis(50)), (6., STREAM_FRAME_MAX)];
+
+/// Spacing between stream repaints for a frame whose terminal paint
+/// costs `paint_ms` (a slow EWMA, see [`TermSession::note_paint_cost`]):
+/// the floor while paint is cheap, then one step down per entry in
+/// [`STREAM_FRAME_STEPS`]. The paint cost of a frame does not depend on
+/// the interval, so the level is stable, and the floor stays at 30 fps
+/// so a fast machine keeps the smooth stream it has today.
+fn stream_interval(paint_ms: f32) -> Duration {
+    STREAM_FRAME_STEPS
+        .iter()
+        .rev()
+        .find(|(cost, _)| paint_ms >= *cost)
+        .map_or(STREAM_FRAME_MIN, |(_, interval)| *interval)
+}
+
 /// Hard cap on find-bar hits; past it the counter just shows the cap.
 const SEARCH_MAX_MATCHES: usize = 500;
 /// Output-driven match rescans ride this one-shot timer so a stream of
@@ -159,6 +191,10 @@ pub struct TermSession {
     wheel_remainder: f32,
     /// Find-bar state (⌘F): query, hits and the current hit's index.
     pub(crate) search: TermSearch,
+    /// Stream repaint pacing: slow EWMA of this element's own paint cost
+    /// per frame (ms), written by the painter and read by the pump
+    /// ([`stream_interval`]). 0. = no frame measured yet.
+    stream_paint_ms: Cell<f32>,
     /// Output landed while the bar is up — the match set is stale and
     /// the rescan timer (when armed) will rebuild it.
     search_dirty: bool,
@@ -226,15 +262,17 @@ impl TermSession {
                 flush_scheduled: false,
                 scroll_remainder: 0.,
                 search: TermSearch::new(),
+                stream_paint_ms: Cell::new(0.),
                 search_dirty: false,
                 search_timer_armed: false,
             }
         });
 
         // Foreground pump: coalesced wakeups → notify; exit → event.
-        // Stream floods are repaint-throttled (see STREAM_FRAME_MIN):
-        // the first wakeup of a burst paints immediately, the rest are
-        // flushed once per interval by a trailing timer.
+        // Stream floods are repaint-throttled (see [`stream_interval`] /
+        // `STREAM_FRAME_MIN`): the first wakeup of a burst paints
+        // immediately, the rest are flushed once per interval by a
+        // trailing timer.
         let weak = entity.downgrade();
         cx.spawn(async move |cx| {
             // `last_frame` is read through the (fake-clock-aware)
@@ -245,9 +283,16 @@ impl TermSession {
             while let Ok(msg) = wake_rx.recv().await {
                 match msg {
                     grid::PumpMsg::Wakeup => {
+                        // Pace against what a frame costs this process:
+                        // an expensive terminal paint steps the interval
+                        // down (see [`stream_interval`]).
+                        let interval = stream_interval(
+                            weak.update(cx, |s, _| s.stream_paint_ms.get())
+                                .unwrap_or(0.),
+                        );
                         let now = cx.background_executor().now();
                         let prev = last_frame.get();
-                        if prev.map_or(true, |t| now.duration_since(t) >= STREAM_FRAME_MIN) {
+                        if prev.map_or(true, |t| now.duration_since(t) >= interval) {
                             last_frame.set(Some(now));
                             let _ = weak.update(cx, |_, cx| {
                                 cx.notify();
@@ -257,7 +302,7 @@ impl TermSession {
                             let weak = weak.clone();
                             let last_frame = last_frame.clone();
                             let flush_armed = flush_armed.clone();
-                            let delay = STREAM_FRAME_MIN - now.duration_since(prev.unwrap());
+                            let delay = interval - now.duration_since(prev.unwrap());
                             cx.spawn(async move |cx| {
                                 cx.background_executor().timer(delay).await;
                                 flush_armed.set(false);
@@ -308,6 +353,19 @@ impl TermSession {
         .detach();
 
         Ok(entity)
+    }
+
+    /// Record one frame's terminal paint cost — the input to the stream
+    /// throttle's interval ([`stream_interval`]). A slow EWMA: a single
+    /// slow frame (a font fallback raster, a scheduler hiccup) must not
+    /// re-pace the stream, and wall-clock cost is the right signal — a
+    /// frame that took long because the main thread was descheduled is
+    /// exactly a frame worth drawing less often.
+    pub(crate) fn note_paint_cost(&self, cost: Duration) {
+        let ms = cost.as_secs_f32() * 1000.;
+        let prev = self.stream_paint_ms.get();
+        self.stream_paint_ms
+            .set(if prev == 0. { ms } else { prev * 0.75 + ms * 0.25 });
     }
 
     /// Exit code once the child has been reaped.
@@ -1663,6 +1721,104 @@ mod tests {
                 cx.update(|cx| session.read(cx).inject_bytes(b"later\r\n"));
                 cx.run_until_parked();
                 assert_eq!(paints.get(), 3, "idle wakeup repaints immediately");
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    /// The interval steps with the cost of a frame's terminal paint: a
+    /// cheap frame keeps the 30 fps floor, an expensive one backs the
+    /// stream off (CPU and GPU both scale with frames drawn).
+    #[test]
+    fn stream_interval_steps_with_frame_cost() {
+        use super::{STREAM_FRAME_MIN, STREAM_FRAME_STEPS, stream_interval};
+        assert_eq!(stream_interval(0.), STREAM_FRAME_MIN, "unmeasured: floor");
+        assert_eq!(
+            stream_interval(STREAM_FRAME_STEPS[0].0 - 0.1),
+            STREAM_FRAME_MIN,
+            "cheap frame: floor"
+        );
+        assert_eq!(
+            stream_interval(STREAM_FRAME_STEPS[0].0),
+            STREAM_FRAME_STEPS[0].1
+        );
+        assert_eq!(
+            stream_interval(STREAM_FRAME_STEPS[1].0),
+            STREAM_FRAME_STEPS[1].1
+        );
+        assert_eq!(
+            stream_interval(40.),
+            STREAM_FRAME_STEPS[1].1,
+            "clamped at the ceiling"
+        );
+    }
+
+    /// Expensive frames stretch the stream interval: the same burst that
+    /// flushes at the 30 fps floor must not flush until the stretched
+    /// interval has passed. Paced through the pump's faked executor
+    /// clock, like [`stream_repaints_are_throttled`].
+    #[test]
+    fn expensive_frames_stretch_the_stream_interval() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::Duration;
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 = TestAppContext::build(
+                    dispatcher,
+                    Some("expensive_frames_stretch_the_stream_interval"),
+                );
+                let cx = &mut cx0;
+                let session = cx
+                    .update(|cx| {
+                        cx.set_global(Theme::default());
+                        cx.set_global(crate::config::Config::default());
+                        TermSession::spawn(
+                            &PtySpawn {
+                                program: "cat".into(),
+                                args: vec![],
+                                cwd: std::env::temp_dir(),
+                            },
+                            cx,
+                        )
+                    })
+                    .expect("spawn cat");
+                let paints = Rc::new(Cell::new(0usize));
+                cx.update(|cx| {
+                    let paints = paints.clone();
+                    cx.observe(&session, move |_, _| paints.set(paints.get() + 1)).detach();
+                });
+                cx.run_until_parked();
+                paints.set(0);
+
+                // A 3 ms paint seeds the EWMA one step down: the
+                // interval becomes 50 ms, not the 33 ms floor.
+                cx.update(|cx| session.read(cx).note_paint_cost(Duration::from_millis(3)));
+
+                for _ in 0..4 {
+                    cx.update(|cx| session.read(cx).inject_bytes(b"line\r\n"));
+                    cx.run_until_parked();
+                }
+                assert_eq!(paints.get(), 1, "burst repaints once immediately");
+
+                cx.executor().advance_clock(super::STREAM_FRAME_MIN);
+                cx.run_until_parked();
+                assert_eq!(
+                    paints.get(),
+                    1,
+                    "the 30 fps floor must not flush a stretched interval"
+                );
+
+                cx.executor()
+                    .advance_clock(super::STREAM_FRAME_STEPS[0].1 - super::STREAM_FRAME_MIN);
+                cx.run_until_parked();
+                assert_eq!(paints.get(), 2, "the stretched interval flushes its tail");
 
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();

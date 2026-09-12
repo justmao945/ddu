@@ -758,6 +758,18 @@ impl AppView {
         self.current_session().and_then(|s| s.term.clone())
     }
 
+    /// True when `term` is the session the center pane renders.
+    ///
+    /// Only that session's grid is in the element tree, so only its
+    /// output can change what a frame shows: background rows keep
+    /// parsing (their grid must be current when the row is selected)
+    /// but must not ask for repaints — several streaming agents would
+    /// otherwise each drive a full-window redraw and multiply the
+    /// frame rate the pump's throttle exists to bound.
+    pub(crate) fn is_visible_term(&self, term: &Entity<TermSession>) -> bool {
+        self.current_term().is_some_and(|current| current == *term)
+    }
+
     /// One notify per second so elapsed times in the sidebar tick even
     /// while a session produces no output.
     fn start_ui_tick(&mut self, cx: &mut Context<Self>) {

@@ -201,6 +201,7 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let paint_start = std::time::Instant::now();
         let Some(session) = self.session.upgrade() else {
             return;
         };
@@ -314,6 +315,10 @@ impl Element for TerminalElement {
                 &marked, &cursor, cursor_row, &m, &palette, origin, window, cx,
             );
         }
+        // Feed the stream throttle: pacing the repaint rate is the one
+        // lever that scales the *whole* window redraw (layout, scene,
+        // Metal) rather than just this element.
+        session.update(cx, |s, _| s.note_paint_cost(paint_start.elapsed()));
     }
 }
 

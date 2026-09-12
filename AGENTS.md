@@ -136,6 +136,24 @@ the footer when Enter should confirm. One-off informational dialogs
   of scrolling.
 - Terminal wakeups flow as `PumpMsg` events through a subscriber channel;
   never poll-render.
+- Session repaints go through `AppView::subscribe_term`, the single
+  subscription point for every spawn path (new/restart/restore). It
+  repaints only for the session the center pane renders (`is_visible_term`):
+  a background row keeps parsing — selecting it must show current output —
+  but its output changes nothing on screen, and several streaming agents
+  would otherwise each add a full-window redraw per frame (measured 47 fps
+  vs 1 fps with two background streams). Exit/attention/diff poll/
+  interaction notify on their own; background rows pick up their OSC
+  title/status on the next repaint.
+- Stream repaint pacing is adaptive: the pump spaces output-driven
+  repaints by `stream_interval(paint_ms)` — 33 ms (30 fps) while the
+  terminal element's own paint is cheap, 50 ms / 66 ms once it is not
+  (`STREAM_FRAME_STEPS`, EWMA fed by `TermSession::note_paint_cost`).
+  Both CPU and GPU scale with frames drawn, and this is the only lever
+  that scales the whole-window redraw (gpui repaints every primitive each
+  frame; a view split is what would make the rest of the frame cheap).
+  Keystrokes, scroll and selection bypass the throttle, so interactive
+  latency is unchanged.
 - Sidebar hover slots (`hovered_session`/`hovered_project`) update through
   `session_panel::toggle_hover`, never by assigning in the `on_hover`
   callback: mouse listeners bubble in reverse paint order, so the row

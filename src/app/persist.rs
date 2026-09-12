@@ -155,7 +155,7 @@ impl AppView {
                 ))
                 .collect::<Vec<_>>()
         ));
-        for (ix, project) in self.projects.iter_mut().enumerate() {
+        for ix in 0..self.projects.len() {
             let Some(saved) = state
                 .projects
                 .as_ref()
@@ -171,7 +171,7 @@ impl AppView {
                 };
                 seq += 1;
                 let now = std::time::Instant::now();
-                let cwd = project.path.clone();
+                let cwd = self.projects[ix].path.clone();
                 let selected = s.selected_file.clone();
                 let closed: std::collections::HashSet<String> =
                     s.closed_dirs.iter().cloned().collect();
@@ -185,31 +185,7 @@ impl AppView {
                     };
                     match TermSession::spawn(&spec, cx) {
                         Ok(term) => {
-                            let program = cmd.program.clone();
-                            cx.subscribe_in(
-                                &term,
-                                window,
-                                move |this, emitter, event: &TermEvent, window, cx| match event {
-                                    TermEvent::Wakeup => {
-                                        emitter.update(cx, |term, cx| term.note_search_dirty(cx));
-                                        cx.notify();
-                                    }
-                                    TermEvent::Attention(signal) => this.on_session_attention(
-                                        emitter.clone(),
-                                        signal,
-                                        window,
-                                        cx,
-                                    ),
-                                    TermEvent::Exit(code) => this.on_session_exit(
-                                        emitter.clone(),
-                                        *code,
-                                        &program,
-                                        window,
-                                        cx,
-                                    ),
-                                },
-                            )
-                            .detach();
+                            self.subscribe_term(&term, cmd.program.clone(), window, cx);
                             (AgentStatus::Running, Some(term))
                         }
                         Err(err) => {
@@ -220,24 +196,26 @@ impl AppView {
                 } else {
                     (AgentStatus::Done(0), None)
                 };
-                project.sessions.push(crate::session::AgentSession {
-                    id: format!("restored-{ix}-{seq}"),
-                    title: s.title.clone(),
-                    status,
-                    cmd,
-                    resume_id: s.resume.clone(),
-                    // A row that comes back running is live in its own
-                    // right now; `status` carries that until a close.
-                    was_live: false,
-                    kind: s.kind,
-                    started: now,
-                    ended: if term.is_none() { Some(now) } else { None },
-                    term,
-                    cwd,
-                    diff_selected: selected,
-                    diff_closed: closed,
-                    diff_tree_height: tree_height,
-                });
+                self.projects[ix]
+                    .sessions
+                    .push(crate::session::AgentSession {
+                        id: format!("restored-{ix}-{seq}"),
+                        title: s.title.clone(),
+                        status,
+                        cmd,
+                        resume_id: s.resume.clone(),
+                        // A row that comes back running is live in its own
+                        // right now; `status` carries that until a close.
+                        was_live: false,
+                        kind: s.kind,
+                        started: now,
+                        ended: if term.is_none() { Some(now) } else { None },
+                        term,
+                        cwd,
+                        diff_selected: selected,
+                        diff_closed: closed,
+                        diff_tree_height: tree_height,
+                    });
             }
         }
         self.session_seq = seq;

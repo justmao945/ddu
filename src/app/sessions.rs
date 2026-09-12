@@ -72,24 +72,7 @@ impl AppView {
 
         let (status, term) = match TermSession::spawn(&cmd.spec(&cwd), cx) {
             Ok(term) => {
-                let program = cmd.program.clone();
-                cx.subscribe_in(
-                    &term,
-                    window,
-                    move |this, emitter, event: &TermEvent, window, cx| match event {
-                        TermEvent::Wakeup => {
-                            emitter.update(cx, |term, cx| term.note_search_dirty(cx));
-                            cx.notify();
-                        }
-                        TermEvent::Attention(signal) => {
-                            this.on_session_attention(emitter.clone(), signal, window, cx)
-                        }
-                        TermEvent::Exit(code) => {
-                            this.on_session_exit(emitter.clone(), *code, &program, window, cx)
-                        }
-                    },
-                )
-                .detach();
+                self.subscribe_term(&term, cmd.program.clone(), window, cx);
                 let focus = term.read(cx).focus.clone();
                 focus.focus(window, cx);
                 (AgentStatus::Running, Some(term))
@@ -697,6 +680,45 @@ impl AppView {
         })
     }
 
+    /// Subscribe the app to one session's terminal events: wakeups
+    /// repaint, attention raises a toast, exit settles the row.
+    ///
+    /// Only a wakeup from the session the center pane renders may
+    /// repaint: a background row keeps parsing (its grid must be current
+    /// when the row is selected) but changes nothing on screen, so N
+    /// streaming agents must not each drive a full-window redraw — that
+    /// multiplies the frame rate the pump's throttle exists to bound.
+    /// Background rows pick up their OSC title/status on the next
+    /// repaint (the 1 Hz tick); exit, attention, the diff poll and
+    /// interaction all keep their own notify.
+    pub(super) fn subscribe_term(
+        &mut self,
+        term: &Entity<TermSession>,
+        program: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe_in(
+            term,
+            window,
+            move |this, emitter, event: &TermEvent, window, cx| match event {
+                TermEvent::Wakeup => {
+                    emitter.update(cx, |term, cx| term.note_search_dirty(cx));
+                    if this.is_visible_term(emitter) {
+                        cx.notify();
+                    }
+                }
+                TermEvent::Attention(signal) => {
+                    this.on_session_attention(emitter.clone(), signal, window, cx)
+                }
+                TermEvent::Exit(code) => {
+                    this.on_session_exit(emitter.clone(), *code, &program, window, cx)
+                }
+            },
+        )
+        .detach();
+    }
+
     /// Shared body of restart/resume: kill the old PTY (if alive) and
     /// spawn a fresh one, optionally resuming the agent session.
     pub(super) fn respawn_current_session(
@@ -705,41 +727,35 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(project) = self.projects.get_mut(self.current_project) else {
-            return;
+        // Everything the spawn needs, copied out first: subscribing hands
+        // the app a callback and needs `&mut self`, which the project
+        // borrow above would still be holding.
+        let (spec, program, title, old) = {
+            let Some(session) = self
+                .projects
+                .get_mut(self.current_project)
+                .and_then(|p| p.sessions.get_mut(self.current_session))
+            else {
+                return;
+            };
+            let cwd = session.cwd.clone();
+            let spec = match &resume {
+                Some(id) => session.cmd.resume_spec(&cwd, id),
+                None => session.cmd.spec(&cwd),
+            };
+            (
+                spec,
+                session.cmd.program.clone(),
+                session.cmd.basename(),
+                session.term.take(),
+            )
         };
-        let Some(session) = project.sessions.get_mut(self.current_session) else {
-            return;
-        };
-        let cwd = session.cwd.clone();
-        let spec = match &resume {
-            Some(id) => session.cmd.resume_spec(&cwd, id),
-            None => session.cmd.spec(&cwd),
-        };
-        let program = session.cmd.program.clone();
-        let title = session.cmd.basename();
-        if let Some(old) = session.term.take() {
+        if let Some(old) = old {
             old.update(cx, |s, _| s.kill());
         }
         let (status, term) = match TermSession::spawn(&spec, cx) {
             Ok(term) => {
-                cx.subscribe_in(
-                    &term,
-                    window,
-                    move |this, emitter, event: &TermEvent, window, cx| match event {
-                        TermEvent::Wakeup => {
-                            emitter.update(cx, |term, cx| term.note_search_dirty(cx));
-                            cx.notify();
-                        }
-                        TermEvent::Attention(signal) => {
-                            this.on_session_attention(emitter.clone(), signal, window, cx)
-                        }
-                        TermEvent::Exit(code) => {
-                            this.on_session_exit(emitter.clone(), *code, &program, window, cx)
-                        }
-                    },
-                )
-                .detach();
+                self.subscribe_term(&term, program, window, cx);
                 let focus = term.read(cx).focus.clone();
                 focus.focus(window, cx);
                 (AgentStatus::Running, Some(term))
@@ -750,7 +766,11 @@ impl AppView {
                 (AgentStatus::Error(err.to_string()), None)
             }
         };
-        if let Some(session) = project.sessions.get_mut(self.current_session) {
+        if let Some(session) = self
+            .projects
+            .get_mut(self.current_project)
+            .and_then(|p| p.sessions.get_mut(self.current_session))
+        {
             session.status = status;
             session.title = title;
             session.term = term;
