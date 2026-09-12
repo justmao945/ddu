@@ -7,8 +7,9 @@
 //! against the cell box makes every stroke seamless by construction,
 //! like alacritty's builtin box-drawing font.
 //!
-//! Rare mixed-weight tees/crosses and the diagonal glyphs fall back to
-//! the font (returned as non-vector).
+//! Only the diagonal glyphs fall back to the font (returned as
+//! non-vector): every other char in the block is drawn as cell-aligned
+//! rects, so a table's crossings cannot disagree with its borders.
 
 use gpui_kit::*;
 
@@ -19,6 +20,8 @@ enum Stroke {
     Light,
     Heavy,
     Double,
+    /// Two dashes along the arm (╌ family).
+    Dash2,
     /// Three dashes along the arm (┄ family).
     Dash3,
     /// Four dashes along the arm (┈ family).
@@ -124,8 +127,12 @@ fn paint_arm(
                 color,
             ));
         }
-        Stroke::Dash3 | Stroke::Dash4 => {
-            let dashes = if stroke == Stroke::Dash3 { 3 } else { 4 };
+        Stroke::Dash2 | Stroke::Dash3 | Stroke::Dash4 => {
+            let dashes = match stroke {
+                Stroke::Dash2 => 2,
+                Stroke::Dash3 => 3,
+                _ => 4,
+            };
             let step = (to - from) / dashes as f32;
             let gap = step * 0.3;
             for i in 0..dashes {
@@ -343,24 +350,53 @@ fn arms(c: char) -> Option<Arms> {
         '\u{251E}' => [N, L, H, L],                         // ┞
         '\u{251F}' => [N, L, L, H],                         // ┟
         '\u{2520}' => [N, L, H, H],                         // ┠
+        '\u{2521}' => [N, H, H, L],                         // ┡
+        '\u{2522}' => [N, H, L, H],                         // ┢
         '\u{2523}' => [N, H, H, H],                         // ┣
         '\u{2524}' => [L, N, L, L],                         // ┤
         '\u{2525}' => [H, N, L, L],                         // ┥
         '\u{2526}' => [L, N, H, L],                         // ┦
         '\u{2527}' => [L, N, L, H],                         // ┧
         '\u{2528}' => [L, N, H, H],                         // ┨
+        '\u{2529}' => [H, N, H, L],                         // ┩
+        '\u{252A}' => [H, N, L, H],                         // ┪
         '\u{252B}' => [H, N, H, H],                         // ┫
         '\u{252C}' => [L, L, N, L],                         // ┬
         '\u{252D}' => [H, L, N, L],                         // ┭
         '\u{252E}' => [L, H, N, L],                         // ┮
         '\u{252F}' => [H, H, N, L],                         // ┯
         '\u{2530}' => [L, L, N, H],                         // ┰
+        '\u{2531}' => [H, L, N, H],                         // ┱
+        '\u{2532}' => [L, H, N, H],                         // ┲
         '\u{2533}' => [H, H, N, H],                         // ┳
         '\u{2534}' => [L, L, L, N],                         // ┴
         '\u{2535}' => [H, H, L, N],                         // ┵
         '\u{2536}' => [L, L, H, N],                         // ┶
         '\u{2537}' => [H, L, L, N],                         // ┷
         '\u{2538}' => [L, H, L, N],                         // ┸
+        '\u{2539}' => [H, L, H, N],                         // ┹
+        '\u{253A}' => [L, H, H, N],                         // ┺
+        '\u{253B}' => [L, L, H, N],                         // ┻
+        '\u{253C}' => [L, L, L, L],                         // ┼
+        '\u{253D}' => [H, L, L, L],                         // ┽
+        '\u{253E}' => [L, H, L, L],                         // ┾
+        '\u{253F}' => [H, H, L, L],                         // ┿
+        '\u{2540}' => [L, L, H, L],                         // ╀
+        '\u{2541}' => [L, L, L, H],                         // ╁
+        '\u{2542}' => [L, L, H, H],                         // ╂
+        '\u{2543}' => [H, L, H, L],                         // ╃
+        '\u{2544}' => [L, H, H, L],                         // ╄
+        '\u{2545}' => [H, L, L, H],                         // ╅
+        '\u{2546}' => [L, H, L, H],                         // ╆
+        '\u{2547}' => [H, H, H, L],                         // ╇
+        '\u{2548}' => [H, H, L, H],                         // ╈
+        '\u{2549}' => [H, L, H, H],                         // ╉
+        '\u{254A}' => [L, H, H, H],                         // ╊
+        '\u{254B}' => [H, H, H, H],                         // ╋
+        '\u{254C}' => [Stroke::Dash2, Stroke::Dash2, N, N], // ╌
+        '\u{254D}' => [H, H, N, N],                         // ╍ (heavy dash → solid heavy)
+        '\u{254E}' => [N, N, Stroke::Dash2, Stroke::Dash2], // ╎
+        '\u{254F}' => [N, N, H, H],                         // ╏
         '\u{2550}' => [D, D, N, N],                         // ═
         '\u{2551}' => [N, N, D, D],                         // ║
         '\u{2552}' => [N, D, N, L],                         // ╒
@@ -399,12 +435,39 @@ fn arms(c: char) -> Option<Arms> {
         '\u{2579}' => [N, N, H, N], // ╹
         '\u{257A}' => [N, H, N, N], // ╺
         '\u{257B}' => [N, N, N, H], // ╻
+        '\u{257C}' => [L, H, N, N], // ╼
+        '\u{257D}' => [N, N, L, H], // ╽
+        '\u{257E}' => [H, L, N, N], // ╾
+        '\u{257F}' => [N, N, H, L], // ╿
         _ => return None,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    /// Every box-drawing char is vector-drawn except the diagonals.
+    ///
+    /// A font glyph sits on the font's own bounding box and stroke
+    /// weight, so whatever is left to the fallback disagrees with the
+    /// vector strokes it meets in the same table: `┼` was the visible
+    /// one — a table's crossings rendered heavier than its borders.
+    #[test]
+    fn the_whole_box_drawing_block_is_vector() {
+        let font_fallback = ['╱', '╲', '╳'];
+        for cp in 0x2500..=0x257F {
+            let c = char::from_u32(cp).unwrap();
+            assert_eq!(
+                super::is_vector(c),
+                !font_fallback.contains(&c),
+                "U+{cp:04X} {c}"
+            );
+        }
+        // Arcs are vector too (drawn as stroked quads).
+        for c in ['╭', '╮', '╯', '╰'] {
+            assert!(super::is_vector(c), "{c}");
+        }
+    }
+
     #[test]
     fn vector_coverage_matches_intent() {
         // TUI staples are vector-drawn; diagonals stay font glyphs.

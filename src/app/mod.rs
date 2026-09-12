@@ -77,6 +77,12 @@ pub struct AppView {
     pub(crate) expanded: Vec<bool>,
     pub(crate) current_project: usize,
     pub(crate) current_session: usize,
+    /// The visible session's OSC title as last painted, with the
+    /// session it belongs to: a stream frame that changes the title
+    /// (agent CLIs spin it) has to reach the sidebar row and the
+    /// breadcrumb, which are otherwise cached/replayed off their own
+    /// notifications only.
+    pub(crate) shown_title: Option<(gpui::EntityId, Option<String>)>,
     pub(crate) show_sessions: bool,
     pub(crate) show_diff: bool,
     /// Outer splitter: [sidebar | center+diff region]. The sidebar
@@ -149,10 +155,15 @@ pub struct AppView {
     window_geom_seq: u64,
     /// Shell panels as cached child views (see [`panel_view!`]): a
     /// stream frame notifies `terminal_pane` alone, and every other
-    /// notify fans out to all three via [`AppView::notify_panels`].
-    sidebar: Entity<ui::session_panel::PanelView>,
-    diff_pane: Entity<ui::diff_panel::PanelView>,
-    terminal_pane: Entity<ui::terminal::PanelView>,
+    /// notify fans out to all of them via [`AppView::notify_panels`].
+    pub(crate) sidebar: Entity<ui::session_panel::PanelView>,
+    pub(crate) diff_pane: Entity<ui::diff_panel::PanelView>,
+    pub(crate) terminal_pane: Entity<ui::terminal::PanelView>,
+    /// The title bar's "project — session title" text: its own cached
+    /// view, because it mirrors the visible session's OSC title (which
+    /// agent CLIs spin) and must not drag the panels into that repaint —
+    /// `AppView::notify_panels` would, since it hangs off `cx.notify()`.
+    pub(crate) breadcrumb: Entity<ui::title_bar::PanelView>,
 }
 
 /// Panel geometry (px): defaults, drag limits and collapse thresholds.
@@ -375,13 +386,15 @@ impl AppView {
         let app = cx.weak_entity();
         let sidebar = cx.new(|_| ui::session_panel::PanelView::new(app.clone()));
         let diff_pane = cx.new(|_| ui::diff_panel::PanelView::new(app.clone()));
-        let terminal_pane = cx.new(|_| ui::terminal::PanelView::new(app));
+        let terminal_pane = cx.new(|_| ui::terminal::PanelView::new(app.clone()));
+        let breadcrumb = cx.new(|_| ui::title_bar::PanelView::new(app));
         let mut this = Self {
             window_focus,
             projects,
             expanded,
             current_project,
             current_session: 0,
+            shown_title: None,
             show_sessions: !state.hidden_sessions,
             // Diff visibility is per-session live, but the last saved
             // value seeds the restored window.
@@ -415,6 +428,7 @@ impl AppView {
             sidebar,
             diff_pane,
             terminal_pane,
+            breadcrumb,
         };
         // Restore persisted widths; the raw values are clamped by the
         // panel size_range on render, out-of-range ones fall back to the
@@ -791,6 +805,33 @@ impl AppView {
         self.current_term().is_some_and(|current| current == *term)
     }
 
+    /// Record the visible session's OSC title; true when it changed
+    /// since the last stream frame.
+    ///
+    /// The sidebar row and the breadcrumb mirror the title, and agent
+    /// CLIs animate it (a spinner glyph). Both are outside the terminal
+    /// pane, so a stream frame has to notify them — but nothing else:
+    /// output that does not change the title must not rebuild them.
+    /// Keyed on the session so a switch (same title, other session)
+    /// still counts as a change.
+    pub(super) fn note_shown_title(
+        &mut self,
+        term: &Entity<TermSession>,
+        cx: &mut App,
+    ) -> bool {
+        let title = term.read(cx).title();
+        let id = term.entity_id();
+        if self
+            .shown_title
+            .as_ref()
+            .is_some_and(|(prev_id, prev)| *prev_id == id && *prev == title)
+        {
+            return false;
+        }
+        self.shown_title = Some((id, title));
+        true
+    }
+
     /// Repaint the cached shell panels, alongside the app itself.
     ///
     /// The panels are cached child views (`panel_view!`): gpui replays
@@ -803,6 +844,7 @@ impl AppView {
         self.sidebar.update(cx, |_, cx| cx.notify());
         self.diff_pane.update(cx, |_, cx| cx.notify());
         self.terminal_pane.update(cx, |_, cx| cx.notify());
+        self.breadcrumb.update(cx, |_, cx| cx.notify());
     }
 
     /// One notify per second so elapsed times in the sidebar tick even
@@ -958,7 +1000,7 @@ impl Render for AppView {
             // `SelectableText` runs register here). Must prepaint
             // before any of them — first child of the root.
             .child(TextSelectionLayer)
-            .child(ui::title_bar::render(self, cx))
+            .child(ui::title_bar::bar(self))
             .child({
                 // Two nested splitters. The sidebar column owns a status
                 // strip, so the LEFT divider runs to the window's bottom
@@ -1319,6 +1361,71 @@ mod panel_cache_tests {
                     seen(&counts),
                     [0, 0, 1],
                     "a background row's stream repaints nothing"
+                );
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    /// A stream frame that changes the OSC title reaches the sidebar
+    /// row and the breadcrumb: both mirror the title, agent CLIs spin
+    /// it, and a cached row that misses the notify shows a frozen
+    /// spinner. An unchanged title must rebuild neither, and neither
+    /// may reach the changes pane — that is what the split buys.
+    #[test]
+    fn a_title_change_follows_the_stream_into_the_sidebar() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let (mut cx0, view, counts) =
+                    app_with_panel_counters(dispatcher, 1, "a_title_change_reaches_the_sidebar");
+                let cx = &mut cx0;
+                let term = cx.update(|cx| {
+                    view.read(cx).projects[0].sessions[0]
+                        .term
+                        .clone()
+                        .unwrap()
+                });
+                let seen = |counts: &[Rc<Cell<usize>>; 3]| counts.clone().map(|c| c.get());
+                // Titles arrive as OSC 0 in the byte stream; planting
+                // the bytes wakes the pump like the reader thread does.
+                let title = |text: &str, cx: &mut gpui_kit::App| {
+                    term.update(cx, |term, _| {
+                        term.inject_bytes(format!("\x1b]0;{text}\x07").as_bytes());
+                    });
+                };
+
+                cx.update(|cx| title("⠋ working", cx));
+                cx.run_until_parked();
+                assert_eq!(
+                    seen(&counts),
+                    [1, 0, 1],
+                    "a new title repaints the row beside the pane                      (sidebar, changes pane, terminal pane)"
+                );
+
+                // Same title on the next stream frame: the pane repaints
+                // (new bytes), the row must not.
+                cx.executor().advance_clock(crate::terminal::STREAM_FRAME_MIN);
+                cx.update(|cx| title("⠋ working", cx));
+                cx.run_until_parked();
+                assert_eq!(
+                    seen(&counts),
+                    [1, 0, 2],
+                    "an unchanged title leaves the cached row alone"
+                );
+
+                cx.executor().advance_clock(crate::terminal::STREAM_FRAME_MIN);
+                cx.update(|cx| title("⠙ working", cx));
+                cx.run_until_parked();
+                assert_eq!(
+                    seen(&counts),
+                    [2, 0, 3],
+                    "the next spinner glyph reaches the row again"
                 );
 
                 cx.update(|cx| {

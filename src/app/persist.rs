@@ -60,6 +60,9 @@ impl AppView {
         snapshot.sidebar_width = self.last_sidebar_size.map(|w| w.as_f32());
         snapshot.diff_width = self.last_diff_size.map(|w| w.as_f32());
         snapshot.current_project = self.current_project;
+        // The row the user was looking at: without this the launch
+        // always opens session 0 of the project.
+        snapshot.current_session = self.current_session;
         snapshot.show_diff = self.show_diff;
         snapshot.show_diff_tree = self.show_diff_tree;
         snapshot.window = self.window_placement;
@@ -454,6 +457,86 @@ mod tests {
                     Some(true),
                     "the running shell is saved live"
                 );
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    /// The row the user was looking at is the row the next launch opens.
+    ///
+    /// The snapshot has to record the live index — it recorded only the
+    /// project, so every relaunch reopened the first row — and the
+    /// launch has to honor it.
+    #[test]
+    fn the_active_session_survives_a_relaunch() {
+        use crate::app::AppView;
+        use crate::config::{Config, ProjectConfig, ShellConfig, State};
+        use gpui_kit::{TestAppContext, gpui};
+
+        let dir = std::env::temp_dir().join("ddu-active-session-test");
+        let done = |title: &str| SavedSession {
+            kind: "omp".into(),
+            title: title.into(),
+            resume: None,
+            live: Some(false),
+            selected_file: None,
+            closed_dirs: vec![],
+            tree_height: None,
+        };
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let mut cx0 = TestAppContext::build(dispatcher, Some("active_session"));
+                let cx = &mut cx0;
+                cx.update(gpui_kit::init);
+                cx.update(|cx| {
+                    // Nothing comes back running, so no binary is needed.
+                    cx.set_global(Config {
+                        shell: ShellConfig {
+                            program: "cat".into(),
+                        },
+                        ..Default::default()
+                    });
+                    cx.set_global(crate::config::LoadWarnings(vec![]));
+                    cx.set_global(State {
+                        projects: Some(vec![ProjectConfig {
+                            name: "ddu".into(),
+                            path: dir.clone(),
+                            expanded: true,
+                            sessions: vec![done("first"), done("second"), done("third")],
+                        }]),
+                        ..Default::default()
+                    });
+                });
+                let (view, vcx) = cx.add_window_view(|window, cx| AppView::new(window, cx));
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                let saved = vcx.update(|_, cx| {
+                    view.update(cx, |v, cx| {
+                        assert_eq!(v.current_session, 0, "the saved state opens row 0");
+                        v.current_session = 2;
+                        v.snapshot(cx)
+                    })
+                });
+                assert_eq!(
+                    saved.current_session, 2,
+                    "the snapshot records the row in use"
+                );
+
+                // Relaunch on what that save wrote: the row comes back.
+                cx.update(|cx| cx.set_global(saved.clone()));
+                let (second, scx) = cx.add_window_view(|window, cx| AppView::new(window, cx));
+                let active = scx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                    second.read(cx).current_session
+                });
+                assert_eq!(active, 2, "the launch opens the saved row");
 
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();

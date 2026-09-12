@@ -711,6 +711,14 @@ impl AppView {
                     // `is_visible_term`).
                     if this.is_visible_term(emitter) {
                         this.terminal_pane.update(cx, |_, cx| cx.notify());
+                        // The one stream output that *is* visible
+                        // outside the pane: the OSC title, which agent
+                        // CLIs spin, shown in the row and the window
+                        // breadcrumb. Follow it, and nothing else.
+                        if this.note_shown_title(emitter, cx) {
+                            this.sidebar.update(cx, |_, cx| cx.notify());
+                            this.breadcrumb.update(cx, |_, cx| cx.notify());
+                        }
                     }
                 }
                 TermEvent::Attention(signal) => {
