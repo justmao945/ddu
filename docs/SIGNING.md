@@ -23,7 +23,10 @@ harness: `PermissionDenied: macOS Screen Recording permission is not granted`).
 The same identity-keyed mechanism decides whether the app may post
 notifications, which is why an unsigned build calls
 `show_system_notification` and macOS silently drops it (`UNErrorDomain
-Code=1`, usernotificationsd "not allowed").
+Code=1`, usernotificationsd "not allowed"). Screen Recording, Accessibility
+and notifications are the three grants this app holds and the mechanism is
+identical for each; Accessibility is additionally cached per process, so a
+freshly granted app answers "denied" until it is restarted.
 
 With a certificate the requirement is a function of the certificate, not of
 the code:

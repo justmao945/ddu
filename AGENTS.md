@@ -100,11 +100,14 @@ the footer when Enter should confirm. One-off informational dialogs
 - `cargo test` — includes terminal regression tests (`plain_text_lands`,
   `zsh_prompt_bytes_land` — raw zsh prompt escape bytes must render) and git
   diff tests (`head_diff_sees_edits_and_untracked`).
-- Visual: `screencapture -x -l <windowid>` (screen-recording permission is
-  granted here; synthetic clicks are NOT — no accessibility). Screen
-  Recording belongs to the *app* (`dev.just.ddu`), not to omp or the
-  terminal, and a stale grant is why a capture fails — `docs/SIGNING.md` has
-  the story and the check. When `screencapture -x` itself is refused
+- Visual: `screencapture -x -l <windowid>`, or drive the window through the
+  `computer` device — Screen Recording, Accessibility and input belong to the
+  *app* (`dev.just.ddu`, not omp or the terminal, and a stale grant is why
+  either fails; `docs/SIGNING.md`). Accessibility is cached per process, so a
+  new grant only applies after the app is quit and reopened. gpui exposes
+  almost nothing to AX (a few untitled buttons): drive by coordinates
+  (`win.click`/`press`/`scroll`), keep actions reversible — a click in the
+  terminal pane types into a live agent. When `screencapture -x` itself is refused
   ("could not create image from display"), take pixels from the app: a
   temporary `DDU_VERIFY_SHOT=<path>` hook calling `window.render_to_image()`
   on the main thread needs `features = ["test-support"]` on the *main*
