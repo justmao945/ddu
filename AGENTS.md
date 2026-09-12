@@ -102,6 +102,17 @@ the footer when Enter should confirm. One-off informational dialogs
   diff tests (`head_diff_sees_edits_and_untracked`).
 - Visual: `screencapture -x -l <windowid>` (screen-recording permission is
   granted here; synthetic clicks are NOT — no accessibility). When the
+  Screen Recording is keyed to the requester's *code identity*, and the
+  requester here is the app, not the agent CLI (ddu spawns omp in a PTY,
+  so TCC attributes the request to `dev.just.ddu` — granting Terminal or
+  omp does nothing). `make-bundle.sh` signs ad-hoc, whose designated
+  requirement is a bare `cdhash`, so **every install silently
+  invalidates the existing 系统设置 → 屏幕录制 entry**: the toggle stays
+  on while every request fails (`log show --predicate 'subsystem ==
+  "com.apple.TCC"'` says "Failed to match existing code requirement for
+  subject dev.just.ddu"). After installing, remove the entry and re-add
+  /Applications/ddu.app, then relaunch the app. Same for the
+  notification grant. When the
   capture is refused (`screencapture -x` fails with "could not create
   image from display"), get pixels from the app itself instead: a
   temporary `DDU_VERIFY_SHOT=<path>` hook that calls
