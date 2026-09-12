@@ -326,23 +326,6 @@ pub struct LoadWarnings(pub Vec<String>);
 
 impl gpui_kit::Global for LoadWarnings {}
 
-/// Env-gated debug trace (`DDU_DEBUG=1` → /tmp/ddu-debug.log): the
-/// resume-capture chain spans async events and a quit, where stderr
-/// from a bundled launch is lost. Cheap file append, off by default.
-pub fn debug_log(msg: &str) {
-    if std::env::var_os("DDU_DEBUG").is_none() {
-        return;
-    }
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/ddu-debug.log")
-    {
-        let _ = writeln!(f, "{msg}");
-    }
-}
-
 /// Read and parse a JSON value. A missing file is a normal first run and
 /// yields `Default`; an unreadable or unparseable file is backed up
 /// (timestamped `*.corrupt-<secs>` beside it) so nothing is silently

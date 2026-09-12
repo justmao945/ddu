@@ -31,18 +31,6 @@ impl AppView {
             }
         }
         let snapshot = self.snapshot(cx);
-        crate::config::debug_log(&format!(
-            "persist: sessions={:?} current=({},{})",
-            snapshot
-                .projects
-                .as_deref()
-                .unwrap_or(&[])
-                .iter()
-                .map(|p| format!("{}:{}", p.name, p.sessions.len()))
-                .collect::<Vec<_>>(),
-            self.current_project,
-            self.current_session
-        ));
         // Per-session tree heights ride the session slots above; the
         // window frame is tracked live by `note_window_frame`.
         if let Err(err) = snapshot.save() {
@@ -131,33 +119,6 @@ impl AppView {
     ) {
         let current = self.current_project;
         let mut seq = self.session_seq;
-        crate::config::debug_log(&format!(
-            "restore: current_project={current} saved={:?}",
-            state
-                .projects
-                .as_deref()
-                .unwrap_or(&[])
-                .iter()
-                .map(|p| format!(
-                    "{}:[{}]",
-                    p.name,
-                    p.sessions
-                        .iter()
-                        .map(|s| format!(
-                            "{}@{}{}",
-                            s.kind,
-                            s.resume.as_deref().unwrap_or("-"),
-                            match s.live {
-                                Some(true) => "+live",
-                                Some(false) => "+done",
-                                None => "",
-                            }
-                        ))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ))
-                .collect::<Vec<_>>()
-        ));
         for ix in 0..self.projects.len() {
             let Some(saved) = state
                 .projects

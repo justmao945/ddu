@@ -223,11 +223,6 @@ impl AppView {
             // saved right away: a crash or kill -9 must not lose it.
             self.persist(cx);
         }
-        crate::config::debug_log(&format!(
-            "exit: code={code} matched={matched} running={} shutting_down={}",
-            self.running_terms().len(),
-            self.shutting_down
-        ));
         // Shutdown sequencing: every Exit is a candidate for the last
         if self.shutting_down && self.running_terms().is_empty() {
             self.finish_shutdown(window, cx);
@@ -257,10 +252,6 @@ impl AppView {
         // app in the background — does.
         let on_screen =
             window.is_window_active() && slot == (self.current_project, self.current_session);
-        crate::config::debug_log(&format!(
-            "attention: body={:?} title={:?} slot={slot:?} on_screen={on_screen}",
-            signal.body, signal.title
-        ));
         if on_screen {
             return;
         }
@@ -366,10 +357,6 @@ impl AppView {
                 // Plain shell: nothing resumable at stake. One Ctrl-C
                 // stops a foreground job, then the PTY drops — no
                 // agent stop escalation; the row is removed at once.
-                crate::config::debug_log(&format!(
-                    "close: terminal ctrl-c + kill (row {}:{six})",
-                    p
-                ));
                 term.update(cx, |s, _| s.ctrl(0x03));
                 let term = term.clone();
                 cx.spawn(async move |this, cx| {
@@ -541,10 +528,6 @@ impl AppView {
             return;
         }
         self.shutting_down = true;
-        crate::config::debug_log(&format!(
-            "begin_exit: quit={quit} live={}",
-            self.running_terms().len()
-        ));
         self.begin_shutdown(cx);
     }
 
@@ -553,7 +536,6 @@ impl AppView {
     /// every live session's resume id first (a later kill must not
     /// lose it), then run the stop escalation on all of them at once.
     fn begin_shutdown(&mut self, cx: &mut Context<Self>) {
-        crate::config::debug_log("begin_shutdown: capture ids, escalate");
         self.mark_live_rows();
         let terms = self.running_terms();
         for term in &terms {
@@ -593,7 +575,6 @@ impl AppView {
     ///
     /// Every stage is a no-op for terms that already exited.
     fn escalate_close(terms: Vec<Entity<TermSession>>, cx: &mut Context<Self>) {
-        crate::config::debug_log(&format!("escalate_close: {} live", terms.len()));
         for term in &terms {
             term.update(cx, |s, _| s.ctrl(0x1b));
         }
@@ -641,7 +622,6 @@ impl AppView {
     /// captured on each Exit), then close the window or quit.
     fn finish_shutdown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.shutting_down = false;
-        crate::config::debug_log("finish_shutdown: persist + close");
         self.persist(cx);
         if self.quit_after_shutdown {
             std::process::exit(0);
@@ -660,11 +640,9 @@ impl AppView {
     /// output. No-ops when the last run captured none.
     pub(crate) fn resume_current_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.current_resume_id(cx) else {
-            crate::config::debug_log("resume: NO ID — aborting");
             eprintln!("[ddu] No session id found in the last run's output.");
             return;
         };
-        crate::config::debug_log(&format!("resume: respawning with id={id}"));
         self.respawn_current_session(Some(id), window, cx);
     }
 

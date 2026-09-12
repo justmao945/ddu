@@ -194,21 +194,6 @@ fn main() {
 
         open_main_window(cx);
 
-        // Empty string (clean launcher exports it unset-as-empty) must not
-        // count as "set": require a valid page index.
-        if std::env::var("DDU_VERIFY_SETTINGS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .is_some()
-        {
-            cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(600))
-                    .await;
-                let _ = cx.update(|cx| ui::settings::open(cx));
-            })
-            .detach();
-        }
     });
 }
 
@@ -258,7 +243,6 @@ fn open_main_window(cx: &mut gpui_kit::App) {
             Ok(_) => {}
             Err(err) => {
                 eprintln!("[ddu] open_window failed: {err}");
-                crate::config::debug_log(&format!("open_window failed: {err}"));
             }
         }
     })

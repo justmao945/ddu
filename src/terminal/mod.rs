@@ -589,8 +589,9 @@ impl TermSession {
     }
 
     /// Plant content straight into the grid (see [`grid::TermGrid::
-    /// inject_bytes`]) — the headless verify hook's way of setting up
-    /// searchable output without treating the child to a prompt.
+    /// inject_bytes`]) — how a test sets up output without treating the
+    /// child to a prompt.
+    #[cfg(test)]
     pub(crate) fn inject_bytes(&self, bytes: &[u8]) {
         self.grid.inject_bytes(bytes);
     }
@@ -744,18 +745,6 @@ impl TermSession {
         cx.notify();
     }
 
-    /// Headless-verify snapshot: bar open, hit count, current index and
-    /// the viewport's display offset (nonzero proves the reveal
-    /// scrolled into history).
-    pub(crate) fn search_debug(&self) -> (bool, usize, usize, i32) {
-        let offset = self.grid.term.lock().grid().display_offset() as i32;
-        (
-            self.search.open,
-            self.search.matches.len(),
-            self.search.current,
-            offset,
-        )
-    }
     /// Overlay-scrollbar visibility, macOS-style: visible while the
     /// mouse hovers the right-edge strip or while a drag / recent scroll
     /// activity is live; fades out once the idle window closes — even

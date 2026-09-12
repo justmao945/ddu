@@ -11,7 +11,6 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::label::Label;
 use gpui_kit::component::setting::{RenderOptions, SettingGroup, SettingItem, SettingPage, Settings};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 mod notify;
@@ -111,17 +110,6 @@ impl Render for SettingsWindow {
                     // One compact control size for every field, so the
                     // custom buttons/dropdowns below match the stock ones.
                     .with_size(gpui_kit::component::Size::Small)
-                    // Dev hook (DDU_VERIFY_SETTINGS=<page_ix>): open on a
-                    // specific page for screenshot verification — synthetic
-                    // clicks aren't available in the harness environment.
-                    .when_some(
-                        std::env::var("DDU_VERIFY_SETTINGS").ok().and_then(|v| v.parse::<usize>().ok()),
-                        |this, ix| {
-                            this.default_selected_index(
-                                gpui_kit::component::setting::SelectIndex { page_ix: ix, group_ix: None },
-                            )
-                        },
-                    )
                     .with_group_variant(GroupBoxVariant::Outline)
                     .page(
                         SettingPage::new("General")

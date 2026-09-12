@@ -11,10 +11,9 @@
 # LaunchServices activating the wrong one.
 #
 # DDU_* env present at bundle time is baked into the generated launcher:
-# DDU_VERIFY_SETTINGS / DDU_VERIFY_EXIT / DDU_VERIFY_CLOSE (dev hooks,
-# see main.rs), DDU_STATE_PATH / DDU_SETTINGS_PATH (state isolation),
-# DDU_DEBUG (trace). Omitted entirely when unset so a clean bundle can't
-# leak empty vars.
+# DDU_DIR (workspace root), DDU_STATE_PATH / DDU_SETTINGS_PATH (state
+# isolation). Omitted entirely when unset so a clean bundle can't leak
+# empty vars.
 set -e
 cd "$(dirname "$0")/.."
 
@@ -60,27 +59,22 @@ cd "\${DDU_DIR:-\$HOME/Code/ddu}" || exit 1
 if [ -x /bin/zsh ]; then
   eval "\$(/bin/zsh -ilc 'for k in \${(k)parameters[(R)*export*]}; do print -r -- "export \$k=\${(q)\${(P)k}}"; done' 2>/dev/null)" || true
 fi
-# Forward every DDU_* variable (DDU_DIR, DDU_STATE_PATH, DDU_DEBUG, …)
+# Forward every DDU_* variable (DDU_DIR, DDU_STATE_PATH, …)
 # so a dev relaunch can point the app at a scratch state file.
 for v in \$(env | sed -n 's/^\\(DDU_[A-Za-z0-9_]*\\)=.*/\\1/p'); do
   eval "export \$v"
 done
 LAUNCH
-# Dev hooks baked at bundle time (see main.rs / app/mod.rs): auto-open
-# Settings on a page, freeze the Exiting overlay, close the current
-# session, drive the diff-pane find bar, point at a scratch state file,
-# or enable the debug trace.
+# State isolation baked at bundle time: the generic DDU_* forward above
+# covers variables present in the build environment, but these two are
+# what the app resolves its state/settings paths from, so they are
+# quoted properly here.
 # Written OUTSIDE the heredoc — inside it, ${v:+A="$v"} expansion strips
 # the inner quotes (verified), which truncates unquoted values containing
 # spaces (e.g. "Application Support").
 {
-  [ -n "${DDU_VERIFY_SETTINGS:-}" ] && printf 'export DDU_VERIFY_SETTINGS="%s"\n' "$DDU_VERIFY_SETTINGS"
-  [ -n "${DDU_VERIFY_EXIT:-}" ] && printf 'export DDU_VERIFY_EXIT="%s"\n' "$DDU_VERIFY_EXIT"
-  [ -n "${DDU_VERIFY_CLOSE:-}" ] && printf 'export DDU_VERIFY_CLOSE="%s"\n' "$DDU_VERIFY_CLOSE"
-  [ -n "${DDU_VERIFY_SEARCH:-}" ] && printf 'export DDU_VERIFY_SEARCH="%s"\n' "$DDU_VERIFY_SEARCH"
   [ -n "${DDU_STATE_PATH:-}" ] && printf 'export DDU_STATE_PATH="%s"\n' "$DDU_STATE_PATH"
   [ -n "${DDU_SETTINGS_PATH:-}" ] && printf 'export DDU_SETTINGS_PATH="%s"\n' "$DDU_SETTINGS_PATH"
-  [ -n "${DDU_DEBUG:-}" ] && printf 'export DDU_DEBUG="%s"\n' "$DDU_DEBUG"
 } >> "$APP/Contents/MacOS/launch.sh"
 # The exec MUST stay the launcher's last line. Appending anything after it
 # (the baked exports used to land here) writes code the shell never

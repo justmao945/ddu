@@ -95,49 +95,24 @@ Confirm dialogs: never hand-roll `DialogFooter` button pairs — use
 Cancel-outline + danger-small shared recipe). Set `.on_ok(...)` alongside
 the footer when Enter should confirm. One-off informational dialogs
 (no footer) are fine inline.
+
 ## Verification
 
 - `cargo test` — includes terminal regression tests (`plain_text_lands`,
   `zsh_prompt_bytes_land` — raw zsh prompt escape bytes must render) and git
   diff tests (`head_diff_sees_edits_and_untracked`).
-- Visual: `screencapture -x -l <windowid>`, or drive the window through the
-  `computer` device — Screen Recording, Accessibility and input belong to the
-  *app* (`dev.just.ddu`, not omp or the terminal, and a stale grant is why
-  either fails; `docs/SIGNING.md`). Accessibility is cached per process, so a
-  new grant only applies after the app is quit and reopened. gpui exposes
-  almost nothing to AX — gpui's a11y is opt-in per element
-  (`Element::a11y_role`, `div.role(..)`, `aria_*`; gpui-pre wires AccessKit
-  and gpui-pre-macos bridges it to NSAccessibility) and custom-painted panes
-  never opt in, so the tree is the traffic lights plus a few untitled
-  buttons: drive by coordinates (`win.click`/`press`/`scroll`), keep actions
-  reversible — a click in the terminal pane types into a live agent. When `screencapture -x` itself is refused
-  ("could not create image from display"), take pixels from the app: a
-  temporary `DDU_VERIFY_SHOT=<path>` hook calling `window.render_to_image()`
-  on the main thread needs `features = ["test-support"]` on the *main*
-  `gpui-kit` dep plus `gpui-pre-macos = { version = "0.3.3", features =
-  ["test-support"] }` (gpui-pre does not forward the feature, and it is what
-  compiles `render_to_image`); write `img.as_raw()` and convert with PIL —
-  layout questions are answered by measuring ink rows, not by eyeballing.
-  Prove liveness by state change: edit a tracked file → right diff panel must
-  show it within ~3 s; compare screenshot hashes across the change.
-- Settings window: `DDU_VERIFY_SETTINGS=<page_ix> bash scripts/dev.sh`
-  bakes the flag into the bundle launcher; the app then auto-opens the
-  Settings window on that page (0-based) for screenshots. Relaunch without
-  the env var to regenerate a clean launcher.
-- Diff search: `DDU_VERIFY_SEARCH=<query> bash scripts/dev.sh` waits for
-  the first diff poll, selects the first changed file, opens the find bar
-  (⌘F) with the query and dumps the observed state (match count, scroll
-  offset, scroll-container child count) to `/tmp/ddu-search-verify.json`.
-  The hook polls readiness on a background timer — a self-rearming
-  `defer_in` pumps a frame per defer at display-link rate, starving the
-  main runloop (frozen app, ~100% CPU). Dev hooks that need to re-check
-  state must never re-arm per frame.
-- Terminal search: `DDU_VERIFY_TERMSEARCH=<query> bash scripts/dev.sh`
-  plants a marker row + filler straight into the session's grid (never
-  the PTY — an agent CLI would read a write as a prompt), opens the
-  find bar, queries, reveals and dumps `{open, matches, current,
-  display_offset}` to `/tmp/ddu-term-search-verify.json`. Same
-  background-timer discipline as above.
+- UI verification runs against the real window through the `computer` device
+  (`bash scripts/dev.sh`, then screenshot / `win.ax()` / `win.click|press|type`;
+  `screencapture -x -l <windowid>` still works for pixels). Screen Recording,
+  Accessibility and input belong to the *app* (`dev.just.ddu`, not omp or the
+  terminal, and a stale grant is why either fails; `docs/SIGNING.md`).
+  Accessibility is additionally cached per process, so a new grant only applies
+  after the app is quit and reopened. What the AX tree exposes is what the app
+  opts into — the session rows and the terminal grid do, the diff pane does not
+  — so drive the rest by coordinates (`win.click`/`press`/`scroll`) and keep
+  actions reversible: a click in the terminal pane types into a live agent.
+- Prove liveness by state change: edit a tracked file → the right diff panel
+  must show it within ~3 s; compare screenshot hashes across the change.
 
 ## Conventions
 

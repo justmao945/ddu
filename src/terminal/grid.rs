@@ -280,6 +280,9 @@ pub struct TermGrid {
     pub dark: Arc<AtomicBool>,
     /// Rolling tail of raw PTY output (resume-id extraction at exit).
     pub recent: Arc<RecentOutput>,
+    /// Only a test needs to plant bytes itself (see `inject_bytes`): the
+    /// reader thread and the alacritty proxy each own their own sender.
+    #[cfg(test)]
     wake: async_channel::Sender<PumpMsg>,
     cols: u16,
     rows: u16,
@@ -316,6 +319,7 @@ impl TermGrid {
             writer,
             dark,
             recent,
+            #[cfg(test)]
             wake,
             cols,
             rows,
@@ -353,9 +357,10 @@ impl TermGrid {
     }
 
     /// Feed raw bytes through the escape parser into the grid — the
-    /// same path PTY output takes. Used by the headless verify hook
-    /// and tests to plant content without writing to the child (an
-    /// agent CLI would treat a PTY write as a prompt).
+    /// same path PTY output takes. Tests use it to plant content without
+    /// writing to the child (a PTY write would reach an agent CLI as a
+    /// prompt).
+    #[cfg(test)]
     pub(crate) fn inject_bytes(&self, bytes: &[u8]) {
         let mut parser: Processor<StdSyncHandler> = Processor::new();
         let mut term = self.term.lock();

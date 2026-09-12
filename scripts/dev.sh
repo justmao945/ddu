@@ -8,9 +8,9 @@
 #
 # Usage: scripts/dev.sh   (extra args are passed to `open`)
 #
-# DDU_VERIFY_SETTINGS / DDU_VERIFY_EXIT / DDU_VERIFY_CLOSE / DDU_DEBUG
-# and explicit DDU_STATE_PATH / DDU_SETTINGS_PATH pass through and are
-# baked into the bundle launcher (see scripts/make-bundle.sh).
+# DDU_DIR and explicit DDU_STATE_PATH / DDU_SETTINGS_PATH (dev state
+# isolation) pass through and are baked into the bundle launcher (see
+# scripts/make-bundle.sh).
 set -e
 SCRIPTS=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPTS/lib.sh"

@@ -290,11 +290,11 @@ audit — `DESIGN.md` §13 mandates the check) and turning style ranges into
     mirroring the existing `match_rows` tests.
   * `panel_cache_tests` extension: a mode switch notifies the diff pane and not
     the sidebar/terminal.
-* Visual, following the repo's existing `DDU_VERIFY_*` hooks (`AGENTS.md`):
-  `DDU_VERIFY_FILETREE=1` opens the layer with a fixed query state and dumps
-  `{rows, changed, collapsed}` to `/tmp/ddu-filetree-verify.json`; the pane
-  variant dumps `{mode, rows, first_row_kind, content_w}` — the layout questions
-  (row heights, gutters, tint bands) are answered from the dump, not by eye.
+* Visual, through the `computer` device (`AGENTS.md`): drive the real window —
+  open the layer, set the query, screenshot, read element bounds — and expose
+  the tree's rows to AX the way the session rows already are (`div.role(..)`
+  plus `aria_label`/`aria_selected`), so the layout questions (row heights,
+  gutters, tint bands) are answered from the tree and pixels, not by eye.
 * Live acceptance: edit a tracked file in a real session → the tree's badge and
   the pane's rows update within ~3 s; open a `README.md` → Preview renders
   headings, lists, a fenced block and a table.
