@@ -103,40 +103,44 @@ chmod +x "$APP/Contents/MacOS/launch.sh"
 # binary with a derived identifier and undo the match (sign the bundle
 # without it).
 #
-# Signing identity: the app's TCC grants (Screen Recording, notifications)
-# are stored against its *designated requirement*, not its bundle id. An
-# ad-hoc signature's requirement is a bare `cdhash`, which every re-sign
-# changes, so each install silently invalidated the existing 系统设置 →
-# 屏幕录制 entry. The local self-signed certificate makes the requirement
-# stable for its lifetime — docs/SIGNING.md has the whole story, and
+# Signing identity: the app's TCC grants (Screen Recording, Accessibility,
+# notifications) are stored against its *designated requirement*, not its
+# bundle id. An ad-hoc signature's requirement is a bare `cdhash`, which
+# every re-sign changes, so each install silently invalidated the existing
+# 系统设置 → 屏幕录制 entry. There is deliberately no ad-hoc path here: the
+# local self-signed certificate makes the requirement stable for its
+# lifetime, so a machine that cannot reach an identity fails the build
+# instead of quietly producing a bundle that drops the grants.
+# docs/SIGNING.md has the whole story, and
 # scripts/make-signing-identity.sh provisions it. `DDU_SIGN_IDENTITY`
-# overrides (e.g. a real Developer ID); a machine without the local
-# identity still signs ad-hoc, which works but drops the grants on the
-# next install.
+# substitutes another identity (e.g. a real Developer ID), which must
+# likewise be reachable.
 SIGN_ID="${DDU_SIGN_IDENTITY:-}"
 if [ -z "$SIGN_ID" ]; then
   SIGN_KC="$HOME/Library/Keychains/ddu-signing.keychain-db"
-  if [ -f "$SIGN_KC" ]; then
-    # Provisioned machine: quietly signing ad-hoc here would break the
-    # app's TCC grants, so not reaching the identity is fatal, not a
-    # fallback. The keychain's password is a personal secret and lives in
-    # the login keychain (scripts/make-signing-identity.sh puts it there).
-    SIGN_PW="${DDU_SIGN_KEYCHAIN_PW:-$(security find-generic-password -a ddu -s ddu-signing.keychain -w 2>/dev/null || true)}"
-    if [ -z "$SIGN_PW" ]; then
-      echo "make-bundle: no password for $SIGN_KC — run scripts/make-signing-identity.sh (see docs/SIGNING.md)" >&2
-      exit 1
-    fi
-    security unlock-keychain -p "$SIGN_PW" "$SIGN_KC" ||
-      { echo "make-bundle: cannot unlock $SIGN_KC (see docs/SIGNING.md)" >&2; exit 1; }
-    SIGN_ID="Day Day Up Local Signing"
-    # codesign resolves identities through the *search list* — `--keychain`
-    # alone finds nothing here — so the keychain has to be listed.
-    security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID" ||
-      { echo "make-bundle: '$SIGN_ID' not visible to codesign — run scripts/make-signing-identity.sh (see docs/SIGNING.md)" >&2; exit 1; }
-  else
-    SIGN_ID="-"
-    echo "make-bundle: no local signing identity — signing ad-hoc (TCC grants will not survive an install)" >&2
+  [ -f "$SIGN_KC" ] ||
+    { echo "make-bundle: $SIGN_KC is missing — run scripts/make-signing-identity.sh (see docs/SIGNING.md)" >&2; exit 1; }
+  # The keychain's password is a personal secret and lives in the login
+  # keychain (scripts/make-signing-identity.sh puts it there).
+  SIGN_PW="${DDU_SIGN_KEYCHAIN_PW:-$(security find-generic-password -a ddu -s ddu-signing.keychain -w 2>/dev/null || true)}"
+  if [ -z "$SIGN_PW" ]; then
+    echo "make-bundle: no password for $SIGN_KC — run scripts/make-signing-identity.sh (see docs/SIGNING.md)" >&2
+    exit 1
   fi
+  security unlock-keychain -p "$SIGN_PW" "$SIGN_KC" ||
+    { echo "make-bundle: cannot unlock $SIGN_KC (see docs/SIGNING.md)" >&2; exit 1; }
+  SIGN_ID="Day Day Up Local Signing"
+  # codesign resolves identities through the *search list* — `--keychain`
+  # alone finds nothing here — so the keychain has to be listed.
+  security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID" ||
+    { echo "make-bundle: '$SIGN_ID' not visible to codesign — run scripts/make-signing-identity.sh (see docs/SIGNING.md)" >&2; exit 1; }
 fi
 codesign --force --sign "$SIGN_ID" -i "$ID" "$APP/Contents/MacOS/ddu.bin"
 codesign --force --sign "$SIGN_ID" "$APP"
+# Ad-hoc signing could only creep back in through a bad identity
+# (`DDU_SIGN_IDENTITY=-`): read the sealed binary's requirement back and
+# refuse to ship a cdhash one.
+if codesign -d -r- "$APP/Contents/MacOS/ddu.bin" 2>&1 | grep -q 'cdhash'; then
+  echo "make-bundle: ddu.bin is signed ad-hoc (its requirement is a cdhash) — see docs/SIGNING.md" >&2
+  exit 1
+fi

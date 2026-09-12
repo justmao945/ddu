@@ -168,9 +168,12 @@ struct AgentCmd { program: String, args: Vec<String>, cwd: PathBuf, env: Vec<(St
   (`OSC 9 ; 4 ; …`) is filtered — it means "busy", not "yours". Setting:
   Settings → General → Notifications. macOS only hands a notification to a
   process whose code identity is the app's: `make-bundle.sh` signs the
-  exec'd `ddu.bin` with the bundle id, then seals the bundle (ad-hoc; no
-  certificate), so an unsigned build reaches `show_system_notification`
-  and the OS drops it (`UNErrorDomain Code=1`).
+  exec'd `ddu.bin` with the bundle id and the local certificate, then seals
+  the bundle, so a differently-signed build calls
+  `show_system_notification` and the OS drops it (`UNErrorDomain Code=1`).
+  `docs/SIGNING.md`: the requirement must stay stable or every grant
+  (notifications, Screen Recording, Accessibility) dies with the next
+  install.
 
 ## 11. Performance and Correctness
 

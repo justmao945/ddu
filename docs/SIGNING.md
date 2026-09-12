@@ -115,8 +115,9 @@ signing crept back in, and rebuilds will start invalidating grants again.
 
 ## Overrides
 
-`DDU_SIGN_IDENTITY` replaces the local identity entirely (e.g. a real Developer
-ID, with its keychain unlocked by the caller). A machine with no local identity
-still builds: `make-bundle.sh` falls back to ad-hoc with a warning. A machine
-that *has* the keychain but cannot reach the identity fails the build instead,
-because signing ad-hoc there would drop the grants.
+`DDU_SIGN_IDENTITY` substitutes another identity entirely (e.g. a real
+Developer ID, with its keychain unlocked by the caller). There is no ad-hoc
+path: a machine that cannot reach an identity fails the build, because signing
+ad-hoc would drop the app's grants on its next install. `make-bundle.sh` ends
+by reading the sealed binary's requirement back and refusing to ship a
+`cdhash` one.
