@@ -134,7 +134,12 @@ impl IntoElement for TerminalElement {
 
 impl Element for TerminalElement {
     type RequestLayoutState = LayoutId;
-    type PrepaintState = ();
+    /// The visible window's text, captured for the accessibility tree (see
+    /// [`Self::a11y_synthetic_children`]). Captured only while an assistive
+    /// client is attached: reading the grid and building the string costs
+    /// more than the paint the stream throttle exists to bound, so it must
+    /// not run on the normal path.
+    type PrepaintState = Option<SharedString>;
 
     fn id(&self) -> Option<ElementId> {
         Some("terminal-grid".into())
@@ -142,6 +147,14 @@ impl Element for TerminalElement {
 
     fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
         None
+    }
+
+    /// The grid as a terminal: assistive technology reads the text, which
+    /// this element supplies as one synthetic node per visible row
+    /// ([`Self::a11y_synthetic_children`]) rather than as glyph children
+    /// (the glyphs are vector strokes, not text nodes).
+    fn a11y_role(&self) -> Option<Role> {
+        Some(Role::Terminal)
     }
 
     fn request_layout(
@@ -189,6 +202,57 @@ impl Element for TerminalElement {
         if let Some(session) = self.session.upgrade() {
             session.update(cx, |s, cx| s.request_resize(cols, rows, cx));
         }
+
+        if !window.is_a11y_active() {
+            return None;
+        }
+        let session = self.session.upgrade()?;
+        let term = session.read(cx).grid.term.clone();
+        let term_lock = term.lock();
+        let mut content = term_lock.renderable_content();
+        let mut text = String::new();
+        let mut last_line: Option<i32> = None;
+        for indexed in &mut content.display_iter {
+            if last_line != Some(indexed.point.line.0) {
+                // A row's trailing blanks are padding, not content.
+                while text.ends_with(' ') {
+                    text.pop();
+                }
+                text.push('\n');
+                last_line = Some(indexed.point.line.0);
+            }
+            let cell = indexed.cell;
+            // A wide char's spacer and the NUL padding past a line's end
+            // are not text (`paint_grid` skips the same cells).
+            if cell.c == '\0'
+                || cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            text.push(cell.c);
+        }
+        drop(content);
+        drop(term_lock);
+        while text.ends_with('\n') || text.ends_with(' ') {
+            text.pop();
+        }
+        Some(text.into())
+    }
+
+    fn a11y_synthetic_children(
+        &mut self,
+        prepaint: &mut Self::PrepaintState,
+        builder: &mut A11ySubtreeBuilder,
+    ) {
+        let Some(text) = prepaint else {
+            return;
+        };
+        // The grid's text *is* this node's value: macOS maps the role to
+        // AXTextArea and reads the value (per-row child nodes are pruned
+        // there — verified), and this callback is the one accessibility
+        // hook that runs after prepaint, which is where the grid is read.
+        builder.parent_node().set_value(text.to_string());
     }
 
     fn paint(

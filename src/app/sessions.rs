@@ -711,6 +711,19 @@ impl AppView {
                     // `is_visible_term`).
                     if this.is_visible_term(emitter) {
                         this.terminal_pane.update(cx, |_, cx| cx.notify());
+                        // An assistive client reads the sidebar and the
+                        // breadcrumb too, and gpui rebuilds its tree from
+                        // exactly the elements that prepainted this frame
+                        // (`window/a11y.rs`: `begin_frame` clears it), so a
+                        // panel kept cached here would drop out of the tree
+                        // while the pane streams. Notify them only while a
+                        // client is attached — the flag is false otherwise,
+                        // which is what keeps the panels cached on stream
+                        // frames.
+                        if window.is_a11y_active() {
+                            this.sidebar.update(cx, |_, cx| cx.notify());
+                            this.breadcrumb.update(cx, |_, cx| cx.notify());
+                        }
                         // The one stream output that *is* visible
                         // outside the pane: the OSC title, which agent
                         // CLIs spin, shown in the row and the window

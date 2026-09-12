@@ -165,6 +165,13 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                 .child(
                     div()
                         .id(("project-row", p))
+                        // Accessibility: the row *is* the disclosure
+                        // control for its sessions (click toggles the
+                        // layer), so it is a tree item that reports
+                        // whether that layer is open.
+                        .role(Role::TreeItem)
+                        .aria_expanded(expanded)
+                        .aria_label(SharedString::from(project.name.clone()))
                         .h(px(ROW_PX))
                         .flex_shrink_0()
                         .flex()
@@ -292,6 +299,15 @@ fn session_row(
     let title = session_title(s, cx);
     div()
         .id(element_id)
+        // Accessibility: a row is one tree item (the sidebar *is* a tree:
+        // project rows nest their sessions), named after the title a screen
+        // reader would otherwise have to guess from the painted glyphs, and
+        // marked selected when it is the session on screen. The role has to
+        // be TreeItem to read as a row on macOS — ListItem maps to a bare
+        // group there.
+        .role(Role::TreeItem)
+        .aria_selected(active)
+        .aria_label(SharedString::from(format!("{title} — {}", meta_label(s))))
         .h(px(SESSION_ROW_PX))
         .flex_shrink_0()
         .flex()
