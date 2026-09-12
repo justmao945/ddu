@@ -108,9 +108,18 @@ the footer when Enter should confirm. One-off informational dialogs
   terminal, and a stale grant is why either fails; `docs/SIGNING.md`).
   Accessibility is additionally cached per process, so a new grant only applies
   after the app is quit and reopened. What the AX tree exposes is what the app
-  opts into — the session rows and the terminal grid do, the diff pane does not
-  — so drive the rest by coordinates (`win.click`/`press`/`scroll`) and keep
-  actions reversible: a click in the terminal pane types into a live agent.
+  opts into — the session rows and the terminal grid do; the diff file-tree rows
+  and the diff pane do not — so drive the rest by coordinates
+  (`win.click`/`press`/`scroll`) and keep actions reversible: a click in the
+  terminal pane types into a live agent.
+- The diff find bar ("Find in diff") needs a selected file first: ⌘T drops the
+  file-tree layer in under the sessions, ⌘R opens the changes pane, then click a
+  row in the tree and ⌘F. The layer toggles make the whole sequence replayable
+  from a fresh state.
+- Verify against a scratch repo, not the working tree: make one dirty (`git
+  init`, commit, edit) and point the dev launch at it (`DDU_DIR=/tmp/scratch
+  DDU_STATE_PATH=/tmp/v.json DDU_SETTINGS_PATH=/tmp/vc.json bash scripts/dev.sh`).
+  Fresh state also starts with every pane closed, the cleanest base for a run.
 - Prove liveness by state change: edit a tracked file → the right diff panel
   must show it within ~3 s; compare screenshot hashes across the change.
 
@@ -191,9 +200,10 @@ the footer when Enter should confirm. One-off informational dialogs
   being left reports its leave AFTER the row being entered reports hover —
   an unconditional clear drops the fresh entry and the row's action
   buttons never appear while moving down the list.
-- Global shortcuts live in `AppView::new` (`src/app.rs`): ⌘T/⌘N new
-  session (same action, guarded against an empty workspace), ⌘O add
-  project (shares `add_project`'s folder-picker flow), ⌘,/⌘B/⌘R/⌘W.
+- Global shortcuts live in `AppView::new` (`src/app/mod.rs`): ⌘N new
+  session (guarded against an empty workspace), ⌘O add project (shares
+  `add_project`'s folder-picker flow), ⌘T/⌘B/⌘R toggle the diff file tree /
+  sidebar / changes pane, ⌘W close session, ⌘, settings.
   Terminal-scoped ⌘C/⌘V (`TermCopy`/`TermPaste`) double as the
   right-click menu's shortcut hints via `PopupMenuItem::action` — any new
   terminal action shown in a menu must wire its action the same way.

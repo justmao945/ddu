@@ -11,9 +11,10 @@
 # LaunchServices activating the wrong one.
 #
 # DDU_* env present at bundle time is baked into the generated launcher:
-# DDU_DIR (workspace root), DDU_STATE_PATH / DDU_SETTINGS_PATH (state
-# isolation). Omitted entirely when unset so a clean bundle can't leak
-# empty vars.
+# DDU_STATE_PATH / DDU_SETTINGS_PATH (state isolation). Omitted entirely
+# when unset so a clean bundle can't leak empty vars. DDU_DIR (workspace
+# root) needs no baking: dev.sh/install.sh set it for the `open` call, so
+# the launcher's `cd` and the app both inherit it.
 set -e
 cd "$(dirname "$0")/.."
 

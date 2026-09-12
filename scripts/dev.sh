@@ -8,9 +8,10 @@
 #
 # Usage: scripts/dev.sh   (extra args are passed to `open`)
 #
-# DDU_DIR and explicit DDU_STATE_PATH / DDU_SETTINGS_PATH (dev state
-# isolation) pass through and are baked into the bundle launcher (see
-# scripts/make-bundle.sh).
+# DDU_DIR (workspace root, default ~/Code/ddu) and any explicit
+# DDU_STATE_PATH / DDU_SETTINGS_PATH reach the app through the environment
+# `open` hands the launcher; the two state paths are additionally baked
+# into that launcher (see scripts/make-bundle.sh).
 set -e
 SCRIPTS=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPTS/lib.sh"
