@@ -57,14 +57,67 @@ License: Apache-2.0, GPL-free throughout. Design docs: `docs/DESIGN.md` (the app
   that ancestor case: the caller is running inside the app, so killing it
   would take the shell down mid-script. The generated `launch.sh` must
   keep `exec` as its LAST line — anything appended after it never runs.
-- `make-bundle.sh` ad-hoc signs every bundle: `ddu.bin` first, with the
-  bundle id as its code identifier, then the bundle without `--deep`.
-  macOS keys bundle-scoped services (desktop notifications) off the
-  running process's code identity; the process is the exec'd `ddu.bin`,
-  so an unsigned build calls `show_system_notification` and macOS drops
-  it (`UNErrorDomain Code=1`, usernotificationsd "not allowed"). No
-  Apple certificate is involved — ad-hoc is enough, and the ordering
-  matters (`--deep` would re-sign the binary with a derived id).
+- `make-bundle.sh` signs with a **local self-signed code-signing
+  identity** (`Day Day Up Local Signing`, keychain
+  `~/Library/Keychains/ddu-signing.keychain-db`), and only falls back to
+  ad-hoc on a machine that has no such identity. It signs `ddu.bin`
+  first, with the bundle id as its code identifier, then the bundle
+  without `--deep`.
+  The identity is not cosmetic: macOS keys bundle-scoped services
+  (desktop notifications) and TCC grants (Screen Recording) off the
+  running process's *code identity* — the process is the exec'd
+  `ddu.bin`, so an unsigned build calls `show_system_notification` and
+  macOS drops it (`UNErrorDomain Code=1`, usernotificationsd "not
+  allowed"), and `--deep` would re-sign the binary with a derived id and
+  undo the match. And grants are stored against the *designated
+  requirement*: ad-hoc's requirement is a bare `cdhash`, which every
+  re-sign changes, so each install silently invalidated the existing
+  系统设置 → 屏幕录制 entry — the toggle stayed on while every request
+  failed (`Failed to match existing code requirement for subject
+  dev.just.ddu`, which is also why `screencapture` broke after an
+  install). The certificate makes the requirement
+  `identifier "dev.just.ddu" and certificate root = H"c6c9…"`, which no
+  build changes.
+- One-time setup of that identity (done on this machine; here for the
+  next clean install). Generate the certificate — `-legacy` matters,
+  Security cannot verify OpenSSL 3's default PBES2 MAC:
+  ```
+  openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+    -keyout key.pem -out cert.pem -subj "/CN=Day Day Up Local Signing" \
+    -addext basicConstraints=critical,CA:FALSE \
+    -addext keyUsage=critical,digitalSignature \
+    -addext extendedKeyUsage=critical,codeSigning
+  openssl pkcs12 -export -legacy -out identity.p12 -inkey key.pem \
+    -in cert.pem -passout pass:ddu
+  ```
+  put it in its own keychain (a key imported into the *login* keychain
+  raises an authorization dialog on every build, even with `-A`, and
+  setting its partition list there needs the login password):
+  ```
+  KC=~/Library/Keychains/ddu-signing.keychain-db
+  PW=$(openssl rand -hex 16)
+  security create-keychain -p "$PW" "$KC"
+  security set-keychain-settings -lut 21600 "$KC"
+  security import identity.p12 -k "$KC" -P ddu -T /usr/bin/codesign -A
+  security set-key-partition-list -S apple-tool:,apple: -s -k "$PW" "$KC"
+  ```
+  trust it (`find-identity -v` lists nothing without this step — an
+  untrusted self-signed cert shows as `CSSMERR_TP_NOT_TRUSTED`),
+  ```
+  security add-trusted-cert -r trustRoot -p codeSign \
+    -k ~/Library/Keychains/login.keychain-db cert.pem
+  ```
+  and list the keychain — **codesign resolves identities through the
+  search list**, `--keychain` alone answers "no identity found":
+  ```
+  security list-keychains -d user -s \
+    ~/Library/Keychains/login.keychain-db "$KC"
+  ```
+  The keychain's password lives in `~/.config/ddu/signing.keychain-pw`
+  (0600) and `make-bundle.sh` unlocks it per build (it locks on sleep);
+  key material is backed up in `~/.config/ddu/signing/`.
+  `DDU_SIGN_IDENTITY` overrides the whole arrangement (e.g. a real
+  Developer ID, with its own keychain unlocked by the caller).
 
 **Never** start the binary directly as a background child (`nohup`, `hub exec`,
 raw spawn) — on macOS 26 an unactivated process: (a) never gets
@@ -105,15 +158,13 @@ the footer when Enter should confirm. One-off informational dialogs
   Screen Recording is keyed to the requester's *code identity*, and the
   requester here is the app, not the agent CLI (ddu spawns omp in a PTY,
   so TCC attributes the request to `dev.just.ddu` — granting Terminal or
-  omp does nothing). `make-bundle.sh` signs ad-hoc, whose designated
-  requirement is a bare `cdhash`, so **every install silently
-  invalidates the existing 系统设置 → 屏幕录制 entry**: the toggle stays
-  on while every request fails (`log show --predicate 'subsystem ==
-  "com.apple.TCC"'` says "Failed to match existing code requirement for
-  subject dev.just.ddu"). After installing, remove the entry and re-add
-  /Applications/ddu.app, then relaunch the app. Same for the
-  notification grant. When the
-  capture is refused (`screencapture -x` fails with "could not create
+  omp does nothing). The stable signing identity above is what keeps
+  that grant across rebuilds; if a request is refused, `log show
+  --predicate 'subsystem == "com.apple.TCC"'` names the subject and says
+  whether the stored requirement failed to match (a leftover entry from
+  an ad-hoc-signed build does exactly that): remove the entry, re-add
+  /Applications/ddu.app and relaunch the app. When the capture is
+  refused (`screencapture -x` fails with "could not create
   image from display"), get pixels from the app itself instead: a
   temporary `DDU_VERIFY_SHOT=<path>` hook that calls
   `window.render_to_image()` on the main thread a few ticks after launch

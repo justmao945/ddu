@@ -101,6 +101,42 @@ chmod +x "$APP/Contents/MacOS/launch.sh"
 # just the bundle — must carry the app's identifier. Sign it with the
 # bundle id FIRST, then seal the bundle: `--deep` would re-sign the
 # binary with a derived identifier and undo the match (sign the bundle
-# without it). Ad-hoc is enough; no Apple certificate is needed.
-codesign --force --sign - -i "$ID" "$APP/Contents/MacOS/ddu.bin"
-codesign --force --sign - "$APP"
+# without it).
+#
+# Signing identity: the app's TCC grants (Screen Recording, notifications)
+# are stored against its *designated requirement*, not its bundle id. An
+# ad-hoc signature's requirement is a bare `cdhash`, which every re-sign
+# changes — so each install silently invalidated the existing 系统设置 →
+# 屏幕录制 entry (toggle on, every request failing). A local self-signed
+# code-signing certificate makes the requirement
+# `identifier "dev.just.ddu" and certificate root = H"…"`, stable for the
+# life of the certificate. `DDU_SIGN_IDENTITY` overrides (e.g. a real
+# Developer ID); on a machine without the local identity we fall back to
+# ad-hoc, which still runs but drops the grants on the next install.
+# See AGENTS.md for the one-time setup.
+SIGN_ID="${DDU_SIGN_IDENTITY:-}"
+if [ -z "$SIGN_ID" ]; then
+  SIGN_KC="$HOME/Library/Keychains/ddu-signing.keychain-db"
+  SIGN_PW_FILE="$HOME/.config/ddu/signing.keychain-pw"
+  if [ -f "$SIGN_KC" ]; then
+    # Provisioned machine: quietly signing ad-hoc here would break the
+    # app's TCC grants, so not reaching the identity is fatal, not a
+    # fallback.
+    if [ ! -f "$SIGN_PW_FILE" ]; then
+      echo "make-bundle: $SIGN_KC needs $SIGN_PW_FILE (see AGENTS.md)" >&2
+      exit 1
+    fi
+    security unlock-keychain -p "$(cat "$SIGN_PW_FILE")" "$SIGN_KC" ||
+      { echo "make-bundle: cannot unlock $SIGN_KC" >&2; exit 1; }
+    SIGN_ID="Day Day Up Local Signing"
+    # codesign resolves identities through the *search list* — `--keychain`
+    # alone finds nothing here — so the keychain has to be listed.
+    security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID" ||
+      { echo "make-bundle: '$SIGN_ID' not visible to codesign — add $SIGN_KC to the search list (AGENTS.md)" >&2; exit 1; }
+  else
+    SIGN_ID="-"
+    echo "make-bundle: no local signing identity — signing ad-hoc (TCC grants will not survive an install)" >&2
+  fi
+fi
+codesign --force --sign "$SIGN_ID" -i "$ID" "$APP/Contents/MacOS/ddu.bin"
+codesign --force --sign "$SIGN_ID" "$APP"
