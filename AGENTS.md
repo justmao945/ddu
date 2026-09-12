@@ -170,17 +170,19 @@ the footer when Enter should confirm. One-off informational dialogs
   panel states `root_style()` once and both the mount and the panel's
   root element read it; caching skips measuring the contents.
 - Stream repaint pacing is adaptive: the pump spaces output-driven
-  repaints by `stream_interval(paint_ms)` — 33 ms (30 fps) while the
-  terminal element's own paint is cheap, then 50 / 66 / 100 ms once a
-  frame's paint passes 4 / 9 / 16 ms (`STREAM_FRAME_STEPS`, EWMA fed by
+  repaints by `stream_interval(paint_ms)` — 50 ms (20 fps) while the
+  terminal element's own paint is cheap, then 66 / 100 ms once a frame's
+  paint passes 4 / 9 ms (`STREAM_FRAME_STEPS`, EWMA fed by
   `TermSession::note_paint_cost`). Frame rate is the one lever that
   scales the whole-window redraw (gpui repaints every primitive each
   frame); keystrokes, scrolling and selection never pass through the
-  throttle, so interactive latency is unchanged. Thresholds above the
-  *measured* cost of a real repaint matter: a full-screen TUI redraw on
-  a 1400×900 retina window costs p50 1.8 ms / p90 3.6 ms, so the old
-  2.5 ms first step pinned every agent turn at 15 fps — the spinner
-  stutter that made it obvious. Measured after the retune: 30 fps.
+  throttle, so interactive latency is unchanged. The cost steps have to
+  sit *above* what a real repaint costs, not below: a full-screen TUI
+  redraw on a 1400×900 retina window measures p50 1.8 ms / p90 3.6 ms,
+  so the original 2.5 ms first step pinned every agent turn at 15 fps —
+  under the floor, and the stutter was plainly visible. 20 fps in the
+  pane is fine to watch; the *session list* stutter was a different bug
+  (the cached row missing the title notify, see above).
 - Box-drawing chars are all vector-drawn except the three diagonals
   (`src/terminal/boxart.rs`, pinned by
   `the_whole_box_drawing_block_is_vector`): a char left to the font

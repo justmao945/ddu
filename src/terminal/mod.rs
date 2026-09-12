@@ -52,33 +52,31 @@ const SCROLLBAR_IDLE: Duration = Duration::from_secs(2);
 /// immediately; interaction-driven repaints (scroll/select/paste) are
 /// emitted from entity methods and never pass through this throttle.
 ///
-/// 30 fps: a stream is text nobody reads character-by-character, but it
-/// is also what the visible session's spinner moves at, and the sidebar
-/// row mirrors the same title glyph — 20 fps there is visible stutter,
-/// and the frame-rate ceiling has to sit above what a full-screen TUI
-/// repaint costs on a normal window (measured p90 3.6 ms at 1400×900,
-/// so the floor holds for those). Keystrokes, scrolling and selection
-/// bypass this entirely, so nothing interactive is capped here.
-pub(crate) const STREAM_FRAME_MIN: Duration = Duration::from_millis(33);
+/// 20 fps: a stream is text nobody reads character-by-character, and
+/// both CPU and GPU scale with frames drawn (gpui repaints every
+/// primitive each frame). What the eye actually follows — the spinner
+/// in the pane, and the sidebar row that mirrors the same OSC title —
+/// moves at 20 fps with it and reads as smooth; the sidebar's *jerkier*
+/// case was never this number, it was the row not being notified at all
+/// (see `AppView::subscribe_term`). Keystrokes, scrolling and selection
+/// bypass this throttle entirely, so nothing interactive is capped.
+pub(crate) const STREAM_FRAME_MIN: Duration = Duration::from_millis(50);
 /// Interval the stream throttle stretches to when a frame's terminal
 /// paint is expensive (see [`stream_interval`]).
 const STREAM_FRAME_MAX: Duration = Duration::from_millis(100);
 /// Paint cost (ms, per frame) at which the interval takes its next step,
-/// paired with the interval it steps to: 20 fps past 4 ms of terminal
-/// paint, 15 fps past 9 ms, 10 fps past 16 ms.
+/// paired with the interval it steps to: 15 fps past 4 ms of terminal
+/// paint, 10 fps past 9 ms.
 ///
 /// Sizing: this element's paint is roughly 40% of a window redraw, so
 /// the steps only engage when a frame costs ~10 ms and up — a window
 /// several times the size of the measured one, or a machine already
 /// loaded. The thresholds used to start at 2.5 ms, which is *below* what
 /// a full-screen TUI repaint costs on a 1400×900 window (p50 1.8 ms,
-/// p90 3.6 ms): every agent turn sat pinned at 15 fps, and the spinner
-/// that made it obvious is exactly the thing the stream is watched for.
-const STREAM_FRAME_STEPS: [(f32, Duration); 3] = [
-    (4., Duration::from_millis(50)),
-    (9., Duration::from_millis(66)),
-    (16., STREAM_FRAME_MAX),
-];
+/// p90 3.6 ms): every agent turn sat pinned at 15 fps, i.e. *below* the
+/// floor, which is what made the pane look worse than the floor implies.
+const STREAM_FRAME_STEPS: [(f32, Duration); 2] =
+    [(4., Duration::from_millis(66)), (9., STREAM_FRAME_MAX)];
 
 /// Spacing between stream repaints for a frame whose terminal paint
 /// costs `paint_ms` (a slow EWMA, see [`TermSession::note_paint_cost`]):
@@ -1741,7 +1739,7 @@ mod tests {
     }
 
     /// The interval steps with the cost of a frame's terminal paint: a
-    /// cheap frame keeps the 30 fps floor, an expensive one backs the
+    /// cheap frame keeps the 20 fps floor, an expensive one backs the
     /// stream off (CPU and GPU both scale with frames drawn).
     #[test]
     fn stream_interval_steps_with_frame_cost() {
@@ -1758,7 +1756,7 @@ mod tests {
         assert_eq!(
             stream_interval(3.6),
             STREAM_FRAME_MIN,
-            "a full-screen repaint still animates at 30 fps"
+            "a full-screen repaint keeps the floor"
         );
         assert_eq!(
             stream_interval(STREAM_FRAME_STEPS[0].0),
@@ -1768,15 +1766,11 @@ mod tests {
             stream_interval(STREAM_FRAME_STEPS[1].0),
             STREAM_FRAME_STEPS[1].1
         );
-        assert_eq!(
-            stream_interval(STREAM_FRAME_STEPS[2].0),
-            STREAM_FRAME_STEPS[2].1
-        );
         assert_eq!(stream_interval(40.), STREAM_FRAME_MAX, "clamped at the ceiling");
     }
 
     /// Expensive frames stretch the stream interval: the same burst that
-    /// flushes at the 30 fps floor must not flush until the stretched
+    /// flushes at the floor must not flush until the stretched
     /// interval has passed. Paced through the pump's faked executor
     /// clock, like [`stream_repaints_are_throttled`].
     #[test]
@@ -1815,7 +1809,8 @@ mod tests {
                 paints.set(0);
 
                 // A paint at the first step's cost seeds the EWMA one
-                // step down: the interval becomes 50 ms, not the floor.
+                // step down: the interval becomes 66 ms, not the 50 ms
+                // floor.
                 cx.update(|cx| {
                     session
                         .read(cx)
@@ -1833,7 +1828,7 @@ mod tests {
                 assert_eq!(
                     paints.get(),
                     1,
-                    "the 30 fps floor must not flush a stretched interval"
+                    "the floor must not flush a stretched interval"
                 );
 
                 cx.executor()
