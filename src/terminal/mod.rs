@@ -51,31 +51,33 @@ const SCROLLBAR_IDLE: Duration = Duration::from_secs(2);
 /// Idle wakeups (a keystroke echo) find the window elapsed and repaint
 /// immediately; interaction-driven repaints (scroll/select/paste) are
 /// emitted from entity methods and never pass through this throttle.
-const STREAM_FRAME_MIN: Duration = Duration::from_millis(33);
+///
+/// 20 fps: a stream is text nobody reads character-by-character, and
+/// both CPU and GPU scale with frames drawn (the shell redraws every
+/// primitive each frame). Keystrokes, scrolling and selection bypass
+/// this entirely, so nothing interactive is capped here.
+const STREAM_FRAME_MIN: Duration = Duration::from_millis(50);
 /// Interval the stream throttle stretches to when a frame's terminal
 /// paint is expensive (see [`stream_interval`]).
-const STREAM_FRAME_MAX: Duration = Duration::from_millis(66);
+const STREAM_FRAME_MAX: Duration = Duration::from_millis(100);
 /// Paint cost (ms, per frame) at which the interval takes its next step,
-/// paired with the interval it steps to: 20 fps at 2.5 ms of terminal
-/// paint, 15 fps at 6 ms.
+/// paired with the interval it steps to: 15 fps at 2.5 ms of terminal
+/// paint, 10 fps at 6 ms.
 ///
 /// Sizing: this element's paint is roughly 40% of a window redraw, so
 /// 2.5 ms of paint is a ~6 ms frame — a fifth of a core at 30 fps, spent
-/// on output nobody reads character-by-character. Both CPU and GPU scale
-/// with frames drawn, so once the per-frame cost is bounded the frame
-/// rate is the one lever left; short of a view split it is also the only
-/// one that touches the whole-window redraw. Interaction (keystrokes,
-/// scroll, selection) never passes through this throttle, so
-/// responsiveness is unaffected.
+/// on output nobody reads character-by-character. Once the per-frame
+/// cost is bounded the frame rate is the one lever left; short of a
+/// deeper view split it is also the only one that touches the
+/// whole-window redraw.
 const STREAM_FRAME_STEPS: [(f32, Duration); 2] =
-    [(2.5, Duration::from_millis(50)), (6., STREAM_FRAME_MAX)];
+    [(2.5, Duration::from_millis(66)), (6., STREAM_FRAME_MAX)];
 
 /// Spacing between stream repaints for a frame whose terminal paint
 /// costs `paint_ms` (a slow EWMA, see [`TermSession::note_paint_cost`]):
 /// the floor while paint is cheap, then one step down per entry in
 /// [`STREAM_FRAME_STEPS`]. The paint cost of a frame does not depend on
-/// the interval, so the level is stable, and the floor stays at 30 fps
-/// so a fast machine keeps the smooth stream it has today.
+/// the interval, so the level is stable.
 fn stream_interval(paint_ms: f32) -> Duration {
     STREAM_FRAME_STEPS
         .iter()

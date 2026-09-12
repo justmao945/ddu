@@ -195,3 +195,63 @@ pub(crate) fn hover_bg(cx: &App) -> Hsla {
 pub(crate) fn selection_hover_bg(cx: &App) -> Hsla {
     cx.theme().foreground.opacity(0.16)
 }
+
+/// Declare one shell panel as a **cached child view** of [`AppView`].
+///
+/// gpui redraws the whole window every frame: `AppView::render` rebuilds
+/// its element tree and every element in it re-paints, so a streaming
+/// terminal would rebuild the sidebar and the changes pane 20-30 times a
+/// second for output that cannot change them (measured: the terminal
+/// element is ~40% of a frame, the rest is that whole-tree rebuild).
+/// A child view mounted with [`Entity::cached`] keeps its rendered
+/// subtree — layout, paint, hitboxes, mouse listeners, key contexts and
+/// focus — and replays it until the view is notified, so the panels stop
+/// paying for frames they have nothing to do with.
+///
+/// Contract, both halves enforced by tests in `src/app/mod.rs`:
+/// * a stream wakeup notifies the terminal pane alone (see
+///   `AppView::subscribe_term`) — the panels must not re-render;
+/// * any other app-level notify fans out to every panel
+///   (`AppView::notify_panels`, installed as an app-level observer),
+///   because a panel whose state changed would otherwise keep showing a
+///   stale frame.
+///
+/// The cached style is the panel's own layout box (`<panel>::root_style`)
+/// stated by the composer: caching skips measuring the contents, so the
+/// composer has to say how the subtree is laid out. Both call sites read
+/// the same function, so the box cannot drift from the panel's.
+macro_rules! panel_view {
+    ($(#[$doc:meta])* $name:ident, $render:path) => {
+        $(#[$doc])*
+        pub(crate) struct $name {
+            app: gpui_kit::WeakEntity<crate::app::AppView>,
+        }
+
+        impl $name {
+            pub(crate) fn new(app: gpui_kit::WeakEntity<crate::app::AppView>) -> Self {
+                Self { app }
+            }
+        }
+
+        impl gpui_kit::Render for $name {
+            fn render(
+                &mut self,
+                window: &mut gpui_kit::Window,
+                cx: &mut gpui_kit::Context<Self>,
+            ) -> impl gpui_kit::IntoElement {
+                use gpui_kit::IntoElement as _;
+                let Some(app) = self.app.upgrade() else {
+                    return gpui_kit::div().into_any_element();
+                };
+                // The panel's render function is written against the app's
+                // context — its handlers are `cx.listener` on `AppView` —
+                // so build it inside an app update. The app is not
+                // borrowed here: a child view renders while its parent's
+                // own render is already finished.
+                app.update(cx, |app, cx| $render(app, window, cx))
+                    .into_any_element()
+            }
+        }
+    };
+}
+pub(crate) use panel_view;

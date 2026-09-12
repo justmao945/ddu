@@ -147,6 +147,12 @@ pub struct AppView {
     pub(crate) window_placement: Option<crate::config::WindowPlacement>,
     /// Debounce guard for the save scheduled on each frame change.
     window_geom_seq: u64,
+    /// Shell panels as cached child views (see [`panel_view!`]): a
+    /// stream frame notifies `terminal_pane` alone, and every other
+    /// notify fans out to all three via [`AppView::notify_panels`].
+    sidebar: Entity<ui::session_panel::PanelView>,
+    diff_pane: Entity<ui::diff_panel::PanelView>,
+    terminal_pane: Entity<ui::terminal::PanelView>,
 }
 
 /// Panel geometry (px): defaults, drag limits and collapse thresholds.
@@ -363,6 +369,13 @@ impl AppView {
         }
         let window_focus = cx.focus_handle().tab_stop(false);
         let current_project = state.current_project.min(projects.len().saturating_sub(1));
+        // Cached panel views (see `panel_view!`). They render for this
+        // very entity: `weak_entity` exists before `Self` does, and a
+        // panel only reads it at render time.
+        let app = cx.weak_entity();
+        let sidebar = cx.new(|_| ui::session_panel::PanelView::new(app.clone()));
+        let diff_pane = cx.new(|_| ui::diff_panel::PanelView::new(app.clone()));
+        let terminal_pane = cx.new(|_| ui::terminal::PanelView::new(app));
         let mut this = Self {
             window_focus,
             projects,
@@ -399,6 +412,9 @@ impl AppView {
             quit_after_shutdown: false,
             window_placement: state.window,
             window_geom_seq: 0,
+            sidebar,
+            diff_pane,
+            terminal_pane,
         };
         // Restore persisted widths; the raw values are clamped by the
         // panel size_range on render, out-of-range ones fall back to the
@@ -409,6 +425,11 @@ impl AppView {
         // height) seeds from the restored current session below — the
         // rows don't exist until `restore_sessions` runs.
         this.window_focus.focus(window, cx);
+        // Every app-level notify fans out to the cached panels (see
+        // `panel_view!` and `notify_panels`). Streaming output is the one
+        // path that doesn't come through here: `subscribe_term` notifies
+        // the terminal pane directly.
+        cx.observe_self(|this, cx| this.notify_panels(cx)).detach();
         this.start_diff_poll(cx);
         this.start_ui_tick(cx);
         // Panel drags: capture the new width into the persisted state.
@@ -770,6 +791,20 @@ impl AppView {
         self.current_term().is_some_and(|current| current == *term)
     }
 
+    /// Repaint the cached shell panels, alongside the app itself.
+    ///
+    /// The panels are cached child views (`panel_view!`): gpui replays
+    /// their last frame until they are notified, so anything that
+    /// changes what a panel shows has to come through here or the panel
+    /// keeps rendering stale content. Installed as an app-level
+    /// observer, so every `cx.notify()` on `AppView` reaches all three
+    /// without touching the ~20 call sites.
+    pub(crate) fn notify_panels(&mut self, cx: &mut Context<Self>) {
+        self.sidebar.update(cx, |_, cx| cx.notify());
+        self.diff_pane.update(cx, |_, cx| cx.notify());
+        self.terminal_pane.update(cx, |_, cx| cx.notify());
+    }
+
     /// One notify per second so elapsed times in the sidebar tick even
     /// while a session produces no output.
     fn start_ui_tick(&mut self, cx: &mut Context<Self>) {
@@ -962,7 +997,11 @@ impl Render for AppView {
                                             .min_h_0()
                                             .min_w_0()
                                             .overflow_hidden()
-                                            .child(ui::session_panel::render(self, cx)),
+                                            .child(
+                                        self.sidebar
+                                            .clone()
+                                            .cached(ui::session_panel::root_style()),
+                                    ),
                                     )
                                     .child(ui::status_bar::render_sidebar(self, cx)),
                             ),
@@ -977,7 +1016,7 @@ impl Render for AppView {
                                 .size_full()
                                 .min_w_0()
                                 .overflow_hidden()
-                                .child(ui::terminal::render(self, cx)),
+                                .child(self.terminal_pane.clone().cached(ui::terminal::root_style())),
                         ),
                 );
                 if self.show_diff {
@@ -994,7 +1033,7 @@ impl Render for AppView {
                                     .size_full()
                                     .min_w_0()
                                     .overflow_hidden()
-                                    .child(ui::diff_panel::render(self, window, cx)),
+                                    .child(self.diff_pane.clone().cached(ui::diff_panel::root_style())),
                             ),
                     );
                 }
@@ -1068,5 +1107,255 @@ impl Render for AppView {
                         ),
                 )
             })
+    }
+}
+
+/// The shell renders its three panels as **cached child views** (see
+/// `panel_view!`): gpui replays a cached subtree — layout, paint,
+/// hitboxes, listeners, key contexts — until the view is notified, which
+/// is what keeps a streaming terminal off the sidebar and the changes
+/// pane. These tests pin both halves of that contract, plus the gpui
+/// behavior they rest on.
+#[cfg(test)]
+mod panel_cache_tests {
+    use crate::app::AppView;
+    use crate::config::{Config, LoadWarnings, ProjectConfig, ShellConfig, State};
+    use gpui_kit::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
+        StyleRefinement, Styled as _, TestAppContext, Window, div, gpui,
+    };
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct Child {
+        renders: Rc<Cell<usize>>,
+    }
+    impl Render for Child {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.renders.set(self.renders.get() + 1);
+            div().size_full()
+        }
+    }
+
+    struct Parent {
+        child: Entity<Child>,
+        renders: Rc<Cell<usize>>,
+    }
+    impl Render for Parent {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.renders.set(self.renders.get() + 1);
+            div().size_full().child(
+                self.child
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            )
+        }
+    }
+
+    /// The premise: gpui skips a cached child view's render while its
+    /// parent re-renders, and re-runs it once that view is notified.
+    #[test]
+    fn cached_child_view_is_reused_across_a_parent_notify() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 =
+                    TestAppContext::build(dispatcher, Some("cached_child_view_is_reused"));
+                let cx = &mut cx0;
+                let child_renders = Rc::new(Cell::new(0usize));
+                let (parent, vcx) = cx.add_window_view({
+                    let child_renders = child_renders.clone();
+                    move |_window, cx| {
+                        let child = cx.new(|_| Child {
+                            renders: child_renders,
+                        });
+                        // The shell's fan-out (see `AppView::notify_panels`),
+                        // which is what makes a parent-level notify reach
+                        // the cached panels.
+                        cx.observe_self({
+                            let child = child.clone();
+                            move |_, cx| child.update(cx, |_, cx| cx.notify())
+                        })
+                        .detach();
+                        Parent {
+                            child,
+                            renders: Rc::new(Cell::new(0usize)),
+                        }
+                    }
+                });
+                let draw = |vcx: &mut gpui_kit::VisualTestContext| {
+                    vcx.update(|window, cx| {
+                        let _ = window.draw(cx);
+                    })
+                };
+                draw(&mut vcx.clone());
+                assert_eq!(child_renders.get(), 1, "first frame renders the child");
+                draw(&mut vcx.clone());
+                assert_eq!(
+                    child_renders.get(),
+                    1,
+                    "an idle redraw must not re-render the cached child"
+                );
+                vcx.update(|_, cx| parent.update(cx, |_, cx| cx.notify()));
+                draw(&mut vcx.clone());
+                assert_eq!(
+                    child_renders.get(),
+                    2,
+                    "notifying the parent re-renders the child once"
+                );
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    /// One AppView with `rows` silent sessions (`/bin/cat` never prints,
+    /// so no reader-thread wakeup races the test scheduler) and notify
+    /// counters attached to the three cached panels.
+    fn app_with_panel_counters(
+        dispatcher: gpui::TestDispatcher,
+        rows: usize,
+        name: &'static str,
+    ) -> (TestAppContext, Entity<AppView>, [Rc<Cell<usize>>; 3]) {
+        let mut cx0 = TestAppContext::build(dispatcher, Some(name));
+        let cx = &mut cx0;
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            cx.set_app_identity("dev.just.ddu", "Day Day Up");
+            cx.set_global(Config {
+                shell: ShellConfig {
+                    program: "/bin/cat".into(),
+                },
+                ..Default::default()
+            });
+            cx.set_global(LoadWarnings(vec![]));
+            cx.set_global(State {
+                projects: Some(vec![ProjectConfig {
+                    name: "proj".into(),
+                    path: std::env::temp_dir(),
+                    expanded: true,
+                    sessions: vec![],
+                }]),
+                ..Default::default()
+            });
+        });
+        let (view, vcx) = cx.add_window_view(|window, cx| AppView::new(window, cx));
+        let counts: [Rc<Cell<usize>>; 3] = Default::default();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+            for _ in 1..rows {
+                view.update(cx, |v, cx| v.spawn_session_of("terminal", window, cx));
+            }
+            // Row 0 is the session on screen.
+            view.update(cx, |v, cx| v.select_session(0, 0, window, cx));
+        });
+        view.update(cx, |v, cx| {
+            let panels = (
+                v.sidebar.clone(),
+                v.diff_pane.clone(),
+                v.terminal_pane.clone(),
+            );
+            cx.observe(&panels.0, {
+                let counter = counts[0].clone();
+                move |_, _, _| counter.set(counter.get() + 1)
+            })
+            .detach();
+            cx.observe(&panels.1, {
+                let counter = counts[1].clone();
+                move |_, _, _| counter.set(counter.get() + 1)
+            })
+            .detach();
+            cx.observe(&panels.2, {
+                let counter = counts[2].clone();
+                move |_, _, _| counter.set(counter.get() + 1)
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        for counter in &counts {
+            counter.set(0);
+        }
+        (cx0, view, counts)
+    }
+
+    /// A stream wakeup repaints the terminal pane alone: the cached
+    /// sidebar and changes pane must not even be notified, or every
+    /// frame of a stream would rebuild them (the whole point of the
+    /// split). A background session repaints nothing at all.
+    #[test]
+    fn stream_wakeup_repaints_only_the_terminal_pane() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let (mut cx0, view, counts) =
+                    app_with_panel_counters(dispatcher, 2, "stream_wakeup_repaints_pane");
+                let cx = &mut cx0;
+                let (visible, background) = cx.update(|cx| {
+                    let v = view.read(cx);
+                    (
+                        v.projects[0].sessions[0].term.clone().unwrap(),
+                        v.projects[0].sessions[1].term.clone().unwrap(),
+                    )
+                });
+                let seen = |counts: &[Rc<Cell<usize>>; 3]| counts.clone().map(|c| c.get());
+                let wake = |term: &Entity<crate::terminal::TermSession>, cx: &mut gpui_kit::App| {
+                    term.update(cx, |_, cx| cx.emit(crate::terminal::TermEvent::Wakeup));
+                };
+                cx.update(|cx| wake(&visible, cx));
+                cx.run_until_parked();
+                assert_eq!(
+                    seen(&counts),
+                    [0, 0, 1],
+                    "the visible session's stream notifies the pane only                      (sidebar, changes pane, terminal pane)"
+                );
+
+                cx.update(|cx| wake(&background, cx));
+                cx.run_until_parked();
+                assert_eq!(
+                    seen(&counts),
+                    [0, 0, 1],
+                    "a background row's stream repaints nothing"
+                );
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    /// The other half: a state change that a panel renders must reach
+    /// it, or the panel keeps showing a stale frame (the cache's price).
+    #[test]
+    fn app_state_change_reaches_every_panel() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let (mut cx0, view, counts) =
+                    app_with_panel_counters(dispatcher, 1, "app_state_change_reaches_panels");
+                let cx = &mut cx0;
+                // A real mutation path (here: collapsing the sidebar),
+                // not a bare notify_panels call.
+                cx.update(|cx| view.update(cx, |v, cx| v.toggle_sessions(cx)));
+                cx.run_until_parked();
+                assert_eq!(
+                    counts.clone().map(|c| c.get()),
+                    [1, 1, 1],
+                    "an app-level notify reaches all three panels"
+                );
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
     }
 }

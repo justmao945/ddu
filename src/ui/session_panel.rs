@@ -11,6 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{ROW_PX, hover_bg, selection_bg};
+use super::panel_view;
 use crate::app::AppView;
 use crate::session::{AgentSession, AgentStatus};
 
@@ -41,18 +42,37 @@ fn toggle_hover<T: Copy + PartialEq>(slot: &mut Option<T>, hovering: bool, targe
     }
 }
 
-pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+/// The panel's layout box: one definition, read by the panel's own root
+/// element and by the shell's cached mount (`panel_view!` explains why
+/// the composer has to state it).
+pub(crate) fn root_style() -> StyleRefinement {
+    StyleRefinement::default()
+        .flex()
+        .flex_col()
+        .size_full()
+        .min_w_0()
+        .overflow_hidden()
+}
+
+panel_view!(
+    /// The project/session tree plus the changes-file tree below it.
+    PanelView,
+    render
+);
+
+pub(crate) fn render(
+    this: &AppView,
+    _window: &mut Window,
+    cx: &mut Context<AppView>,
+) -> AnyElement {
     // Two layers split by a draggable divider: the project/session
     // tree on top (takes the leftover height), the diff file tree
     // below (capped height, collapsible via the status-strip button).
     // Project creation lives in the status strip below (see
     // `status_bar`).
-    v_flex()
-        .h_full()
-        .w_full()
-        .min_w_0()
-        .overflow_hidden()
-        .bg(cx.theme().sidebar)
+    let mut root = div();
+    *root.style() = root_style();
+    root.bg(cx.theme().sidebar)
         // Clicking anywhere in the panel moves focus off the terminal,
         // so its block cursor turns hollow.
         .on_mouse_down(
@@ -105,9 +125,10 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                         )
                         .flex_none()
                         .visible(this.show_diff_tree)
-                        .child(super::diff_tree::render(this, cx)),
+                        .child(super::diff_tree::render(this, cx).into_any_element()),
                 ),
         )
+        .into_any_element()
 }
 
 fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {

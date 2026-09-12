@@ -6,6 +6,7 @@
 
 use super::PANEL_HEADER_PX;
 use super::diff_tree::plus_minus;
+use super::panel_view;
 use crate::app::AppView;
 use crate::diff::{DiffFile, DiffLine, DiffRow};
 use gpui_kit::base::SelectableText;
@@ -17,25 +18,40 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+/// The pane's layout box: one definition, read by the pane's own root
+/// element and by the shell's cached mount (`panel_view!` explains why
+/// the composer has to state it).
+pub(crate) fn root_style() -> StyleRefinement {
+    StyleRefinement::default()
+        .flex()
+        .flex_col()
+        .size_full()
+        .min_w_0()
+        // Anchor for the find bar's absolute overlay.
+        .relative()
+        .overflow_hidden()
+}
+
+panel_view!(
+    /// Right pane: the selected file's changes.
+    PanelView,
+    render
+);
+
 pub(crate) fn render(
     this: &AppView,
     window: &mut Window,
     cx: &mut Context<AppView>,
-) -> impl IntoElement {
+) -> AnyElement {
     // The file strip only makes sense with a selected file — without
     // one the body's empty state carries the panel on its own.
     let has_file = this
         .diff
         .as_ref()
         .is_some_and(|d| !d.is_empty() && this.diff_file.is_some_and(|ix| ix < d.files.len()));
-    v_flex()
-        .h_full()
-        .w_full()
-        .min_w_0()
-        // Anchor for the find bar's absolute overlay.
-        .relative()
-        .overflow_hidden()
-        .bg(cx.theme().background)
+    let mut root = div();
+    *root.style() = root_style();
+    root.bg(cx.theme().background)
         // Clicking anywhere in the panel moves focus off the terminal,
         // so its block cursor goes hollow. The find bar stops its own
         // mouse downs (see `find_bar`) so this can't steal focus back
@@ -47,6 +63,7 @@ pub(crate) fn render(
         .when(has_file, |el| el.child(header(this, cx)))
         .child(body(this, window, cx))
         .when(this.diff_search.open, |el| el.child(find_bar(this, cx)))
+        .into_any_element()
 }
 
 fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {

@@ -10,21 +10,42 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use super::panel_view;
 use crate::app::{
     AppView, TermBacktab, TermCopy, TermPaste, TermSearch, TermTab,
 };
 use crate::terminal::TermSession;
 
-pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
-    div()
-        .h_full()
-        .flex_1()
-        .min_w_0()
-        .bg(cx.theme().background)
+/// The pane's layout box: one definition, read by the pane's own root
+/// element and by the shell's cached mount (`panel_view!` explains why
+/// the composer has to state it).
+pub(crate) fn root_style() -> StyleRefinement {
+    StyleRefinement::default().h_full().flex_1().min_w_0()
+}
+
+panel_view!(
+    /// Center pane: the live session's terminal (or the empty state).
+    ///
+    /// This is the repaint unit for streaming output: a wakeup notifies
+    /// this view alone (`AppView::subscribe_term`), so the shell keeps
+    /// its other panels cached.
+    PanelView,
+    render
+);
+
+pub(crate) fn render(
+    this: &AppView,
+    _window: &mut Window,
+    cx: &mut Context<AppView>,
+) -> AnyElement {
+    let mut root = div();
+    *root.style() = root_style();
+    root.bg(cx.theme().background)
         .child(match this.current_term() {
             Some(term) => surface(this, term, cx).into_any_element(),
             None => empty_state(this, cx).into_any_element(),
         })
+        .into_any_element()
 }
 
 /// The focus-tracked terminal surface for one live session.

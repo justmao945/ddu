@@ -704,8 +704,13 @@ impl AppView {
             move |this, emitter, event: &TermEvent, window, cx| match event {
                 TermEvent::Wakeup => {
                     emitter.update(cx, |term, cx| term.note_search_dirty(cx));
+                    // The pane is the repaint unit for a stream: notifying
+                    // the app would fan out to the cached panels and
+                    // rebuild them for output that cannot change them.
+                    // Background rows repaint nothing (see
+                    // `is_visible_term`).
                     if this.is_visible_term(emitter) {
-                        cx.notify();
+                        this.terminal_pane.update(cx, |_, cx| cx.notify());
                     }
                 }
                 TermEvent::Attention(signal) => {

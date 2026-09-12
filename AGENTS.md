@@ -145,15 +145,30 @@ the footer when Enter should confirm. One-off informational dialogs
   vs 1 fps with two background streams). Exit/attention/diff poll/
   interaction notify on their own; background rows pick up their OSC
   title/status on the next repaint.
+- The three shell panels are **cached child views** (`panel_view!` in
+  `src/ui/mod.rs`): sidebar, changes pane and terminal pane mount as
+  `Entity::cached(panel::root_style())`, so gpui replays a panel's whole
+  subtree — render, layout, paint, hitboxes, mouse listeners, key
+  contexts, focus — until that view is notified. Two halves to keep in
+  sync, both pinned by tests in `src/app/mod.rs`:
+  * a stream wakeup notifies `terminal_pane` alone (`subscribe_term`),
+    which is what keeps the panels cached on stream frames — measured
+    with the changes pane open: per-frame draw cost −35%, taffy layout
+    −65%, sidebar render −92%;
+  * every other `cx.notify()` on `AppView` fans out through
+    `AppView::notify_panels` (an app-level `observe_self`), or a panel
+    whose state changed would keep its stale frame.
+  A panel's cached style must be its own layout box, which is why each
+  panel states `root_style()` once and both the mount and the panel's
+  root element read it; caching skips measuring the contents.
 - Stream repaint pacing is adaptive: the pump spaces output-driven
-  repaints by `stream_interval(paint_ms)` — 33 ms (30 fps) while the
-  terminal element's own paint is cheap, 50 ms / 66 ms once it is not
+  repaints by `stream_interval(paint_ms)` — 50 ms (20 fps) while the
+  terminal element's own paint is cheap, 66 ms / 100 ms once it is not
   (`STREAM_FRAME_STEPS`, EWMA fed by `TermSession::note_paint_cost`).
-  Both CPU and GPU scale with frames drawn, and this is the only lever
-  that scales the whole-window redraw (gpui repaints every primitive each
-  frame; a view split is what would make the rest of the frame cheap).
-  Keystrokes, scroll and selection bypass the throttle, so interactive
-  latency is unchanged.
+  Both CPU and GPU scale with frames drawn, and the frame rate is the one
+  lever that scales the whole-window redraw (gpui repaints every
+  primitive each frame). Keystrokes, scroll and selection bypass the
+  throttle, so interactive latency is unchanged.
 - Sidebar hover slots (`hovered_session`/`hovered_project`) update through
   `session_panel::toggle_hover`, never by assigning in the `on_hover`
   callback: mouse listeners bubble in reverse paint order, so the row
