@@ -57,67 +57,14 @@ License: Apache-2.0, GPL-free throughout. Design docs: `docs/DESIGN.md` (the app
   that ancestor case: the caller is running inside the app, so killing it
   would take the shell down mid-script. The generated `launch.sh` must
   keep `exec` as its LAST line — anything appended after it never runs.
-- `make-bundle.sh` signs with a **local self-signed code-signing
-  identity** (`Day Day Up Local Signing`, keychain
-  `~/Library/Keychains/ddu-signing.keychain-db`), and only falls back to
-  ad-hoc on a machine that has no such identity. It signs `ddu.bin`
-  first, with the bundle id as its code identifier, then the bundle
-  without `--deep`.
-  The identity is not cosmetic: macOS keys bundle-scoped services
-  (desktop notifications) and TCC grants (Screen Recording) off the
-  running process's *code identity* — the process is the exec'd
-  `ddu.bin`, so an unsigned build calls `show_system_notification` and
-  macOS drops it (`UNErrorDomain Code=1`, usernotificationsd "not
-  allowed"), and `--deep` would re-sign the binary with a derived id and
-  undo the match. And grants are stored against the *designated
-  requirement*: ad-hoc's requirement is a bare `cdhash`, which every
-  re-sign changes, so each install silently invalidated the existing
-  系统设置 → 屏幕录制 entry — the toggle stayed on while every request
-  failed (`Failed to match existing code requirement for subject
-  dev.just.ddu`, which is also why `screencapture` broke after an
-  install). The certificate makes the requirement
-  `identifier "dev.just.ddu" and certificate root = H"c6c9…"`, which no
-  build changes.
-- One-time setup of that identity (done on this machine; here for the
-  next clean install). Generate the certificate — `-legacy` matters,
-  Security cannot verify OpenSSL 3's default PBES2 MAC:
-  ```
-  openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
-    -keyout key.pem -out cert.pem -subj "/CN=Day Day Up Local Signing" \
-    -addext basicConstraints=critical,CA:FALSE \
-    -addext keyUsage=critical,digitalSignature \
-    -addext extendedKeyUsage=critical,codeSigning
-  openssl pkcs12 -export -legacy -out identity.p12 -inkey key.pem \
-    -in cert.pem -passout pass:ddu
-  ```
-  put it in its own keychain (a key imported into the *login* keychain
-  raises an authorization dialog on every build, even with `-A`, and
-  setting its partition list there needs the login password):
-  ```
-  KC=~/Library/Keychains/ddu-signing.keychain-db
-  PW=$(openssl rand -hex 16)
-  security create-keychain -p "$PW" "$KC"
-  security set-keychain-settings -lut 21600 "$KC"
-  security import identity.p12 -k "$KC" -P ddu -T /usr/bin/codesign -A
-  security set-key-partition-list -S apple-tool:,apple: -s -k "$PW" "$KC"
-  ```
-  trust it (`find-identity -v` lists nothing without this step — an
-  untrusted self-signed cert shows as `CSSMERR_TP_NOT_TRUSTED`),
-  ```
-  security add-trusted-cert -r trustRoot -p codeSign \
-    -k ~/Library/Keychains/login.keychain-db cert.pem
-  ```
-  and list the keychain — **codesign resolves identities through the
-  search list**, `--keychain` alone answers "no identity found":
-  ```
-  security list-keychains -d user -s \
-    ~/Library/Keychains/login.keychain-db "$KC"
-  ```
-  The keychain's password lives in `~/.config/ddu/signing.keychain-pw`
-  (0600) and `make-bundle.sh` unlocks it per build (it locks on sleep);
-  key material is backed up in `~/.config/ddu/signing/`.
-  `DDU_SIGN_IDENTITY` overrides the whole arrangement (e.g. a real
-  Developer ID, with its own keychain unlocked by the caller).
+- `make-bundle.sh` signs with a local self-signed code-signing identity
+  (`Day Day Up Local Signing`; `scripts/make-signing-identity.sh`
+  provisions it, `DDU_SIGN_IDENTITY` overrides). It still signs `ddu.bin`
+  first with the bundle id as its identifier, then the bundle without
+  `--deep`. Do not swap the identity or regenerate the certificate
+  casually: macOS stores the app's grants (desktop notifications, Screen
+  Recording) against the *designated requirement*, so only a stable
+  certificate keeps them across rebuilds — `docs/SIGNING.md`.
 
 **Never** start the binary directly as a background child (`nohup`, `hub exec`,
 raw spawn) — on macOS 26 an unactivated process: (a) never gets
@@ -154,29 +101,19 @@ the footer when Enter should confirm. One-off informational dialogs
   `zsh_prompt_bytes_land` — raw zsh prompt escape bytes must render) and git
   diff tests (`head_diff_sees_edits_and_untracked`).
 - Visual: `screencapture -x -l <windowid>` (screen-recording permission is
-  granted here; synthetic clicks are NOT — no accessibility). When the
-  Screen Recording is keyed to the requester's *code identity*, and the
-  requester here is the app, not the agent CLI (ddu spawns omp in a PTY,
-  so TCC attributes the request to `dev.just.ddu` — granting Terminal or
-  omp does nothing). The stable signing identity above is what keeps
-  that grant across rebuilds; if a request is refused, `log show
-  --predicate 'subsystem == "com.apple.TCC"'` names the subject and says
-  whether the stored requirement failed to match (a leftover entry from
-  an ad-hoc-signed build does exactly that): remove the entry, re-add
-  /Applications/ddu.app and relaunch the app. When the capture is
-  refused (`screencapture -x` fails with "could not create
-  image from display"), get pixels from the app itself instead: a
-  temporary `DDU_VERIFY_SHOT=<path>` hook that calls
-  `window.render_to_image()` on the main thread a few ticks after launch
-  and quits. That needs `features = ["test-support"]` on the *main*
-  `gpui-kit` dependency plus `gpui-pre-macos = { version = "0.3.3",
-  features = ["test-support"] }` (gpui-pre's `test-support` does not
-  forward to the macOS crate, and the feature is what compiles
-  `render_to_image`). `image`'s encoders are off — write `img.as_raw()`
-  and convert with PIL. Layout questions are then answered by measuring
-  ink rows in the dump, not by eyeballing. Prove liveness
-  by state change: edit a tracked file → right diff panel must show it within
-  ~3 s; compare screenshot hashes across the change.
+  granted here; synthetic clicks are NOT — no accessibility). Screen
+  Recording belongs to the *app* (`dev.just.ddu`), not to omp or the
+  terminal, and a stale grant is why a capture fails — `docs/SIGNING.md` has
+  the story and the check. When `screencapture -x` itself is refused
+  ("could not create image from display"), take pixels from the app: a
+  temporary `DDU_VERIFY_SHOT=<path>` hook calling `window.render_to_image()`
+  on the main thread needs `features = ["test-support"]` on the *main*
+  `gpui-kit` dep plus `gpui-pre-macos = { version = "0.3.3", features =
+  ["test-support"] }` (gpui-pre does not forward the feature, and it is what
+  compiles `render_to_image`); write `img.as_raw()` and convert with PIL —
+  layout questions are answered by measuring ink rows, not by eyeballing.
+  Prove liveness by state change: edit a tracked file → right diff panel must
+  show it within ~3 s; compare screenshot hashes across the change.
 - Settings window: `DDU_VERIFY_SETTINGS=<page_ix> bash scripts/dev.sh`
   bakes the flag into the bundle launcher; the app then auto-opens the
   Settings window on that page (0-based) for screenshots. Relaunch without
