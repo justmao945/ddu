@@ -458,6 +458,7 @@ fn find_bar(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .shadow_lg()
         .child(
             Input::new(&input)
+                .aria_label("Find in diff")
                 .small()
                 .w(px(180.))
                 .appearance(true)
@@ -466,6 +467,9 @@ fn find_bar(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         )
         .child(
             div()
+                .id("diff-find-counter")
+                .role(Role::Label)
+                .aria_label(counter.clone())
                 .min_w(px(52.))
                 .text_center()
                 .text_xs()
@@ -474,6 +478,7 @@ fn find_bar(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         )
         .child(
             Button::new("diff-find-prev")
+                .accessibility_label("Previous match")
                 .xsmall()
                 .ghost()
                 .icon(IconName::ChevronLeft)
@@ -482,6 +487,7 @@ fn find_bar(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         )
         .child(
             Button::new("diff-find-next")
+                .accessibility_label("Next match")
                 .xsmall()
                 .ghost()
                 .icon(IconName::ChevronRight)
@@ -490,6 +496,7 @@ fn find_bar(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         )
         .child(
             Button::new("diff-find-close")
+                .accessibility_label("Close find bar")
                 .xsmall()
                 .ghost()
                 .icon(IconName::Close)

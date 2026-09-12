@@ -164,6 +164,7 @@ pub(crate) fn button() -> impl IntoElement {
         .small()
         .tab_stop(false)
         .tooltip("Settings (⌘,)")
+        .accessibility_label("Settings (⌘,)")
         .on_click(|_, _, cx| open(cx))
 }
 

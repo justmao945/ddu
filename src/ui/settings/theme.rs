@@ -40,6 +40,7 @@ pub(super) fn theme_item() -> SettingItem {
     super::item("Theme", "Color scheme for the interface.", |options, _, cx| {
         let dark = Theme::global(cx).is_dark();
         Button::new("theme-select")
+            .accessibility_label(format!("Theme: {}", if dark { "Dark" } else { "Light" }))
             .label(if dark { "Dark" } else { "Light" })
             .dropdown_caret(true)
             .outline()
@@ -298,6 +299,7 @@ pub(super) fn terminal_font_item() -> SettingItem {
             configured
         };
         Button::new("terminal-font-select")
+            .accessibility_label(format!("Terminal font: {label}"))
             .child(
                 div()
                     .min_w_0()

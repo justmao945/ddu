@@ -222,6 +222,7 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                         .xsmall()
                                         .tab_stop(false)
                                         .tooltip(quick_tooltip.clone())
+                                        .accessibility_label(quick_tooltip.clone())
                                         // gpui synthesizes a click for
                                         // EVERY hitbox under the pointer;
                                         // stopping the click event alone
@@ -371,6 +372,7 @@ fn session_row(
                     .xsmall()
                     .tab_stop(false)
                     .tooltip("Close session (⌘W)")
+                    .accessibility_label("Close session (⌘W)")
                     // Stop the mouse-down so the row's own click
                     // synthesis never sees this press (see quick-add).
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -504,6 +506,7 @@ fn more_menu(_this: &AppView, p: usize, cx: &mut Context<AppView>) -> impl IntoE
         };
 
     Button::new(("more", p))
+        .accessibility_label("Project actions")
         .icon(IconName::Ellipsis)
         .ghost()
         .xsmall()

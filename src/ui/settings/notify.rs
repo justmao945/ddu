@@ -17,6 +17,7 @@ pub(super) fn notify_item() -> SettingItem {
             let on = cx.global::<crate::config::Config>().notify_on_attention();
             Switch::new("notify-on-attention")
                 .checked(on)
+                .accessibility_label("Desktop notifications")
                 .disabled(options.is_disabled())
                 .with_size(options.size())
                 .on_click(|checked, _, cx| {

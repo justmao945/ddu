@@ -42,6 +42,7 @@ pub(super) fn shell_program_item() -> SettingItem {
             let cfg = cx.global::<crate::config::Config>().clone();
             let current = cfg.shell.program.clone();
             Button::new("shell-program-select")
+                .accessibility_label(format!("Program: {current}"))
                 .child(
                     div()
                         .min_w_0()
@@ -90,6 +91,7 @@ pub(super) fn default_session_item() -> SettingItem {
             let cfg = cx.global::<crate::config::Config>().clone();
             let current = cfg.new_session.kind.clone();
             Button::new("default-session-select")
+                .accessibility_label(format!("Default type: {}", cfg.label_for(&current)))
                 .child(
                     h_flex()
                         .min_w_0()

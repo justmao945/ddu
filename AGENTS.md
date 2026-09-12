@@ -107,11 +107,15 @@ the footer when Enter should confirm. One-off informational dialogs
   Accessibility and input belong to the *app* (`dev.just.ddu`, not omp or the
   terminal, and a stale grant is why either fails; `docs/SIGNING.md`).
   Accessibility is additionally cached per process, so a new grant only applies
-  after the app is quit and reopened. What the AX tree exposes is what the app
-  opts into — the session rows and the terminal grid do; the diff file-tree rows
-  and the diff pane do not — so drive the rest by coordinates
-  (`win.click`/`press`/`scroll`) and keep actions reversible: a click in the
-  terminal pane types into a live agent.
+  after the app is quit and reopened — and the FIRST query after a launch
+  returns a bare tree (registering the client is what makes gpui build one; the
+  next frame carries it), so query twice. What the AX tree exposes is what the
+  app opts into: session rows, diff-tree rows (`Role::TreeItem` + name +
+  selected/expanded), the terminal grid's visible text, the find bars (labelled
+  inputs and `1/5` counters) and every button ddu owns — icon-only ones carry an
+  `accessibility_label`. gpui-component's own chrome (the settings page nav, its
+  list/tree widgets) exposes nothing, so drive that by coordinates and keep
+  actions reversible: a click in the terminal pane types into a live agent.
 - The diff find bar ("Find in diff") needs a selected file first: ⌘T drops the
   file-tree layer in under the sessions, ⌘R opens the changes pane, then click a
   row in the tree and ⌘F. The layer toggles make the whole sequence replayable

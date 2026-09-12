@@ -513,6 +513,7 @@ fn find_bar(weak: WeakEntity<TermSession>, cx: &mut Context<AppView>) -> AnyElem
         .shadow_lg()
         .child(
             Input::new(&input)
+                .aria_label("Find in terminal")
                 .small()
                 .w(px(180.))
                 .appearance(true)
@@ -521,6 +522,9 @@ fn find_bar(weak: WeakEntity<TermSession>, cx: &mut Context<AppView>) -> AnyElem
         )
         .child(
             div()
+                .id("term-find-counter")
+                .role(Role::Label)
+                .aria_label(counter.clone())
                 .min_w(px(52.))
                 .text_center()
                 .text_xs()
@@ -529,6 +533,7 @@ fn find_bar(weak: WeakEntity<TermSession>, cx: &mut Context<AppView>) -> AnyElem
         )
         .child(
             Button::new("term-find-prev")
+                .accessibility_label("Previous match")
                 .xsmall()
                 .ghost()
                 .icon(IconName::ChevronLeft)
@@ -544,6 +549,7 @@ fn find_bar(weak: WeakEntity<TermSession>, cx: &mut Context<AppView>) -> AnyElem
         )
         .child(
             Button::new("term-find-next")
+                .accessibility_label("Next match")
                 .xsmall()
                 .ghost()
                 .icon(IconName::ChevronRight)
@@ -559,6 +565,7 @@ fn find_bar(weak: WeakEntity<TermSession>, cx: &mut Context<AppView>) -> AnyElem
         )
         .child(
             Button::new("term-find-close")
+                .accessibility_label("Close find bar")
                 .xsmall()
                 .ghost()
                 .icon(IconName::Close)

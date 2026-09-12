@@ -257,6 +257,11 @@ fn dir_row(
     let toggle = path.clone();
     div()
         .id(SharedString::from(format!("diff-dir-{path}")))
+        .role(Role::TreeItem)
+        .aria_expanded(open)
+        .aria_label(SharedString::from(format!(
+            "{path}/ +{added} −{removed}"
+        )))
         .relative()
         .w_full()
         .h(px(ROW_PX))
@@ -316,6 +321,12 @@ fn file_row(
     let path_copy = f.path.clone();
     div()
         .id(("diff-file", ix))
+        .role(Role::TreeItem)
+        .aria_selected(active)
+        .aria_label(SharedString::from(format!(
+            "{} +{} −{}",
+            f.path, f.added, f.removed
+        )))
         .relative()
         .w_full()
         .h(px(ROW_PX))
