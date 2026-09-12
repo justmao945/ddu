@@ -11,11 +11,18 @@ use crate::app::AppView;
 /// The breadcrumb's layout box: one definition, read by its own root
 /// element and by the title bar's cached mount (`panel_view!` explains
 /// why the composer has to state it).
+///
+/// `h_full` is load-bearing: a cached view's box is laid out as a leaf
+/// from this style alone (no content to measure), so a box that leaves
+/// its height to its content collapses to zero and the replayed text
+/// drops to wherever the parent centers that empty box — the bar's
+/// breadcrumb sat against its bottom border.
 pub(crate) fn root_style() -> StyleRefinement {
     StyleRefinement::default()
         .flex()
         .items_center()
         .flex_1()
+        .h_full()
         .min_w_0()
         .overflow_hidden()
         .px_2()

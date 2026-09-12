@@ -101,7 +101,18 @@ the footer when Enter should confirm. One-off informational dialogs
   `zsh_prompt_bytes_land` — raw zsh prompt escape bytes must render) and git
   diff tests (`head_diff_sees_edits_and_untracked`).
 - Visual: `screencapture -x -l <windowid>` (screen-recording permission is
-  granted here; synthetic clicks are NOT — no accessibility). Prove liveness
+  granted here; synthetic clicks are NOT — no accessibility). When the
+  capture is refused (`screencapture -x` fails with "could not create
+  image from display"), get pixels from the app itself instead: a
+  temporary `DDU_VERIFY_SHOT=<path>` hook that calls
+  `window.render_to_image()` on the main thread a few ticks after launch
+  and quits. That needs `features = ["test-support"]` on the *main*
+  `gpui-kit` dependency plus `gpui-pre-macos = { version = "0.3.3",
+  features = ["test-support"] }` (gpui-pre's `test-support` does not
+  forward to the macOS crate, and the feature is what compiles
+  `render_to_image`). `image`'s encoders are off — write `img.as_raw()`
+  and convert with PIL. Layout questions are then answered by measuring
+  ink rows in the dump, not by eyeballing. Prove liveness
   by state change: edit a tracked file → right diff panel must show it within
   ~3 s; compare screenshot hashes across the change.
 - Settings window: `DDU_VERIFY_SETTINGS=<page_ix> bash scripts/dev.sh`
@@ -166,9 +177,14 @@ the footer when Enter should confirm. One-off informational dialogs
   * every other `cx.notify()` on `AppView` fans out through
     `AppView::notify_panels` (an app-level `observe_self`), or a panel
     whose state changed would keep its stale frame.
-  A panel's cached style must be its own layout box, which is why each
-  panel states `root_style()` once and both the mount and the panel's
-  root element read it; caching skips measuring the contents.
+  A panel's cached style must be its own layout box — *including a
+  size*: a cached box is laid out as a leaf from that style alone
+  (there is nothing to measure), so one that leaves its cross size to
+  its content collapses to zero and its replayed content lands wherever
+  the parent centers that empty box (which is how the title bar's
+  breadcrumb ended up against the bar's bottom border). Every panel
+  states a size (`size_full` / `h_full`), and each panel states
+  `root_style()` once so the mount and the panel's root element agree.
 - Stream repaint pacing is adaptive: the pump spaces output-driven
   repaints by `stream_interval(paint_ms)` — 50 ms (20 fps) while the
   terminal element's own paint is cheap, then 66 / 100 ms once a frame's
