@@ -21,7 +21,7 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use crate::app::AppView;
+use crate::app::{AppView, CopyFilePath};
 
 pub(crate) use self::index::{TreeIndex, TreeRow, build_index, seed_open};
 /// Layer height bounds and default for the sidebar's vertical splitter
@@ -244,7 +244,6 @@ fn file_row(
 ) -> impl IntoElement {
     let name = path.rsplit('/').next().unwrap_or(path).to_string();
     let name_copy = name.clone();
-    let path_copy = path.to_owned();
     let path_owned = path.to_owned();
     div()
         .id(SharedString::from(format!("diff-file-{path}")))
@@ -267,19 +266,36 @@ fn file_row(
         .cursor_pointer()
         .map(|el| if active { el.bg(active_bg) } else { el })
         .hover(move |el| el.bg(if active { active_bg } else { hov_bg }))
-        .on_click(cx.listener(move |this, _, window, cx| {
-            // Selecting a file IS opening the right pane: a closed
-            // pane springs open on the first click.
-            this.select_path(path_owned.clone());
-            // Whole-file surface: start reading the newly selected file
-            // (no-op in Diff mode, and cheap when the cache still holds).
-            this.ensure_file_content(cx);
-            // An open find bar re-anchors to the newly shown file
-            // (the query persists across files).
-            this.refresh_diff_search(cx);
-            if !this.show_diff {
-                this.set_diff(true, window, cx);
-            } else {
+        .on_click(cx.listener({
+            let path = path_owned.clone();
+            move |this, _, window, cx| {
+                // Selecting a file IS opening the right pane: a closed
+                // pane springs open on the first click.
+                this.select_path(path.clone());
+                // Whole-file surface: start reading the newly selected
+                // file (no-op in Diff mode, and cheap when the cache
+                // still holds).
+                this.ensure_file_content(cx);
+                // An open find bar re-anchors to the newly shown file
+                // (the query persists across files).
+                this.refresh_diff_search(cx);
+                if !this.show_diff {
+                    this.set_diff(true, window, cx);
+                } else {
+                    cx.notify();
+                }
+            }
+        }))
+        // Right-click selects too, as file trees do everywhere else:
+        // the menu below runs the *selected* file's commands — that is
+        // what lets an item show the chord that would run it — so the
+        // row under the pointer and the selection have to be one row.
+        .on_mouse_down(MouseButton::Right, cx.listener({
+            let path = path_owned.clone();
+            move |this, _, _, cx| {
+                this.select_path(path.clone());
+                this.ensure_file_content(cx);
+                this.refresh_diff_search(cx);
                 cx.notify();
             }
         }))
@@ -307,20 +323,21 @@ fn file_row(
         })
         .context_menu(move |menu, _, _| {
             let name_copy = name_copy.clone();
-            let path_copy = path_copy.clone();
             menu.item(
                 PopupMenuItem::new("Copy File Name")
-                    .icon(Icon::new(IconName::Copy))
+                    .icon(Icon::new(IconName::FileText))
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(name_copy.clone()));
                     }),
             )
+            // The path is a command, not a handler: the row is the
+            // selection by the time the menu opens (`on_mouse_down`
+            // above), so the item can carry the action — and with it
+            // the chord that action is bound to.
             .item(
                 PopupMenuItem::new("Copy Path")
                     .icon(Icon::new(IconName::Copy))
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(path_copy.clone()));
-                    }),
+                    .action(Box::new(CopyFilePath)),
             )
         })
 }

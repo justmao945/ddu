@@ -325,7 +325,7 @@ mod tests {
     // into scope, which expands into itself (rustc: "recursion limit
     // reached while expanding `#[test]`"). Every test module in `app`
     // is written this way for that reason.
-    use crate::app::AppView;
+    use crate::app::{AppView, CopyFileContents, CopyFilePath};
     use crate::config::{Config, LoadWarnings, ProjectConfig, ShellConfig, State};
     use crate::diff::{DiffFile, DiffHunk, DiffLine, GitDiff, Snapshot};
     use crate::ui::diff_panel::ViewMode;
@@ -442,6 +442,51 @@ mod tests {
         // window (focus, hover) while it also pumps `cx0`.
         let vcx = vcx.clone();
         (cx0, view, vcx)
+    }
+
+    /// The two copy commands behind the tree's and the pane's context
+    /// menus do what their menu labels say, on the pane's selected file —
+    /// that is what lets the items carry those actions, and so show the
+    /// chords that run them.
+    #[test]
+    fn the_copy_commands_put_the_selected_file_on_the_clipboard() {
+        let (root, changed) = workspace("copy-commands");
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let (mut cx0, view, mut vcx) = app(dispatcher, "copy_commands", root, changed);
+                let cx = &mut cx0;
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, _| v.select_path("src/app.rs".to_owned()));
+                    // Draw outside the lease: rendering an AppView while
+                    // one is already leased is a re-entrancy panic.
+                    let _ = window.draw(cx);
+                });
+                let clipboard = |vcx: &mut VisualTestContext| {
+                    vcx.update(|_, cx| {
+                        cx.read_from_clipboard().and_then(|item| item.text())
+                    })
+                };
+                vcx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into())));
+                vcx.dispatch_action(CopyFilePath);
+                assert_eq!(
+                    clipboard(&mut vcx).as_deref(),
+                    Some("src/app.rs"),
+                    "Copy File Path copies the selection's path"
+                );
+                vcx.dispatch_action(CopyFileContents);
+                assert_eq!(
+                    clipboard(&mut vcx).as_deref(),
+                    Some("fn main() {}\n// changed"),
+                    "Copy File Contents copies the file's own lines, not the path"
+                );
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
     }
 
     /// The quick open searches the working tree's own paths — the index's

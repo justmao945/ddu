@@ -207,6 +207,21 @@ impl Render for AppView {
                 }
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             })
+            // The pane's and the tree's context-menu copies, as chords
+            // (see `keys.rs`): both read the *current* selection, so the
+            // menu item, the key message and the clipboard agree even if
+            // the selection moved between opening the menu and clicking.
+            .on_action(cx.listener(|this, _: &CopyFilePath, _, cx| {
+                if let Some(path) = this.current_diff_path() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(path.to_owned()));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CopyFileContents, _, cx| {
+                let text = this.selected_file_text();
+                if !text.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }))
             // Window-scoped text selection (the diff pane's
             // `SelectableText` runs register here). Must prepaint
             // before any of them — first child of the root.

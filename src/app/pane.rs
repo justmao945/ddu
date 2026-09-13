@@ -167,6 +167,42 @@ impl AppView {
         build.source.as_ref().err().copied()
     }
 
+    /// The selected file's contents, for the clipboard: the rendered
+    /// document's own source when the pane holds it (Preview mode reads
+    /// the file from disk), otherwise the file view File mode built,
+    /// otherwise the diff's own reconstruction (every line the diff did
+    /// not remove). Empty when nothing is selected or nothing has been
+    /// read — the caller then copies nothing, rather than overwriting
+    /// the clipboard with an empty string.
+    pub(crate) fn selected_file_text(&self) -> String {
+        if let Some(source) = self.cached_preview() {
+            return source.to_owned();
+        }
+        if let Some(crate::diff::file_view::FileView::Text(view)) = self.cached_file_view() {
+            return view
+                .rows
+                .iter()
+                .filter_map(|row| {
+                    (row.line.kind != '-').then_some(row.line.text.as_str())
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        // Changed but not yet read (or unreadable): reconstruct from the
+        // diff's own lines. A clean file has no diff to fall back to.
+        self.selected_diff_file()
+            .map(|file| {
+                file.hunks
+                    .iter()
+                    .flat_map(|h| h.lines.iter())
+                    .filter(|l| l.kind != '-')
+                    .map(|l| l.text.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
     /// Switch the pane's surface. Per session: persisted with the row.
     pub(crate) fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
         if self.current_diff_path().is_none() || self.view_mode == mode {

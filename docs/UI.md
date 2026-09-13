@@ -233,8 +233,12 @@ Every app shortcut is a `secondary-` chord — `⌘` on macOS, `⌃` on Linux
 (`src/app/keys.rs::key_bindings`; the full list is `DESIGN.md` §10). Global
 shortcuts live in `AppView::new`; terminal-scoped `⌘C`/`⌘V` (`TermCopy` /
 `TermPaste`) double as the right-click menu's shortcut hints via
-`PopupMenuItem::action` — any new terminal action shown in a menu must wire its
-action the same way.
+`PopupMenuItem::action` — and any action shown in a menu, terminal or not,
+must wire its action the same way. An item wired only to `on_click` renders
+with no chord at all, which reads as a command the keyboard cannot reach
+(the tree's and the pane's copy commands were exactly that: they now carry
+`CopyFilePath` / `CopyFileContents`, bound in the `⌃⌥` space, and a tree
+right-click selects its row so the item and the chord name the same file).
 
 Copy/paste/find are the exception to `secondary-`: a terminal shares those
 keys with the shell, so on Linux they live in the `⌃⇧` space (`Ctrl+C` must

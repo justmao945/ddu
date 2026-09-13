@@ -26,6 +26,21 @@ pub(crate) const FIND_ACCEL: &str = if cfg!(target_os = "macos") {
 } else {
     "ctrl-shift-f"
 };
+/// The two file-copy commands behind the tree's and the pane's context
+/// menus. ⌥⌘C is the copy-pathname chord Finder and VS Code use; the
+/// contents take its shifted variant. Both sit in the ⌃⌥ space on
+/// Linux, which no shell reads (⌥C alone is readline's capitalize-word,
+/// ⌃⌥C is free) — so a menu that shows them shows a chord that works.
+pub(crate) const COPY_PATH_ACCEL: &str = if cfg!(target_os = "macos") {
+    "cmd-alt-c"
+} else {
+    "ctrl-alt-c"
+};
+pub(crate) const COPY_CONTENTS_ACCEL: &str = if cfg!(target_os = "macos") {
+    "cmd-alt-shift-c"
+} else {
+    "ctrl-alt-shift-c"
+};
 /// The quick open's chord: ⌘P on macOS, and on Linux another chord the
 /// shell gives up (⌃P is readline's previous-history) — the same trade
 /// ⌃R already makes, for a search over every file in the project.
@@ -103,6 +118,13 @@ pub(super) fn key_bindings() -> Vec<KeyBinding> {
         // text selection (window-scoped `TextSelection`); the
         // handler propagates when nothing is selected.
         KeyBinding::new(COPY_ACCEL, input::Copy, None),
+        // The two file-copy commands the tree's and the pane's context
+        // menus carry: both act on the pane's selected file, so the
+        // menus can show the chord they run. App-level (no key
+        // context): the chords are the same wherever the pointer is,
+        // and neither is one a shell reads.
+        KeyBinding::new(COPY_PATH_ACCEL, CopyFilePath, None),
+        KeyBinding::new(COPY_CONTENTS_ACCEL, CopyFileContents, None),
         // Two find bars share one chord by focus. gpui ranks a
         // binding by the deepest stack slice its predicate needs: a
         // named context sitting at the focused element scores len, a
@@ -152,7 +174,10 @@ pub(super) fn key_bindings() -> Vec<KeyBinding> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{COPY_ACCEL, FILE_SEARCH_ACCEL, FIND_ACCEL, PASTE_ACCEL, key_bindings};
+    use super::{
+        COPY_ACCEL, COPY_CONTENTS_ACCEL, COPY_PATH_ACCEL, FILE_SEARCH_ACCEL, FIND_ACCEL,
+        PASTE_ACCEL, key_bindings,
+    };
     use gpui_kit::{KeyContext, Keymap, Keystroke};
 
     /// The fallback chain gpui would dispatch for `keystroke`, in
@@ -212,6 +237,28 @@ mod tests {
             vec!["input::Copy", "ddu::TermCopy"]
         );
         assert_eq!(chain(COPY_ACCEL, &["Root"]), vec!["input::Copy"]);
+    }
+
+    /// The tree's and the pane's copy commands are *bound*, not merely
+    /// labelled: a context menu renders an item's key hint from the
+    /// action the item carries, so an unbound action shows a menu entry
+    /// with no chord — which is what a right-click used to look like.
+    /// Both chords work inside the terminal too: neither is one a shell
+    /// reads (⌥C alone is readline's capitalize-word, ⌃⌥C is free).
+    #[test]
+    fn the_file_copy_commands_are_bound_chords() {
+        for stack in [vec!["Root"], vec!["Root", "Terminal"]] {
+            assert_eq!(
+                winner(COPY_PATH_ACCEL, &stack),
+                "ddu::CopyFilePath",
+                "{COPY_PATH_ACCEL} with {stack:?}"
+            );
+            assert_eq!(
+                winner(COPY_CONTENTS_ACCEL, &stack),
+                "ddu::CopyFileContents",
+                "{COPY_CONTENTS_ACCEL} with {stack:?}"
+            );
+        }
     }
 
     /// The palette's arrows are the app's — in the palette's own context,

@@ -283,6 +283,13 @@ struct AgentCmd { program: String, args: Vec<String> }
   chord the app binds is never forwarded to the shell — on Linux `⌃N/O/T/B/R/W`
   and friends are ddu's, not readline's — while everything unbound still reaches
   the shell (pinned by `app::tests::shell_control_keys_stay_with_the_shell`).
+  The tree's and the pane's context menus are *chords*, not labels: every item
+  carries the action it runs, and `PopupMenu` renders an item's key hint off
+  that action's binding — so ⌥⌘C / `⌃⌥C` copies the selected file's path and
+  ⌥⇧⌘C / `⌃⌥⇧C` its contents, in the ⌃⌥ space no shell reads (readline's
+  `Alt+C` is capitalize-word; `⌃⌥C` is free). A right-click in the tree selects
+  the row first, the way file trees behave everywhere, so the menu and the
+  chord always name the same file (`app::diff::tests::the_copy_commands_put_the_selected_file_on_the_clipboard`).
 * Theme: everything via `cx.theme()` tokens, no hardcoded colors; terminal SGR colors map onto the theme palette.
 * Confirmations: every destructive prompt (close session, quit with live agents)
   is an `open_alert_dialog` whose footer comes from `ui::dialog_footer(...)`, so

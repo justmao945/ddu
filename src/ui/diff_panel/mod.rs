@@ -18,7 +18,7 @@ use std::rc::Rc;
 use super::{panel_header_px, scaled};
 use super::plus_minus;
 use super::panel_view;
-use crate::app::AppView;
+use crate::app::{AppView, CopyFileContents, CopyFilePath};
 use crate::diff::file_view::FileView;
 use crate::diff::{
     DiffLine, NoteKind, PaneRow, RowStream, EXPAND_MAX_LINES, MAX_LINES_PER_FILE,
@@ -28,7 +28,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{self, Input};
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -340,34 +340,6 @@ fn note_text(this: &AppView, stream: &RowStream<'_>) -> String {
             }
         }
     }
-}
-/// The selected file's text for "Copy File Contents": the real file when
-/// File mode has read it, otherwise the diff's own reconstruction (every
-/// line the diff did not remove).
-fn file_text(this: &AppView) -> String {
-    if let Some(FileView::Text(view)) = this.cached_file_view() {
-        return view
-            .rows
-            .iter()
-            .filter_map(|row| {
-                (row.line.kind != '-').then_some(row.line.text.as_str())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-    // Changed but not yet read (or unreadable): reconstruct from the
-    // diff's own lines. A clean file has no diff to fall back to.
-    this.selected_diff_file()
-        .map(|file| {
-            file.hunks
-                .iter()
-                .flat_map(|h| h.lines.iter())
-                .filter(|l| l.kind != '-')
-                .map(|l| l.text.clone())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
 }
 /// `1234567` → `1,234,567` (the truncation note's line budget).
 fn grouped(n: usize) -> String {

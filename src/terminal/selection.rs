@@ -110,6 +110,8 @@ mod tests {
     // proc-macro re-export into scope, shadowing the built-in `#[test]`
     // and recursing forever at expansion.
     use crate::terminal::harness::{TestRoot, spawn_cat};
+    use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
+    use alacritty_terminal::selection::{Selection, SelectionType};
     use gpui_kit::{
         AnyWindowHandle, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
         ParentElement as _, Render, Styled as _, TestAppContext, Window, div, gpui,
@@ -118,6 +120,71 @@ mod tests {
     use super::TermSession;
 
 
+
+    /// ⌃⇧C's terminal half: the chord reaches `copy_selection` (bound in
+    /// `keys.rs`), and that puts the grid's selection on the clipboard —
+    /// the only route from a terminal drag to the system clipboard, so a
+    /// break here reads as "the terminal cannot copy".
+    #[test]
+    fn copy_selection_puts_the_grid_selection_on_the_clipboard() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 = TestAppContext::build(
+                    dispatcher,
+                    Some("copy_selection_puts_the_grid_selection_on_the_clipboard"),
+                );
+                let cx = &mut cx0;
+                let window = cx.add_window(|_, _| TestRoot);
+                let window = AnyWindowHandle::from(window);
+                let session = cx.update(spawn_cat);
+                cx.update_window(window, |_, _window, cx| {
+                    session.update(cx, |s, cx| {
+                        s.grid.inject_bytes(b"copy me\r\nsecond line\r\n");
+                        // A drag across the first line, the way the mouse
+                        // handlers build one.
+                        let mut term = s.grid.term.lock();
+                        let mut selection = Selection::new(
+                            SelectionType::Simple,
+                            GridPoint::new(Line(0), Column(0)),
+                            Side::Left,
+                        );
+                        selection.update(
+                            GridPoint::new(Line(0), Column("copy me".len() - 1)),
+                            Side::Right,
+                        );
+                        term.selection = Some(selection);
+                        drop(term);
+
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                            "sentinel".into(),
+                        ));
+                        assert!(s.copy_selection(cx), "the selection is copyable");
+                        assert_eq!(
+                            cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+                            Some("copy me")
+                        );
+                        // Nothing selected: it copies nothing rather
+                        // than blanking the clipboard.
+                        s.grid.term.lock().selection = None;
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                            "sentinel".into(),
+                        ));
+                        assert!(!s.copy_selection(cx));
+                        assert_eq!(
+                            cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+                            Some("sentinel")
+                        );
+                    });
+                });
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
 
     /// Hit-test mapping: window px → grid cell, clamped at the edges
     /// and shifted by the scroll offset — an off-by-one here selects

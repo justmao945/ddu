@@ -137,6 +137,7 @@ pub(crate) enum AppIcon {
     FileImage,
     FileArchive,
     FileLock,
+    ClipboardPaste,
 }
 
 impl gpui_kit::component::IconNamed for AppIcon {
@@ -148,6 +149,7 @@ impl gpui_kit::component::IconNamed for AppIcon {
             AppIcon::FileImage => "icons/file-image.svg".into(),
             AppIcon::FileArchive => "icons/file-archive.svg".into(),
             AppIcon::FileLock => "icons/file-lock.svg".into(),
+            AppIcon::ClipboardPaste => "icons/clipboard-paste.svg".into(),
         }
     }
 }

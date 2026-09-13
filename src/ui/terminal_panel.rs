@@ -208,6 +208,7 @@ fn surface(
                 let paste_term = weak.clone();
                 menu.item(
                     PopupMenuItem::new("Copy")
+                        .icon(Icon::new(IconName::Copy))
                         .disabled(!has_selection)
                         .action(Box::new(crate::app::TermCopy))
                         .on_click(move |_, _, cx| {
@@ -220,6 +221,7 @@ fn surface(
                 )
                 .item(
                     PopupMenuItem::new("Paste")
+                        .icon(Icon::new(crate::ui::AppIcon::ClipboardPaste))
                         .disabled(!can_paste)
                         .action(Box::new(crate::app::TermPaste))
                         .on_click(move |_, _, cx| {

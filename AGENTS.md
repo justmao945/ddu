@@ -176,8 +176,13 @@ editing, and where the long form lives.
   arrows belong to its input, so the bars step with ⌘G/⌘⇧G — except the
   palette, whose single-line field makes gpui-base's `up`/`down` binding land on
   a handler that was never registered, letting the palette's own binding take
-  them (`docs/UI.md`). Any terminal action shown in a menu must wire
-  `PopupMenuItem::action` (`docs/UI.md`).
+  them (`docs/UI.md`). Any action shown in a menu must wire
+  `PopupMenuItem::action` — that is what makes the item show the chord that
+  runs it, so an item wired only to `on_click` reads as a command the keyboard
+  cannot reach. The tree's and the pane's copy commands follow it (⌥⌘C /
+  `⌃⌥C` path, ⌥⇧⌘C / `⌃⌥⇧C` contents), and a tree right-click selects its row
+  first, so the menu and the chord always act on the same file
+  (`docs/UI.md`).
 - **Modal dialogs**: pickers go through `rfd::AsyncFileDialog` deferred with
   `window.spawn`; confirm dialogs use `ui::dialog_footer(...)`, never a
   hand-rolled `DialogFooter` pair (`docs/UI.md`).

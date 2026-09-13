@@ -47,6 +47,9 @@ impl gpui::AssetSource for AppAssets {
             "icons/file-lock.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/file-lock.svg"
             )))),
+            "icons/clipboard-paste.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/clipboard-paste.svg"
+            )))),
             _ => gpui_kit::assets::Assets.load(path),
         }
     }

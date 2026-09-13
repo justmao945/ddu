@@ -44,6 +44,8 @@ gpui_kit::actions!(
         TermBacktab,
         TermPaste,
         TermCopy,
+        CopyFilePath,
+        CopyFileContents,
         CloseSettings,
         FontLarger,
         FontSmaller,

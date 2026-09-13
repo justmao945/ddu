@@ -36,7 +36,6 @@ pub(super) fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView
     if this.surface() == Surface::Preview && this.cached_preview().is_some() {
         return preview_body(this).into_any_element();
     }
-    let selected_path = this.current_diff_path().unwrap_or_default().to_owned();
     let (stream, note) = pane_rows(this);
     let Some(stream) = stream else {
         // No rows at all: the note (an unchanged file in Diff mode) or
@@ -88,30 +87,33 @@ pub(super) fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView
                 // is a walk of the scrollbar's own track.
                 .child(scroll_overview(&stream, &sizes, cx))
                 .scrollbar(&this.diff_hunks_scroll, scroll::ScrollbarAxis::Both)
-                .context_menu({
-                    let path = selected_path.clone();
-                    let contents = file_text(this);
-                    move |menu, _, _| {
-                        let path = path.clone();
-                        let contents = contents.clone();
-                        menu.item(
-                            PopupMenuItem::new("Copy File Path")
-                                .icon(Icon::new(IconName::Copy))
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
-                                }),
-                        )
-                        .item(
-                            PopupMenuItem::new("Copy File Contents")
-                                .icon(Icon::new(IconName::Copy))
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(contents.clone()));
-                                }),
-                        )
-                    }
-                }),
+                .context_menu(file_menu),
         )
         .into_any_element()
+}
+
+/// The pane's copy menu, on both text surfaces (the rows and the
+/// rendered document): the selection, then the file itself. Every item
+/// carries the action it runs, which is what makes the menu show the
+/// chord — `PopupMenu` renders an item's key hint from the action's
+/// binding (`keys.rs`), so an item without one reads as a command the
+/// keyboard cannot reach.
+fn file_menu(menu: PopupMenu, _window: &mut Window, _cx: &mut Context<PopupMenu>) -> PopupMenu {
+    let menu = menu.item(
+        PopupMenuItem::new("Copy")
+            .icon(Icon::new(IconName::Copy))
+            .action(Box::new(input::Copy)),
+    );
+    menu.item(
+        PopupMenuItem::new("Copy File Path")
+            .icon(Icon::new(IconName::Copy))
+            .action(Box::new(CopyFilePath)),
+    )
+    .item(
+        PopupMenuItem::new("Copy File Contents")
+            .icon(Icon::new(IconName::FileText))
+            .action(Box::new(CopyFileContents)),
+    )
 }
 
 /// The one-line band above the rows: why the pane is showing something
@@ -141,6 +143,10 @@ fn preview_body(this: &AppView) -> impl IntoElement {
         .min_h_0()
         .min_w_0()
         .overflow_hidden()
+        // The rendered document gets the same copy menu as the rows: it
+        // is the surface where copying a *passage* is the point, and the
+        // one that used to have no menu at all.
+        .context_menu(file_menu)
         .child(
             TextView::markdown(
                 SharedString::from(format!(
