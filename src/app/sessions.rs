@@ -2,7 +2,6 @@
 //! the PTY exit bookkeeping. Leaving the app is [`super::shutdown`]'s.
 
 use super::*;
-use crate::terminal::Attention;
 
 impl AppView {
     pub(crate) fn select_session(
@@ -248,58 +247,6 @@ impl AppView {
         cx.notify();
     }
 
-    /// Attention marker from a session's PTY: the agent's own "your
-    /// turn" signal (turn finished, question asked, run failed). Raise
-    /// a desktop notification when that terminal is not in front of
-    /// the user — the signal is already on screen otherwise.
-    pub(super) fn on_session_attention(
-        &mut self,
-        emitter: Entity<TermSession>,
-        signal: &Attention,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.shutting_down || !cx.global::<crate::config::Config>().notify_on_attention() {
-            return;
-        }
-        let Some(slot) = self.session_slot(&emitter) else {
-            return;
-        };
-        // The terminal in front of the user needs no toast: the marker
-        // is already on screen. Anything else — another session, the
-        // app in the background — does.
-        let on_screen =
-            window.is_window_active() && slot == (self.current_project, self.current_session);
-        if on_screen {
-            return;
-        }
-        let project = &self.projects[slot.0];
-        let session = &project.sessions[slot.1];
-        cx.show_system_notification(SystemNotification {
-            // One notification per session row: a newer marker from the
-            // same agent replaces the older toast instead of stacking.
-            tag: format!("ddu-session-{}", session.id).into(),
-            title: format!("{} · {}", project.name, session.title).into(),
-            body: if signal.body.is_empty() {
-                "Needs your attention".into()
-            } else {
-                signal.body.clone().into()
-            },
-            actions: Vec::new(),
-        });
-    }
-
-    /// The `(project, session)` row owning `term`, if it is still listed.
-    fn session_slot(&self, term: &Entity<TermSession>) -> Option<(usize, usize)> {
-        self.projects.iter().enumerate().find_map(|(p, project)| {
-            project
-                .sessions
-                .iter()
-                .position(|s| s.term.as_ref() == Some(term))
-                .map(|six| (p, six))
-        })
-    }
-
     /// Close-session entry point: a live agent first gets the confirm
     /// dialog (stopping is disruptive); a dead row goes right away.
     pub(crate) fn request_close_session(
@@ -473,7 +420,7 @@ impl AppView {
     }
 
     /// Subscribe the app to one session's terminal events: wakeups
-    /// repaint, attention raises a toast, exit settles the row.
+    /// repaint, exit settles the row.
     ///
     /// Only a wakeup from the session the center pane renders may
     /// repaint: a background row keeps parsing (its grid must be current
@@ -481,8 +428,8 @@ impl AppView {
     /// streaming agents must not each drive a full-window redraw — that
     /// multiplies the frame rate the pump's throttle exists to bound.
     /// Background rows pick up their OSC title/status on the next
-    /// repaint (the 1 Hz tick); exit, attention, the diff poll and
-    /// interaction all keep their own notify.
+    /// repaint (the 1 Hz tick); exit, the diff poll and interaction
+    /// all keep their own notify.
     pub(super) fn subscribe_term(
         &mut self,
         term: &Entity<TermSession>,
@@ -525,9 +472,6 @@ impl AppView {
                             this.breadcrumb.update(cx, |_, cx| cx.notify());
                         }
                     }
-                }
-                TermEvent::Attention(signal) => {
-                    this.on_session_attention(emitter.clone(), signal, window, cx)
                 }
                 TermEvent::Exit(code) => {
                     this.on_session_exit(emitter.clone(), *code, &program, window, cx)
@@ -700,94 +644,6 @@ mod tests {
                     "the row that was alive must come back"
                 );
                 assert_eq!(rows[1].live, Some(false), "the finished row must not");
-
-                cx.update(|cx| {
-                    cx.background_executor().forbid_parking();
-                    cx.quit();
-                });
-                cx.run_until_parked();
-            }),
-        );
-    }
-
-    /// End to end for the notification path: an agent-side "your turn"
-    /// marker from a background session reaches the OS notification
-    /// center, named after that row. The marker's byte-level trip (PTY
-    /// → scanner → channel) is covered by
-    /// `pty_attention_signals_reach_the_pump` outside the harness; here
-    /// the event is emitted straight from the session entity so nothing
-    /// crosses into the deterministic scheduler (a real shell's prompt
-    /// bytes wake the pump task from the reader thread, which the test
-    /// scheduler rejects as nondeterministic). `/bin/cat` with no args
-    /// blocks on stdin forever and never prints — both sessions stay
-    /// silent, keeping the whole run on the test thread.
-    #[test]
-    #[cfg(unix)]
-    fn attention_raises_a_desktop_notification() {
-        use crate::app::AppView;
-        use crate::config::{Config, ProjectConfig, ShellConfig, State};
-        use crate::terminal::Attention;
-        use gpui_kit::{TestAppContext, gpui};
-
-        gpui::run_test_once(
-            0,
-            Box::new(move |dispatcher| {
-                let mut cx0 = TestAppContext::build(dispatcher, Some("attention_notify"));
-                let cx = &mut cx0;
-                cx.update(gpui_kit::init);
-                cx.update(|cx| {
-                    cx.set_app_identity("dev.just.ddu", "Day Day Up");
-                    cx.set_global(Config {
-                        shell: ShellConfig {
-                            // Silent child: no prompt bytes, no
-                            // cross-thread scheduler wakeups.
-                            program: "/bin/cat".into(),
-                        },
-                        ..Default::default()
-                    });
-                    cx.set_global(crate::config::LoadWarnings(vec![]));
-                    cx.set_global(State {
-                        projects: Some(vec![ProjectConfig {
-                            name: "proj".into(),
-                            path: std::env::temp_dir(),
-                            expanded: true,
-                            sessions: vec![],
-                        }]),
-                        ..Default::default()
-                    });
-                });
-                let (view, vcx) = cx.add_window_view(|window, cx| AppView::new(window, cx));
-                // AppView::new spawned row 0; add the background row and
-                // leave the selection on row 0 — a toast is owed exactly
-                // because that terminal is not the one on screen.
-                vcx.update(|window, cx| {
-                    let _ = window.draw(cx);
-                    view.update(cx, |v, cx| {
-                        v.spawn_session_of("terminal", window, cx);
-                        v.select_session(0, 0, window, cx);
-                    });
-                });
-                cx.update(|cx| {
-                    let term = view.update(cx, |v, _| {
-                        v.projects[0].sessions[1]
-                            .term
-                            .clone()
-                            .expect("second session spawned")
-                    });
-                    term.update(cx, |_, cx| {
-                        cx.emit(crate::terminal::TermEvent::Attention(Attention {
-                            title: None,
-                            body: "turn complete".into(),
-                        }));
-                    });
-                });
-                cx.run_until_parked();
-
-                let notes = cx.shown_system_notifications();
-                assert_eq!(notes.len(), 1, "one toast for the marker");
-                assert_eq!(notes[0].title, "proj · cat");
-                assert_eq!(notes[0].body, "turn complete");
-                assert_eq!(notes[0].tag, "ddu-session-s-2");
 
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();

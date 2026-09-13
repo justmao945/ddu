@@ -73,7 +73,6 @@ ddu/
       input.rs        # keystroke → escape-sequence encoding (+ tests)
       element.rs      # custom GPUI Element painting the grid
       palette.rs      # the ANSI ramp + the theme's default fg/bg
-      attention.rs    # BEL / OSC 9 / OSC 777 hand-back markers
       boxart.rs       # vector box-drawing glyphs
     diff/             # git diff model + the pane's row stream
       mod.rs          # DiffFile / DiffHunk / DiffLine / GitDiff, Snapshot, PaneRow, RowStream
@@ -256,11 +255,11 @@ struct AgentCmd { program: String, args: Vec<String> }
   and from the persisted `resume_id` on restore.
 * **Native agents (designed, not implemented):** `AGENT_CORE.md` specifies a second backend that runs **in one process** — conversations between equal peers instead of PTY-spawned CLIs. It supersedes this section for native agents; the PTY path here stays for shells and external CLIs (`claude`, `codex`).
 
-## 10. Config / Persistence / Shortcuts / Theme / Notifications
+## 10. Config / Persistence / Shortcuts / Theme
 
 * Settings `settings.json` — one-to-one with the Settings window: default new-session
   launcher, login shell, terminal font family/size, scrollback cap, light/dark
-  theme, the attention-notification toggle. No `config.toml` ever existed.
+  theme. No `config.toml` ever existed.
 * State `state.json` — the runtime workspace snapshot: projects with their session
   rows (including `resume_id` and the per-row `live` flag), the active
   project/session, panel visibility and widths, per-session diff selection
@@ -289,23 +288,16 @@ struct AgentCmd { program: String, args: Vec<String> }
   the Cancel-outline + danger-button recipe is shared and the button names the
   outcome. A row's exit/error is reported in the row itself
   (`AgentStatus::Done` / `Error` + the final duration), not as an in-app toast.
-* Desktop notifications (macOS): an interactive agent CLI never "finishes" at the
-  process level, so the signal is the agent's own hand-back marker in the PTY
-  stream — `BEL`, `OSC 9 ; <text>` (iTerm2/WezTerm/Ghostty) or
-  `OSC 777 ; notify ; <title> ; <body>` (urxvt). `terminal/attention.rs` scans
-  the raw bytes beside the alacritty parser and emits `TermEvent::Attention`;
-  `AppView` raises `show_system_notification` (gpui → `UNUserNotificationCenter`,
-  one tag per session row so a newer marker replaces the older toast) unless the
-  window is active *and* that session is the one on screen. ConEmu progress
-  (`OSC 9 ; 4 ; …`) is filtered — it means "busy", not "yours". Setting:
-  Settings → General → Notifications. macOS only hands a notification to a
-  process whose code identity is the app's: `make-bundle.sh` signs the
-  exec'd `ddu.bin` with the bundle id and the local certificate, then seals
-  the bundle, so a differently-signed build calls
-  `show_system_notification` and the OS drops it (`UNErrorDomain Code=1`).
-  `docs/SIGNING.md`: the requirement must stay stable or every grant
-  (notifications, Screen Recording, Accessibility) dies with the next
-  install.
+* **No notifications of ddu's own.** An agent CLI hands control back on its own
+  terms and its TUI already notifies the user natively (a title change, a bell,
+  a desktop toast of its own); a second, byte-sniffed copy of that
+  (`BEL` / `OSC 9` / `OSC 777` → a toast) was removed — it fired on the wrong
+  thing as often as the right one and ddu stopped being able to tell "needs
+  you" from "printed a bell". What the row reports is what ddu knows: the exit
+  code and the duration (`AgentStatus::Done` / `Error`), plus the OSC title the
+  agent sets, mirrored in the row.
+  (The macOS grant mechanism this used to ride on is unchanged —
+  `docs/SIGNING.md`.)
 
 ## 11. Performance and Correctness
 
@@ -360,7 +352,7 @@ struct AgentCmd { program: String, args: Vec<String> }
   * ✅ the pane's surfaces: Diff ⇄ whole file (⌘⇧M / the header's far-right icon button), Markdown rendered as the document, images drawn (document images through `ui/markdown.rs`, image files fitted to the pane);
   * open: per-session worktrees (one branch + one directory per session) — sessions share the project diff today;
   * ✅ syntax highlighting in the whole-file surface: c/c++, java, html, css, js/jsx, ts/tsx, rust, go, python, swift, bash/sh, json (`FILE_TREE.md` §8.4; `tree-sitter-*` features, all MIT). Diff mode's hunks stay plain — they are fragments with no offsets into the file.
-* Desktop notifications ✅ shipped: `terminal/attention.rs` decodes the agent's own hand-back markers (`BEL` / `OSC 9` / `OSC 777`) off the PTY stream, `AppView` posts one `show_system_notification` per row unless that terminal is the one on screen; Settings → General toggles it.
+* Desktop notifications — shipped, then **removed** on purpose: agents carry their own (see §10).
 
 ## 13. Risks
 

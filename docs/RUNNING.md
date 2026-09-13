@@ -60,7 +60,7 @@ restored session dies with a spawn ENOENT.
   provisions it, `DDU_SIGN_IDENTITY` overrides). It signs `ddu.bin` first with
   the bundle id as its identifier, then the bundle without `--deep`. Do not
   swap the identity or regenerate the certificate casually: macOS stores the
-  app's grants (desktop notifications, Screen Recording) against the
+  app's grants (Screen Recording, Accessibility) against the
   *designated requirement*, so only a stable certificate keeps them across
   rebuilds — `SIGNING.md`.
 

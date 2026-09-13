@@ -20,13 +20,11 @@ tccd  Failed to match existing code requirement for subject dev.just.ddu
 The 系统设置 → 隐私与安全性 → 屏幕录制 toggle stayed on while every request
 failed (`screencapture`: "could not create image from display"; the agent
 harness: `PermissionDenied: macOS Screen Recording permission is not granted`).
-The same identity-keyed mechanism decides whether the app may post
-notifications, which is why an unsigned build calls
-`show_system_notification` and macOS silently drops it (`UNErrorDomain
-Code=1`, usernotificationsd "not allowed"). Screen Recording, Accessibility
-and notifications are the three grants this app holds and the mechanism is
-identical for each; Accessibility is additionally cached per process, so a
-freshly granted app answers "denied" until it is restarted.
+The same identity-keyed mechanism guards every TCC service, so a grant
+survives an install only while the requirement holds. Screen Recording and
+Accessibility are the two grants this app holds and the mechanism is identical
+for each; Accessibility is additionally cached per process, so a freshly
+granted app answers "denied" until it is restarted.
 
 With a certificate the requirement is a function of the certificate, not of
 the code:

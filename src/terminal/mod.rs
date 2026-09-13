@@ -3,7 +3,6 @@
 //!
 //! * [`pty`]   — process + master handles (spawn/resize/kill)
 //! * [`grid`]  — `Term` behind a `FairMutex` + the two pump threads
-//! * [`attention`] — `BEL`/`OSC 9`/`OSC 777` markers in the byte stream
 //! * [`input`] — keystroke → escape-sequence encoding
 //! * [`element`] — the grid painter (custom `Element`)
 //! * [`palette`] — the ANSI ramp + the theme's default foreground/background
@@ -17,7 +16,6 @@
 //! [`selection`] (text selection), [`scrollbar`] (the overlay bar) and
 //! [`ime`] (input-method entry).
 
-mod attention;
 mod boxart;
 mod element;
 mod grid;
@@ -41,7 +39,6 @@ use gpui_kit::*;
 
 use search::TermSearch;
 
-pub use attention::Attention;
 pub(crate) use mouse::MouseTracking;
 pub use pty::PtySpawn;
 pub use search::TermMatch;
@@ -56,10 +53,6 @@ const RESIZE_DEBOUNCE: Duration = Duration::from_millis(140);
 pub enum TermEvent {
     /// Grid changed (coalesced); subscribers should re-render.
     Wakeup,
-    /// The child printed a "the user is needed" marker (`BEL` /
-    /// `OSC 9` / `OSC 777`) — agents emit one when a turn ends, a
-    /// question is asked or a run fails. See [`attention`].
-    Attention(attention::Attention),
     /// Child exited with the raw exit code (0 = success).
     Exit(i32),
 }

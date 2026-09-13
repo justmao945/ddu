@@ -20,10 +20,6 @@ impl TermSession {
         let (cols, rows) = (80, 24);
         let scrollback = cx.global::<crate::config::Config>().terminal_scrollback();
         let (wake_tx, wake_rx) = async_channel::bounded::<grid::PumpMsg>(1);
-        // Attention markers are events, not repaint hints: they get
-        // their own queue so the capacity-1 wakeup coalescing can never
-        // swallow a notification.
-        let (attention_tx, attention_rx) = async_channel::bounded::<attention::Attention>(16);
         let (grid, process) = grid::spawn_session(
             cmd,
             cols,
@@ -31,7 +27,6 @@ impl TermSession {
             wake_tx,
             gpui_kit::component::theme::Theme::global(cx).is_dark(),
             scrollback,
-            attention_tx,
         )?;
 
         let entity = cx.new(|cx| {
@@ -137,22 +132,6 @@ impl TermSession {
                         });
                         break;
                     }
-                }
-            }
-            anyhow::Ok(())
-        })
-        .detach();
-
-        // Attention pump: the reader thread's BEL/OSC markers, one
-        // subscriber event each. Runs until the entity is gone.
-        let weak = entity.downgrade();
-        cx.spawn(async move |cx| {
-            while let Ok(signal) = attention_rx.recv().await {
-                if weak
-                    .update(cx, |_, cx| cx.emit(TermEvent::Attention(signal)))
-                    .is_err()
-                {
-                    break;
                 }
             }
             anyhow::Ok(())

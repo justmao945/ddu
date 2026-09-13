@@ -56,8 +56,7 @@ editing, and where the long form lives.
   `selection.rs`, `scrollbar.rs` geometry + drags, `ime.rs`, and the test-only
   `harness.rs`), `pty.rs` process + master handles, `grid.rs` alacritty grid +
   pump threads, `element.rs` custom paint element, `palette.rs` the ANSI ramp +
-  theme defaults, `input.rs` keystroke → escapes, `attention.rs`
-  (`BEL`/`OSC 9`/`OSC 777` → desktop notification), `boxart.rs`.
+  theme defaults, `input.rs` keystroke → escapes, `boxart.rs`.
 - `src/ui/code_text.rs` — `SelectableText` with caller-supplied `TextRun`s
   (gpui-base's lays out the runs it built from its own text, so a highlighted
   row cannot ride it); one selection participant per row, same contract.

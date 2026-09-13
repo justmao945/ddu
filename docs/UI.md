@@ -193,9 +193,9 @@ path (new/restart/restore). It repaints only for the session the center pane
 renders (`is_visible_term`): a background row keeps parsing — selecting it
 must show current output — but its output changes nothing on screen, and
 several streaming agents would otherwise each add a full-window redraw per
-frame (measured 47 fps vs 1 fps with two background streams). Exit, attention,
-the diff poll and interaction notify on their own; a background row picks up
-its OSC title/status on the next repaint.
+frame (measured 47 fps vs 1 fps with two background streams). Exit, the diff
+poll and interaction notify on their own; a background row picks up its OSC
+title/status on the next repaint.
 
 Stream repaint pacing is adaptive: the pump spaces output-driven repaints by
 `stream_interval(paint_ms)` — 50 ms (20 fps) while the terminal element's own
