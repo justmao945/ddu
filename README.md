@@ -13,7 +13,8 @@
 - **Three-pane workspace** — projects and agent sessions on the left, a real terminal in the center, the project's live git diff on the right. Panes are resizable; the side panels collapse when you don't need them.
 - **Real terminals, not a text box** — every session runs in a PTY with streaming ANSI color, scrollback, and live resize, so agent CLIs behave exactly as they do in your shell.
 - **Live git diff** — working tree vs. HEAD: modified, staged, and untracked files with per-file `+`/`−` stats, refreshed automatically as your agents edit.
-- **The file, not just the diff** — the changes pane shows the whole file with the diff tinted in place (and `@@` hunks a keystroke away), syntax-highlighted per row for c/c++, Java, HTML, CSS, JS/JSX, TS/TSX, Rust, Go, Python, Swift, shell and JSON. Markdown renders as a document (images included); an image file is drawn as one.
+- **The file, not just the diff** — the changes pane shows the whole file with the diff tinted in place (and `@@` hunks a keystroke away), syntax-highlighted per row for c/c++, Java, HTML, CSS, JS/JSX, TS/TSX, Rust, Go, Python, Swift, shell and JSON. Markdown renders as a document (images included); an image file is drawn as one. A thin overview strip beside the rows marks every added and removed run and shows where the viewport sits — click a mark to jump to that change — and each file reopens where you left it.
+- **The whole working tree, findable** — the sidebar lists every file (git's ignore rules respected, changed files carrying their `+/−` figures), sorted case-insensitively, with `⌘P`/`Ctrl+P` to search it: type a fragment like `difpan`, and the ranked hits open with a keystroke.
 - **Session lifecycle** — spawn, kill, and restart sessions; a run that finishes or fails is reported on its own row (status and duration), and an agent's "your turn" marker raises a desktop notification while you're looking elsewhere. ddu keeps each session's conversation id, so an agent chat can be resumed later (`claude --resume` / `codex resume`) — and the sessions that were still running when you quit come back running on the next launch, agents resumed from that id.
 - **Settings window** — theme, shell, and terminal font, in a dedicated window (`⌘,` / `Ctrl+,`).
 - **Persistent workspace** — projects, panel layout, and per-project diff state survive relaunches (`~/Library/Application Support/ddu/` on macOS, `~/.config/ddu/` on Linux), and every session that was still running is started again.
@@ -30,6 +31,8 @@ Every shortcut uses the platform's primary modifier: `⌘` on macOS, `Ctrl` on L
 | Toggle the diff file tree | `⌘T` | `Ctrl+T` |
 | Toggle the sessions sidebar | `⌘B` | `Ctrl+B` |
 | Toggle the diff panel | `⌘R` | `Ctrl+R` |
+| Find a file (quick open) | `⌘P` | `Ctrl+P` |
+| Next / previous search result | `⌘G` / `⌘⇧G` | `Ctrl+G` / `Ctrl+Shift+G` |
 | Close session | `⌘W` | `Ctrl+W` |
 | Copy / paste (terminal and changes pane) | `⌘C` / `⌘V` | `Ctrl+Shift+C` / `Ctrl+Shift+V` |
 | Find in terminal / changes | `⌘F` | `Ctrl+Shift+F` |
@@ -37,7 +40,7 @@ Every shortcut uses the platform's primary modifier: `⌘` on macOS, `Ctrl` on L
 | Open settings | `⌘,` | `Ctrl+,` |
 | Quit | `⌘Q` | `Ctrl+Q` |
 
-A chord the app binds never reaches the shell, so on Linux `Ctrl+R`, `Ctrl+N`, `Ctrl+O`, `Ctrl+T`, `Ctrl+B` and `Ctrl+W` are ddu's, not readline's; everything unbound (`Ctrl+A/E/K/U/L/P/D/Z`, …) goes to the shell as usual.
+A chord the app binds never reaches the shell, so on Linux `Ctrl+R`, `Ctrl+N`, `Ctrl+O`, `Ctrl+T`, `Ctrl+B`, `Ctrl+W` and `Ctrl+P` are ddu's, not readline's; everything unbound (`Ctrl+A/E/K/U/L/D/Z`, …) goes to the shell as usual.
 
 ## Getting started
 

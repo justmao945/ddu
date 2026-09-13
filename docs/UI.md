@@ -97,6 +97,60 @@ consequences:
 sizes are an O(rows) allocation per frame by design; what must not be O(rows) is
 element building, path splitting, stat rollups or file IO.
 
+### The overview strip beside the rows
+
+The changes pane draws an overview in the **scrollbar's own column**
+(`diff_panel::scroll_overview`): one mark per run of changed rows, from
+`RowStream::marks()` — nothing else. Its rect is the scrollbar thumb's resting
+rect, from gpui-base's own numbers (`THUMB_WIDTH` 6px, `THUMB_INSET` 4px in from
+the right edge, **unscaled** — so the strip is unscaled too, or it drifts out of
+that column as the desktop text scale moves), and it is mounted *before*
+`.scrollbar(...)` so the thumb paints over it. It deliberately draws **no
+viewport band**: the scrollbar in that same column says where the viewport is,
+and a second, coarser one is noise. For the same reason the strip is drawn only
+when the stream has marks at all.
+
+Two columns, not one: additions take the left half, removals the right
+(`OVERVIEW_COLUMN` = 3px each). A replacement is a deleted line with its added
+counterpart a row below, and stacked in a single column the second mark covered
+the first — every replacement read as one colour. Side by side, the pair reads as
+the change it is.
+
+Its positions are **relative lengths** — a share of the content and of the
+stream's own rows — never pixels: the element's height is whatever the layout
+hands it, so a position derived from a height measured a frame earlier (the
+scroll handle's `bounds()`) drifts on resize, and pinning the element's height
+to a stale number trades that drift for a wrong one.
+
+A mark is never shorter than `scaled(5.)`: in a long file a one-line run is a
+fraction of a pixel tall, and a mark nobody can see (or click) is not a mark.
+The floor is also why the two columns matter — at that height a replacement's
+two runs would otherwise overlap instead of sitting beside each other.
+
+The row beside it is why the pane's body is an `h_flex` with
+`items_stretch()`: `h_flex()` is `flex_row` + `items_center`, so the rows would
+otherwise lay out at their content height in the middle of the pane — the
+virtual list was painting a centred sliver until the cross-axis alignment was
+stated.
+
+### Positions: `ScrollHandle` state is as real as AppView's
+
+A file's place is a `(working tree, path, mode)` entry in
+`AppView::file_positions`, written when the file is left and read when it is
+returned to. Two rules make it hold:
+
+* **A restore waits for the rows it belongs to.** Rows mount in stages — a
+  changed file shows the poll's hunks while its whole-file view is built off
+  the thread — and the virtual list *clamps* an offset to the content mounted
+  at that moment. Apply a deep position early and the clamp is permanent: the
+  file reopens at the fallback's height, not at its own row. The restore is
+  therefore deferred (`AppView::pending_scroll`) and applied when the build
+  lands or the poll settles (`stream_is_final`).
+* **A pending restore suppresses the write-back.** While a restore waits, the
+  handle's offset still describes the *previous* file, so `remember_scroll`
+  leaves the stored entry alone — otherwise the position just asked for would
+  be overwritten by the one being left.
+
 ## Cached panels
 
 The three shell panels are cached child views (`panel_view!` in
@@ -171,8 +225,18 @@ keys with the shell, so on Linux they live in the `⌃⇧` space (`Ctrl+C` must
 stay SIGINT). A chord a binding claims never reaches the PTY — gpui's
 bubble-phase action dispatch stops propagation before the terminal's key
 listener runs — so the Linux `⌃R`, `⌃N`, `⌃O`, `⌃T`, `⌃B`, `⌃W` chords are
-ddu's, not readline's. Anything unbound still reaches the shell. Pin the split
-with `app::tests::shell_control_keys_stay_with_the_shell`.
+ddu's, not readline's, and `⌃P` (`FILE_SEARCH_ACCEL`, the quick open) joins them
+knowingly: readline's previous-history for a search over every file. Anything
+unbound still reaches the shell. Pin the split with
+`app::tests::shell_control_keys_stay_with_the_shell`, and the quick open's chord
+with `app::tests::the_quick_open_owns_its_chord_in_every_context`.
+
+Both search bars take their keys the same way: the bar carries
+`track_focus(input)` plus a `key_context` (`DiffSearch` / `TerminalSearch` /
+`FileSearch`), and the actions are handled on the bar (Enter, Escape — dispatched
+by the input itself) or on `AppView` (⌘G/⌘⇧G, so they keep working if focus
+drifts mid-search). The plain arrows are the input's own: a bar cannot claim
+them, because the deepest context on the dispatch path is the input's `Input`.
 
 ## Terminal glyphs
 

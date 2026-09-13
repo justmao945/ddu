@@ -27,7 +27,9 @@ editing, and where the long form lives.
   the gpui-kit icon set).
 - `src/app/` — `mod.rs` `AppView` (all shared state + actions: sessions, panel
   toggles, shortcuts, notifications), `sessions.rs` (spawn/kill/restore),
-  `diff.rs` (poll, selection, find), `persist.rs` (state.json round-trip),
+  `diff.rs` (poll, selection, both search bars — the pane's find and the
+  tree's quick open — and the per-file scroll positions), `persist.rs`
+  (state.json round-trip),
   `panels.rs`, `workspace.rs` (projects, folder picker).
 - `src/session.rs` — domain model (`Project`, `AgentSession`, `AgentStatus`),
   launch presets, `spec`/`resume_spec`, `initial_projects()` (= cwd).
@@ -37,8 +39,10 @@ editing, and where the long form lives.
   a corrupt file is backed up as `<name>.corrupt-<ts>` and defaults are used.
 - `src/diff/` — `git.rs` git2 working-tree diff (5000 lines/file cap, polled
   with a seq guard against stale results); `mod.rs` data model (the pane's
-  `RowStream`) ; `view.rs` the whole-file surface: file lines + byte offsets +
-  the parsed `SyntaxHighlighter`, built on the background pass.
+  `RowStream`, and `marks()` — the overview's change runs); `tree.rs` the lazy
+  listing (case-insensitive name order) and the quick open's path ranking;
+  `view.rs` the whole-file surface: file lines + byte offsets + the parsed
+  `SyntaxHighlighter`, built on the background pass.
 - `src/terminal/` — `mod.rs` portable-pty pump + subscriber-channel wakeups,
   `grid.rs` alacritty grid, `element.rs` custom paint element, `attention.rs`
   (`BEL`/`OSC 9`/`OSC 777` → desktop notification), `boxart.rs`.
@@ -112,6 +116,13 @@ editing, and where the long form lives.
   `tree-sitter-*` features in `Cargo.toml` (all MIT — the GPL-free rule), one
   per language, and only the **File** surface highlights: Diff mode's hunks
   are fragments with no offsets into the file.
+- **The overview strip** lives in the pane's scrollbar column (its own rect,
+  two halves: added left, removed right), is built from `RowStream::marks()`,
+  and positions in relative lengths, never pixels (`docs/UI.md`). A clean file
+  has no marks, so it draws no strip.
+- **A file nobody changed has no view switch**: the pane's mode button and
+  `set_view_mode(Diff)` both need a diff, because `surface()` folds a Diff
+  request on an unchanged file back into the file itself.
 - **The pane's default surface is File** (`ViewMode::default`): the whole file
   with the diff tinted in place, and no `@@` bands there — the merged stream is
   the file in order.
@@ -124,12 +135,25 @@ editing, and where the long form lives.
   `AppView::selection` (a path) instead. A file nobody changed renders as the
   file itself (`AppView::surface` folds Diff into File), and a zero figure is
   never printed (`+8`, not `+8 −0`).
+- **A restore of the pane's scroll position waits for its own rows**: rows
+  mount in stages (the poll's hunks, then the whole-file view), and the virtual
+  list clamps an offset to whatever is mounted — applied early, a deep position
+  is lost for good. `AppView::pending_scroll` defers it; see `docs/UI.md`.
+- **`h_flex()` centers on the cross axis**: `flex_row` + `items_center`, so a
+  row that must hand a child the full height states `items_stretch()`
+  (`docs/UI.md`).
+- **Never `use super::*` in a `src/app/*` test module**: the parent globs
+  gpui-kit, and globbing *it* brings gpui's `#[test]` attribute into scope,
+  which expands into itself ("recursion limit reached while expanding
+  `#[test]`"). Name the imports the test needs.
 - **Repaint**: never poll-render — `PumpMsg` events drive it; `subscribe_term`
   is the single subscription point and repaints only the visible session; the
   adaptive `stream_interval` steps must sit above a real frame's paint cost
   (`docs/UI.md`).
 - **Keyboard**: app shortcuts are `secondary-` chords (copy/paste/find are
-  `⌃⇧` on Linux); a chord a binding claims never reaches the PTY. Any terminal
+  `⌃⇧` on Linux); a chord a binding claims never reaches the PTY — `⌃P` (the
+  quick open) trades readline's previous-history for a file search, pinned by
+  `app::tests::the_quick_open_owns_its_chord_in_every_context`. Any terminal
   action shown in a menu must wire `PopupMenuItem::action` (`docs/UI.md`).
 - **Modal dialogs**: pickers go through `rfd::AsyncFileDialog` deferred with
   `window.spawn`; confirm dialogs use `ui::dialog_footer(...)`, never a

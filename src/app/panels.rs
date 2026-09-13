@@ -5,7 +5,13 @@ use super::*;
 
 impl AppView {
     /// Toggle the sidebar, keeping the splitter slot list in sync.
-    pub(crate) fn toggle_sessions(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Hiding the sidebar unmounts the quick open with it; close it
+        // through the real path so focus does not stay on a removed
+        // input.
+        if self.show_sessions && self.file_search.open {
+            self.close_file_search(window, cx);
+        }
         self.set_sessions(!self.show_sessions, cx);
     }
 
@@ -39,7 +45,12 @@ impl AppView {
     }
 
     /// Toggle the diff file tree layer under the project tree.
-    pub(crate) fn toggle_diff_tree(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_diff_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The quick open lives in this layer: closing the layer closes
+        // the bar (and hands focus back to the window).
+        if self.show_diff_tree && self.file_search.open {
+            self.close_file_search(window, cx);
+        }
         self.show_diff_tree = !self.show_diff_tree;
         self.persist(cx);
         cx.notify();

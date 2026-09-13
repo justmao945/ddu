@@ -104,6 +104,23 @@ pub enum PaneRow<'a> {
     Note,
 }
 
+/// One run of changed rows, in the stream's own row indices — what the
+/// pane's scroll overview paints, one mark per run. Consecutive rows of
+/// the same sign merge; anything else (a hunk band, a context line) ends
+/// the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeMark {
+    pub row: u32,
+    pub rows: u32,
+    pub kind: ChangeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    Added,
+    Removed,
+}
+
 /// Which note [`RowStream`] appends as its final row, if any.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NoteKind {
@@ -252,6 +269,38 @@ impl<'a> RowStream<'a> {
             .collect()
     }
 
+    /// The stream's changed runs, in row order — the minimap's marks.
+    /// A whole-file stream reports its `+`/`-` rows (a spliced deletion
+    /// included), a diff stream the hunks' own lines; a hunk band and a
+    /// context line both end a run, so a mark never spans either.
+    pub fn marks(&self) -> Vec<ChangeMark> {
+        let mut marks: Vec<ChangeMark> = Vec::new();
+        for ix in 0..self.rows() {
+            let Some(PaneRow::Line(line)) = self.row(ix) else {
+                continue;
+            };
+            let kind = match line.kind {
+                '+' => ChangeKind::Added,
+                '-' => ChangeKind::Removed,
+                _ => continue,
+            };
+            match marks.last_mut() {
+                // Contiguous rows of one sign are one mark; a row index
+                // that skipped ahead (a band, or a context line) starts
+                // the next one.
+                Some(last) if last.kind == kind && last.row + last.rows == ix as u32 => {
+                    last.rows += 1;
+                }
+                _ => marks.push(ChangeMark {
+                    row: ix as u32,
+                    rows: 1,
+                    kind,
+                }),
+            }
+        }
+        marks
+    }
+
     /// Indices of every line whose text contains `query`,
     /// case-insensitively. A line with several occurrences contributes
     /// its index once per occurrence, so the result is ordered but not
@@ -387,6 +436,44 @@ mod tests {
             RowStream::diff(&f).match_indices("needle").len(),
             SEARCH_MAX_MATCHES
         );
+    }
+
+    /// Marks merge contiguous same-sign rows and stop at anything else:
+    /// a hunk band, a context line, or the other sign. Their row indices
+    /// are the stream's own — what the overview paints is the pane's
+    /// rows, not the file's lines.
+    #[test]
+    fn marks_merge_runs_of_one_sign() {
+        let f = file(vec![
+            vec![
+                line(' ', "context"),
+                line('-', "old one"),
+                line('-', "old two"),
+                line('+', "new one"),
+                line(' ', "context"),
+                line('+', "new two"),
+                line('+', "new three"),
+                line('+', "new four"),
+            ],
+            vec![line(' ', "elsewhere"), line('-', "gone")],
+        ]);
+        let marks = RowStream::diff(&f).marks();
+        assert_eq!(
+            marks,
+            vec![
+                // Rows: 0 header, 1 context, 2-3 the removals, 4 the
+                // addition, 5 context…
+                ChangeMark { row: 2, rows: 2, kind: ChangeKind::Removed },
+                ChangeMark { row: 4, rows: 1, kind: ChangeKind::Added },
+                // …then 6-8, the second run, on the far side of the
+                // hunk band (the band's own row never counts).
+                ChangeMark { row: 6, rows: 3, kind: ChangeKind::Added },
+                ChangeMark { row: 11, rows: 1, kind: ChangeKind::Removed },
+            ]
+        );
+        // A file with nothing changed has nothing to mark.
+        let clean = file(vec![vec![line(' ', "a"), line(' ', "b")]]);
+        assert!(RowStream::diff(&clean).marks().is_empty());
     }
 
     /// The stream's index contract: `row(ix)` is the row the pane renders

@@ -188,10 +188,84 @@ pub fn list_dir(repo: &Repository, dir: &str, changes: &Changes<'_>) -> Vec<Chil
     }
     // Directories first, then files, each name-sorted: a tree reads top
     // down through its folders before it lists what sits beside them.
-    dirs.sort_unstable_by(|a, b| a.name().cmp(b.name()));
-    files.sort_unstable_by(|a, b| a.name().cmp(b.name()));
+    dirs.sort_unstable_by(|a, b| by_name(a.name(), b.name()));
+    files.sort_unstable_by(|a, b| by_name(a.name(), b.name()));
     dirs.extend(files);
     dirs
+}
+
+/// Names compare case-insensitively — `README.md` belongs with `readme.md`
+/// and after `assets/`, not in a block of its own above every lowercase
+/// name — with the exact bytes as the tie-break, so the order stays total
+/// and stable for names that differ only in case. Byte-wise folding keeps
+/// it allocation-free: the listing is re-sorted on every expansion, and a
+/// `to_lowercase()` per comparison would allocate twice per pair.
+fn by_name(a: &str, b: &str) -> std::cmp::Ordering {
+    fn fold(s: &str) -> impl Iterator<Item = u8> + '_ {
+        s.bytes().map(|c| c.to_ascii_lowercase())
+    }
+    fold(a).cmp(fold(b)).then_with(|| a.cmp(b))
+}
+
+/// Ranked matches for the quick-open query: indices into `paths`, best
+/// first, at most `limit` of them.
+///
+/// The query is matched case-insensitively as a **subsequence**
+/// (`difpan` finds `src/ui/diff_panel.rs`), ranked by where it lands: a
+/// file whose *name* matches beats one that only matches somewhere in its
+/// directories, a prefix beats a hit in the middle, a substring beats
+/// scattered characters. Ties go to the shorter path, then to path order,
+/// so the same query always ranks the same way.
+pub fn search(paths: &[String], query: &str, limit: usize) -> Vec<usize> {
+    let needle = query.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<(u8, usize, usize)> = paths
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, path)| {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            let lower = name.to_ascii_lowercase();
+            let rank = if lower.starts_with(&needle) {
+                0
+            } else if contains_fold(name, &needle) {
+                1
+            } else if is_subsequence(name, &needle) {
+                2
+            } else if contains_fold(path, &needle) {
+                3
+            } else if is_subsequence(path, &needle) {
+                4
+            } else {
+                return None;
+            };
+            Some((rank, path.len(), ix))
+        })
+        .collect();
+    hits.sort_unstable();
+    hits.truncate(limit);
+    hits.into_iter().map(|(_, _, ix)| ix).collect()
+}
+
+/// `needle` (already folded) occurs in `hay`, ASCII-case-insensitively.
+/// Byte windows rather than a lowered copy of both sides: a directory
+/// listing is scanned per keystroke, and `to_ascii_lowercase` on a
+/// hundred paths allocates a hundred strings to answer a boolean.
+fn contains_fold(hay: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let (h, n) = (hay.as_bytes(), needle.as_bytes());
+    n.len() <= h.len() && h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
+/// `needle`'s characters appear in `hay` in order, ASCII-case-insensitively.
+fn is_subsequence(hay: &str, needle: &str) -> bool {
+    let mut chars = hay.chars();
+    needle
+        .chars()
+        .all(|n| chars.any(|h| h.eq_ignore_ascii_case(&n)))
 }
 
 #[cfg(test)]
@@ -332,5 +406,70 @@ mod tests {
         assert_eq!(inner, ["ui", "main.rs"]);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Sorting ignores case: an uppercase name is not a block of its own
+    /// above every lowercase one, and a case-only pair keeps a total
+    /// order (uppercase first, byte-wise) rather than the listing's.
+    #[test]
+    fn names_sort_case_insensitively() {
+        let mut names = ["Zed.md", "api.rs", "README.md", "main.rs", "readme.md"];
+        names.sort_unstable_by(|a, b| by_name(a, b));
+        assert_eq!(
+            names,
+            ["api.rs", "main.rs", "README.md", "readme.md", "Zed.md"]
+        );
+    }
+
+    /// The quick-open ranking, tier by tier: a file whose *name* starts
+    /// with the query first (shortest path first), then a name hit inside
+    /// a word, then a subsequence, then a path that only matches in its
+    /// directories — and never one that does not match at all.
+    #[test]
+    fn search_ranks_the_file_name_first() {
+        let paths: Vec<String> = [
+            "docs/FILE_TREE.md",
+            "docs/diff/notes.md",
+            "src/ui/diff_panel.rs",
+            "src/xdiff.rs",
+            "src/diff/mod.rs",
+            "src/app/diff.rs",
+        ]
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+        let named = |query: &str| -> Vec<&str> {
+            search(&paths, query, 10)
+                .into_iter()
+                .map(|ix| paths[ix].as_str())
+                .collect()
+        };
+
+        assert_eq!(
+            named("diff"),
+            [
+                // A name that *starts* with the query, shortest path first.
+                "src/app/diff.rs",
+                "src/ui/diff_panel.rs",
+                // Then a name that only carries it (and a shorter path
+                // does not jump the tier).
+                "src/xdiff.rs",
+                // Last, the paths whose *name* says nothing: `mod.rs` and
+                // `notes.md` match only through their directory.
+                "src/diff/mod.rs",
+                "docs/diff/notes.md",
+            ],
+            "ranking for `diff`"
+        );
+        // A subsequence reaches into the name: `difpan`.
+        assert_eq!(named("difpan"), ["src/ui/diff_panel.rs"]);
+        // Case folds both ways.
+        assert_eq!(named("DIFF_PANEL"), ["src/ui/diff_panel.rs"]);
+        assert_eq!(named("file_tree"), ["docs/FILE_TREE.md"]);
+        // Nothing for an empty query, and nothing for a miss.
+        assert!(named("   ").is_empty());
+        assert!(named("zzz").is_empty());
+        // The cap is the cap.
+        assert_eq!(search(&paths, "s", 2).len(), 2);
     }
 }

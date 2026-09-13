@@ -14,6 +14,9 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use super::{diff_file_icon, hover_bg, meta_text, row_px, scaled, selection_bg};
+use gpui_kit::base::input;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{PopupMenuItem, *};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
@@ -49,6 +52,12 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
     if this.current_session().is_none() {
         return empty_layer("No active session — select one in the project tree.", cx)
             .into_any_element();
+    }
+    // The quick open answers from the working tree's own path list, so
+    // it stands in for the tree entirely — and renders with or without
+    // a poll's listing behind it.
+    if this.file_search.open {
+        return search_layer(this, cx).into_any_element();
     }
     // A clean working tree is not an empty tree: the listing is the
     // point (FILE_TREE.md §1), so the only things that keep the layer
@@ -95,6 +104,257 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                 .scrollbar(&this.diff_tree_scroll, scroll::ScrollbarAxis::Vertical),
         )
         .into_any_element()
+}
+
+/// The layer while the quick open is up: the bar, then the hits it
+/// found — or the note that says why there are none. The tree is not
+/// rendered underneath: the search replaces it rather than filtering
+/// what happens to be expanded.
+fn search_layer(this: &AppView, cx: &mut Context<AppView>) -> AnyElement {
+    let query = this.file_search.input.read(cx).value().trim().to_owned();
+    // One map per render, not one scan per row: the hit rows carry the
+    // `+/−` figures of the files the poll found changed, and a linear
+    // search of the diff for each of 200 rows is the slow way to say
+    // "changed".
+    let changed: std::collections::HashMap<&str, (usize, usize)> = this
+        .diff()
+        .map(|diff| {
+            diff.files
+                .iter()
+                .map(|f| (f.path.as_str(), (f.added, f.removed)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let rows: Vec<AnyElement> = this
+        .file_search
+        .matches
+        .iter()
+        .enumerate()
+        .filter_map(|(hit, ix)| {
+            let path = this.file_search.paths.get(*ix)?;
+            Some(
+                search_row(
+                    hit,
+                    path,
+                    changed.get(path.as_str()).copied(),
+                    hit == this.file_search.current,
+                    cx,
+                )
+                .into_any_element(),
+            )
+        })
+        .collect();
+    let body: AnyElement = if rows.is_empty() {
+        empty_layer(
+            if query.is_empty() {
+                "Type to search the working tree."
+            } else {
+                "No files match."
+            },
+            cx,
+        )
+        .into_any_element()
+    } else {
+        // A plain list, not a virtual one: the hits are capped
+        // (`FILE_SEARCH_MAX`), so there is nothing to virtualize.
+        div()
+            .id("file-search-hits")
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&this.diff_tree_scroll)
+            .pt_2()
+            .pb_2()
+            .children(rows)
+            .into_any_element()
+    };
+    v_flex()
+        .size_full()
+        .min_w_0()
+        .overflow_hidden()
+        .child(file_search_bar(this, cx))
+        .child(
+            v_flex()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(body)
+                .scrollbar(&this.diff_tree_scroll, scroll::ScrollbarAxis::Vertical),
+        )
+        .into_any_element()
+}
+
+/// The quick-open strip: a search input, the hit counter, and the three
+/// buttons the find bars also carry (previous, next, close). ⌘G/⌘⇧G
+/// drive the same steps while the input holds focus — the plain arrows
+/// belong to the input's own caret, which is why the bar uses the chord
+/// the find bars already taught.
+fn file_search_bar(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    let search = &this.file_search;
+    let input = search.input.clone();
+    let focus = input.read(cx).focus_handle(cx).clone();
+    let total = search.matches.len();
+    let has_matches = total > 0;
+    let typed = !input.read(cx).value().trim().is_empty();
+    let counter: SharedString = if !typed {
+        "".into()
+    } else if !has_matches {
+        "No results".into()
+    } else {
+        format!("{}/{}", search.current.min(total - 1) + 1, total).into()
+    };
+    let chord = crate::app::accel_hint("G");
+
+    h_flex()
+        .id("file-search-bar")
+        .flex_shrink_0()
+        .track_focus(&focus)
+        .key_context("FileSearch")
+        // The layer's root focuses the window fallback on any mouse
+        // down; without stopping propagation a click into the input
+        // would bounce focus right back out.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+        )
+        .on_action(cx.listener(|this, enter: &input::Enter, window, cx| {
+            if enter.shift {
+                this.file_search_step(true, cx);
+            } else {
+                this.commit_file_search(window, cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &input::Escape, window, cx| {
+            this.close_file_search(window, cx);
+        }))
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .child(
+            Input::new(&input)
+                .aria_label("Search files")
+                .small()
+                .flex_1()
+                .min_w_0()
+                .appearance(true)
+                .focus_bordered(false)
+                .cleanable(true),
+        )
+        .child(
+            div()
+                .id("file-search-counter")
+                .role(Role::Label)
+                .aria_label(counter.clone())
+                .min_w(px(scaled(46.)))
+                .text_center()
+                .text_xs()
+                .text_color(cx.theme().foreground.opacity(if has_matches { 0.55 } else { 0.35 }))
+                .child(counter),
+        )
+        .child(
+            Button::new("file-search-prev")
+                .accessibility_label(format!("Previous file ({chord} ⇧)"))
+                .xsmall()
+                .ghost()
+                .icon(IconName::ChevronLeft)
+                .disabled(!has_matches)
+                .on_click(cx.listener(|this, _, _, cx| this.file_search_step(true, cx))),
+        )
+        .child(
+            Button::new("file-search-next")
+                .accessibility_label(format!("Next file ({chord})"))
+                .xsmall()
+                .ghost()
+                .icon(IconName::ChevronRight)
+                .disabled(!has_matches)
+                .on_click(cx.listener(|this, _, _, cx| this.file_search_step(false, cx))),
+        )
+        .child(
+            Button::new("file-search-close")
+                .accessibility_label("Close file search")
+                .xsmall()
+                .ghost()
+                .icon(IconName::Close)
+                .on_click(cx.listener(|this, _, window, cx| this.close_file_search(window, cx))),
+        )
+}
+
+/// One hit: the path with its directories muted and the file's own name
+/// bright — the name is what the query was about — plus the `+/−`
+/// figures when the poll found the file changed. Clicking it is Enter.
+fn search_row(
+    hit: usize,
+    path: &str,
+    changed: Option<(usize, usize)>,
+    active: bool,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let (dir, name) = match path.rfind('/') {
+        Some(ix) => (&path[..=ix], &path[ix + 1..]),
+        None => ("", path),
+    };
+    let hov_bg = hover_bg(cx);
+    let active_bg = selection_bg(cx);
+    div()
+        .id(("file-search-hit", hit))
+        .role(Role::ListItem)
+        .aria_label(SharedString::from(match changed {
+            Some((added, removed)) => format!("{path}{}", figures(added, removed, ' ')),
+            None => path.to_owned(),
+        }))
+        .aria_selected(active)
+        .w_full()
+        .h(px(row_px()))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .cursor_pointer()
+        .map(|el| if active { el.bg(active_bg) } else { el })
+        .hover(move |el| el.bg(if active { active_bg } else { hov_bg }))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            // Clicking a hit is Enter on it: the bar's cursor moves
+            // there and the pick commits.
+            this.file_search.current = hit;
+            this.commit_file_search(window, cx);
+        }))
+        .child(
+            diff_file_icon(path)
+                .with_size(gpui_kit::component::Size::XSmall)
+                .text_color(cx.theme().foreground.opacity(0.6)),
+        )
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_sm()
+                .whitespace_nowrap()
+                .when(!dir.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(cx.theme().foreground.opacity(0.45))
+                            .child(dir.to_string()),
+                    )
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_color(cx.theme().foreground.opacity(0.9))
+                        .child(name.to_string()),
+                ),
+        )
+        .when_some(changed, |el, (added, removed)| {
+            el.when(added > 0 || removed > 0, |el| {
+                el.child(plus_minus(added, removed, cx))
+            })
+        })
 }
 
 /// Short note shown when there is nothing to list. The text wraps

@@ -9,6 +9,11 @@ use gpui_kit::component::input::InputState;
 use super::*;
 use crate::diff::git;
 
+/// How many quick-open hits are kept: past this the list is a scroll
+/// rather than an answer, and the user is expected to type one more
+/// character.
+pub(crate) const FILE_SEARCH_MAX: usize = 200;
+
 /// State behind the diff pane's find bar (⌘F). `open` folds the bar's
 /// whole lifecycle: closed → hidden, matches stay empty.
 pub(crate) struct DiffSearch {
@@ -39,7 +44,256 @@ impl DiffSearch {
 }
 
 
+/// The file tree's quick open (⌘P): the input, the working tree's
+/// searchable paths, and the ranked matches against the input's value.
+/// `open` folds the bar's whole lifecycle, as it does for the find bar:
+/// closed → not rendered, matches empty.
+pub(crate) struct FileSearch {
+    pub input: Entity<InputState>,
+    pub open: bool,
+    /// Every path the search can reach: the index's tracked files plus
+    /// whatever the poll found untracked — the same universe the tree
+    /// lists, and no walk to get it (the index is already in memory).
+    /// Built when the bar opens.
+    pub paths: Vec<String>,
+    /// Indices into `paths`, best match first.
+    pub matches: Vec<usize>,
+    /// Index into `matches`: what Enter opens, what the counter shows.
+    pub current: usize,
+}
+
+impl FileSearch {
+    pub fn new(window: &mut Window, cx: &mut Context<AppView>) -> Self {
+        let input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_placeholder("Find file", window, cx);
+            input
+        });
+        Self {
+            input,
+            open: false,
+            paths: Vec::new(),
+            matches: Vec::new(),
+            current: 0,
+        }
+    }
+
+    /// The path under the cursor, if the query has an answer.
+    pub fn current_path(&self) -> Option<&str> {
+        self.paths.get(*self.matches.get(self.current)?).map(String::as_str)
+    }
+}
+
 impl AppView {
+    /// Open the quick open (or refocus it when already open) and reveal
+    /// the layer it lives in: with the sidebar or the file tree hidden,
+    /// a search bar would have nowhere to be. The whole query is
+    /// selected, so typing replaces it.
+    pub(crate) fn open_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // No session, no working tree to search.
+        if self.current_session().is_none() {
+            return;
+        }
+        if !self.show_sessions {
+            self.set_sessions(true, cx);
+        }
+        self.show_diff_tree = true;
+        self.file_search.open = true;
+        self.refresh_file_paths();
+        self.file_search.input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        self.refresh_file_search(cx);
+    }
+
+    pub(crate) fn close_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_search.open = false;
+        self.file_search.matches.clear();
+        self.file_search.current = 0;
+        // Hand focus back to the window fallback: the strip unmounts
+        // with the bar, and a handle left on a removed input would keep
+        // eating keystrokes.
+        self.window_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Rebuild the searchable path list from the session's working tree:
+    /// the index (tracked files) plus the poll's untracked ones. Sorted
+    /// and deduplicated; a non-UTF-8 path is left out rather than
+    /// lossily compared.
+    pub(crate) fn refresh_file_paths(&mut self) {
+        let mut paths: Vec<String> = Vec::new();
+        if let Some(root) = self.current_session_cwd() {
+            if let Some(repo) = self.repo_for(&root) {
+                if let Ok(index) = repo.index() {
+                    paths.extend(
+                        index
+                            .iter()
+                            .filter_map(|entry| String::from_utf8(entry.path.clone()).ok()),
+                    );
+                }
+            }
+        }
+        if let Some(diff) = self.diff() {
+            paths.extend(diff.files.iter().map(|file| file.path.clone()));
+        }
+        paths.sort_unstable();
+        paths.dedup();
+        self.file_search.paths = paths;
+    }
+
+    /// Re-rank the matches against the input's current value. Called on
+    /// keystrokes and when the bar opens; the list re-ranks per
+    /// keystroke, so the cursor goes back to the best match.
+    pub(crate) fn refresh_file_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.file_search.input.read(cx).value().to_string();
+        self.file_search.matches =
+            crate::diff::tree::search(&self.file_search.paths, &query, FILE_SEARCH_MAX);
+        self.file_search.current = 0;
+        cx.notify();
+    }
+
+    /// Step through the hits, wrapping at both ends.
+    pub(crate) fn file_search_step(&mut self, back: bool, cx: &mut Context<Self>) {
+        let len = self.file_search.matches.len();
+        if len == 0 {
+            return;
+        }
+        self.file_search.current = if back {
+            (self.file_search.current + len - 1) % len
+        } else {
+            (self.file_search.current + 1) % len
+        };
+        cx.notify();
+    }
+
+    /// Open the match under the cursor: the tree opens the path's
+    /// ancestors so the file is where the search left it, the pane takes
+    /// the selection, and the bar closes.
+    pub(crate) fn commit_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.file_search.current_path().map(str::to_owned) else {
+            return;
+        };
+        let mut rest = path.as_str();
+        while let Some(cut) = rest.rfind('/') {
+            rest = &rest[..cut];
+            self.diff_tree_open.insert(rest.to_owned());
+        }
+        self.select_path(path);
+        self.rebuild_tree_index();
+        self.ensure_file_content(cx);
+        self.refresh_diff_search(cx);
+        self.close_file_search(window, cx);
+        if !self.show_diff {
+            self.set_diff(true, window, cx);
+        }
+    }
+
+    /// Remember where the file being left was scrolled, and put the
+    /// newly selected one back where it was left. Both are keyed by
+    /// `(working tree, path, mode)`: a file reads the same way in every
+    /// session of a project, and switching files is the thing this
+    /// makes cheap — a re-rendered stream puts a file back at the top
+    /// unless its own position is remembered.
+    fn remember_scroll(&mut self) {
+        // A restore still waiting for its rows means the offset on the
+        // handle belongs to the *previous* file (or to a clamped
+        // fallback): the remembered value is the truth, so leave it.
+        if self
+            .pending_scroll
+            .as_ref()
+            .is_some_and(|(path, mode, _)| {
+                Some(path.as_str()) == self.current_diff_path() && *mode == self.view_mode
+            })
+        {
+            return;
+        }
+        let (Some(root), Some(path)) = (self.current_session_cwd(), self.current_diff_path()) else {
+            return;
+        };
+        let key = (root, path.to_owned(), self.view_mode);
+        let offset = self.diff_hunks_scroll.offset();
+        // The top is the default anyway: keeping it would only grow the
+        // map.
+        if offset == point(px(0.), px(0.)) {
+            self.file_positions.remove(&key);
+        } else {
+            self.file_positions.insert(key, offset);
+        }
+    }
+
+    /// Where `path` was left in the current working tree and mode — the
+    /// top-left corner of its rows, or the top when it was never
+    /// scrolled. One small allocation per file switch buys the map a
+    /// borrowable key; nothing here runs per frame.
+    fn saved_scroll(&self, path: &str) -> Point<Pixels> {
+        let top = point(px(0.), px(0.));
+        let Some(root) = self.current_session_cwd() else {
+            return top;
+        };
+        self.file_positions
+            .get(&(root, path.to_owned(), self.view_mode))
+            .copied()
+            .unwrap_or(top)
+    }
+
+    /// Put the selection's remembered position back — or defer it until
+    /// the rows it belongs to are on screen.
+    ///
+    /// The deferral is the whole point: the rows mount in stages (a
+    /// changed file first shows the poll's hunks as a fallback, then its
+    /// whole-file view lands a moment later), and the virtual list clamps
+    /// an offset to whatever content is *currently* mounted. Applied too
+    /// early, a deep position is clamped against the fallback's few rows
+    /// and the clamp outlives the content that caused it — the file then
+    /// opens nowhere near where it was left.
+    fn restore_scroll(&mut self) {
+        self.pending_scroll = None;
+        let Some(path) = self.current_diff_path().map(str::to_owned) else {
+            return;
+        };
+        let offset = self.saved_scroll(&path);
+        if offset == point(px(0.), px(0.)) {
+            self.diff_hunks_scroll.set_offset(offset);
+        } else if self.stream_is_final() {
+            self.diff_hunks_scroll.set_offset(offset);
+        } else {
+            self.pending_scroll = Some((path, self.view_mode, offset));
+        }
+    }
+
+    /// Whether the pane is showing the rows a remembered position was
+    /// measured against: Diff mode reads its rows straight off the poll,
+    /// File mode needs the file's own view (the hunks it falls back to
+    /// meanwhile are a different row list). A rendered document and an
+    /// image have no rows of their own — the pane's scroll is not theirs.
+    fn stream_is_final(&self) -> bool {
+        match self.surface() {
+            crate::ui::diff_panel::Surface::Diff => self.diff().is_some(),
+            crate::ui::diff_panel::Surface::File => matches!(
+                self.cached_file_view(),
+                Some(crate::diff::view::FileView::Text(_))
+            ),
+            crate::ui::diff_panel::Surface::Preview => true,
+        }
+    }
+
+    /// Apply a deferred restore once its rows are the ones on screen.
+    fn apply_pending_scroll(&mut self) {
+        let Some((path, mode, offset)) = self.pending_scroll.clone() else {
+            return;
+        };
+        if self.current_diff_path() != Some(path.as_str()) || self.view_mode != mode {
+            self.pending_scroll = None;
+            return;
+        }
+        if self.stream_is_final() {
+            self.diff_hunks_scroll.set_offset(offset);
+            self.pending_scroll = None;
+        }
+    }
+
     pub(super) fn reset_diff(&mut self) {
         self.snapshot = None;
         self.diff_error = None;
@@ -52,6 +306,12 @@ impl AppView {
         self.tree_index = None;
         self.diff_tree_open.clear();
         self.diff_search.matches.clear();
+        self.pending_scroll = None;
+        // The quick open's path list belongs to the working tree the
+        // session that owned it; the next open rebuilds it.
+        self.file_search.paths.clear();
+        self.file_search.matches.clear();
+        self.file_search.current = 0;
         self.diff_tree_scroll.set_offset(point(px(0.), px(0.)));
         self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
     }
@@ -188,8 +448,17 @@ impl AppView {
                         changed: snapshot.diff.files.iter().position(|f| &f.path == path),
                     });
                 let moved = self.snapshot.as_ref() != Some(&snapshot) || next != self.selection;
+                // The selection moved on its own — a restored row's path
+                // landing on the first poll, or the path leaving the
+                // working tree. Same bookkeeping as a click: remember
+                // where the outgoing file was, put the incoming one back
+                // where it was left.
                 if next.as_ref().map(|s| s.path.as_str()) != selected.as_deref() {
-                    self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
+                    self.remember_scroll();
+                    let restored = next.as_ref().map(|s| self.saved_scroll(&s.path));
+                    if let Some(offset) = restored {
+                        self.diff_hunks_scroll.set_offset(offset);
+                    }
                 }
                 self.selection = next;
                 self.snapshot = Some(snapshot);
@@ -236,6 +505,7 @@ impl AppView {
         // search: keep matches and counter truthful.
         self.refresh_diff_search(cx);
         self.ensure_file_content(cx);
+        self.apply_pending_scroll();
         true
     }
 
@@ -326,9 +596,12 @@ impl AppView {
             .and_then(|d| d.files.iter().position(|f| f.path == path));
         let same = self.selection.as_ref().is_some_and(|s| s.path == path);
         if !same {
-            self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
+            self.remember_scroll();
         }
         self.selection = Some(crate::app::Selection { path, changed });
+        if !same {
+            self.restore_scroll();
+        }
     }
 
     /// What the pane renders right now: the mode, and the Markdown
@@ -403,10 +676,12 @@ impl AppView {
         if self.current_diff_path().is_none() || self.view_mode == mode {
             return;
         }
+        // The stream's shape changes with the mode, so each mode keeps
+        // its own position: the hunks' place and the whole file's place
+        // are both worth coming back to.
+        self.remember_scroll();
         self.view_mode = mode;
-        // The stream's shape changes with the mode, so the old offset
-        // means nothing in the new one.
-        self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
+        self.restore_scroll();
         self.ensure_file_content(cx);
         self.refresh_diff_search(cx);
         self.persist(cx);
@@ -483,6 +758,9 @@ impl AppView {
                         source: source.map(|text| std::rc::Rc::from(text.as_str())),
                     });
                 }
+                // The rows this file's remembered position belongs to are
+                // here now: put the pane back where it was left.
+                v.apply_pending_scroll();
                 v.refresh_diff_search(cx);
                 cx.notify();
             });
@@ -546,5 +824,261 @@ impl AppView {
             anyhow::Ok(())
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Named imports, never `use super::*`: the parent module globs
+    // gpui-kit, and a glob of *it* brings gpui's own `#[test]` attribute
+    // into scope, which expands into itself (rustc: "recursion limit
+    // reached while expanding `#[test]`"). Every test module in `app`
+    // is written this way for that reason.
+    use crate::app::AppView;
+    use crate::config::{Config, LoadWarnings, ProjectConfig, ShellConfig, State};
+    use crate::diff::{DiffFile, DiffHunk, DiffLine, GitDiff, Snapshot};
+    use crate::ui::diff_panel::ViewMode;
+    use gpui_kit::{Entity, TestAppContext, VisualTestContext, gpui, point, px};
+
+    /// A working tree on disk (the listing is the filesystem's) plus the
+    /// changed-file records the poll would have produced for it: one
+    /// changed file, one clean, one untracked.
+    fn workspace(name: &str) -> (std::path::PathBuf, Vec<DiffFile>) {
+        let root = std::env::temp_dir().join(format!("ddu-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).expect("mkdir");
+        std::fs::write(root.join("README.md"), "# hi\n").expect("write");
+        std::fs::write(root.join("src/app.rs"), "fn main() {}\n").expect("write");
+        std::fs::write(root.join("src/other.rs"), "fn other() {}\n").expect("write");
+        // Untracked: not in the index, and the poll is what knows it.
+        std::fs::write(root.join("fresh.txt"), "new\n").expect("write");
+        let repo = git2::Repository::init(&root).expect("init");
+        let mut index = repo.index().expect("index");
+        index.add_path(std::path::Path::new("README.md")).expect("add");
+        index.add_path(std::path::Path::new("src/app.rs")).expect("add");
+        index.add_path(std::path::Path::new("src/other.rs")).expect("add");
+        index.write().expect("write index");
+        drop(index);
+
+        let changed = vec![DiffFile {
+            path: "src/app.rs".to_owned(),
+            added: 1,
+            removed: 0,
+            hunks: vec![DiffHunk {
+                header: "@@ -1 +1,2 @@".into(),
+                lines: vec![
+                    DiffLine {
+                        kind: ' ',
+                        old_no: Some(1),
+                        new_no: Some(1),
+                        text: "fn main() {}".into(),
+                    },
+                    DiffLine {
+                        kind: '+',
+                        old_no: None,
+                        new_no: Some(2),
+                        text: "// changed".into(),
+                    },
+                ],
+            }],
+            lines_total: 1,
+            truncated: false,
+        },
+        // The untracked file the poll reports: no hunks (there is no
+        // HEAD side to diff against) and one added line.
+        DiffFile {
+            path: "fresh.txt".to_owned(),
+            added: 1,
+            removed: 0,
+            hunks: Vec::new(),
+            lines_total: 0,
+            truncated: false,
+        }];
+        (root, changed)
+    }
+
+    /// One AppView on that working tree, with the poll's snapshot applied
+    /// and a frame drawn.
+    fn app(
+        dispatcher: gpui::TestDispatcher,
+        name: &'static str,
+        cwd: std::path::PathBuf,
+        changed: Vec<DiffFile>,
+    ) -> (TestAppContext, Entity<AppView>, VisualTestContext) {
+        let mut cx0 = TestAppContext::build(dispatcher, Some(name));
+        let cx = &mut cx0;
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            cx.set_global(Config {
+                shell: ShellConfig {
+                    program: "/bin/cat".into(),
+                },
+                ..Default::default()
+            });
+            cx.set_global(LoadWarnings(vec![]));
+            cx.set_global(State {
+                projects: Some(vec![ProjectConfig {
+                    name: "proj".into(),
+                    path: cwd.clone(),
+                    expanded: true,
+                    sessions: vec![],
+                }]),
+                ..Default::default()
+            });
+        });
+        let (view, vcx) = cx.add_window_view(|window, cx| AppView::new(window, cx));
+        vcx.update(|window, cx| {
+            view.update(cx, |v, cx| {
+                v.show_sessions = true;
+                v.show_diff_tree = true;
+                v.projects[0].path = cwd.clone();
+                v.projects[0].sessions[0].cwd = cwd.clone();
+                v.snapshot = Some(Snapshot {
+                    diff: GitDiff {
+                        branch: None,
+                        files: changed.clone(),
+                    },
+                });
+                v.tree_seeded = false;
+                v.diff_tree_open.clear();
+                v.rebuild_tree_index();
+                cx.notify();
+            });
+            let _ = window.draw(cx);
+        });
+        // The borrow `add_window_view` hands back ends with this
+        // function: the context is cloned out so a test can drive the
+        // window (focus, hover) while it also pumps `cx0`.
+        let vcx = vcx.clone();
+        (cx0, view, vcx)
+    }
+
+    /// The quick open searches the working tree's own paths — the index's
+    /// tracked files *and* the untracked ones only the poll knows — and
+    /// committing a hit selects the file with its ancestors opened in the
+    /// tree, so the row is where the search left it.
+    #[test]
+    fn quick_open_searches_the_working_tree_and_opens_the_hit() {
+        let (root, changed) = workspace("quick-open");
+        let root_for_app = root.clone();
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let (mut cx0, view, mut vcx) =
+                    app(dispatcher, "quick_open", root_for_app, changed);
+                let cx = &mut cx0;
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        v.open_file_search(window, cx);
+                        let paths = &v.file_search.paths;
+                        assert!(paths.iter().any(|p| p == "src/other.rs"), "tracked");
+                        assert!(paths.iter().any(|p| p == "fresh.txt"), "untracked");
+                    });
+                });
+                // Typed, not assigned: `InputState::set_value` suppresses
+                // the change event, and the point of this test is that the
+                // bar re-ranks on every keystroke.
+                vcx.simulate_input("app.rs");
+                cx.run_until_parked();
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        assert_eq!(
+                            v.file_search.current_path(),
+                            Some("src/app.rs"),
+                            "typing re-ranks against the working tree"
+                        );
+                        v.commit_file_search(window, cx);
+                        assert_eq!(v.current_diff_path(), Some("src/app.rs"));
+                        assert!(
+                            v.diff_tree_open.contains("src"),
+                            "the hit's ancestors open in the tree"
+                        );
+                        assert!(!v.file_search.open, "the bar closes on the pick");
+                    });
+                });
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Switching files and coming back lands where the file was left, and
+    /// each mode keeps its own place: the hunks' row and the whole file's
+    /// are different addresses.
+    #[test]
+    fn a_file_comes_back_where_it_was_left() {
+        let (root, changed) = workspace("positions");
+        let root_for_closure = root.clone();
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let root = root_for_closure;
+                let (mut cx0, view, mut vcx) =
+                    app(dispatcher, "positions", root.clone(), changed.clone());
+                let cx = &mut cx0;
+                let top = point(px(0.), px(0.));
+                let deep = point(px(0.), px(-140.));
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        let _ = window;
+                        v.select_path("src/app.rs".to_owned());
+                        v.diff_hunks_scroll.set_offset(deep);
+                        // Another file starts where a file starts…
+                        v.select_path("src/other.rs".to_owned());
+                        assert_eq!(v.diff_hunks_scroll.offset(), top);
+                        // …and the one left behind comes back to its own
+                        // row — but only once its *own* rows are up. File
+                        // mode shows the poll's hunks until the file's read
+                        // lands, and an offset applied to those few rows is
+                        // clamped away for good, so the restore waits.
+                        v.select_path("src/app.rs".to_owned());
+                        assert_eq!(
+                            v.pending_scroll.as_ref().map(|(path, _, offset)| (path.as_str(), *offset)),
+                            Some(("src/app.rs", deep)),
+                            "the position waits for the file's rows"
+                        );
+                        assert_eq!(v.diff_hunks_scroll.offset(), top, "nothing applied yet");
+                        assert_eq!(
+                            v.diff_hunks_scroll.offset(),
+                            top,
+                            "the fallback's rows are not where a position lands"
+                        );
+
+                        // The read lands: the position comes with it.
+                        let app_view = crate::diff::view::FileView::build(
+                            &root,
+                            "src/app.rs",
+                            changed.iter().find(|f| f.path == "src/app.rs"),
+                        );
+                        v.file_view = Some(std::rc::Rc::new(app_view));
+                        v.file_view_key = Some(("src/app.rs".to_owned(), v.diff_gen));
+                        v.apply_pending_scroll();
+                        assert_eq!(v.diff_hunks_scroll.offset(), deep, "the rows arrive");
+                        assert!(v.pending_scroll.is_none(), "and the wait is over");
+
+                        // The mode is part of the address: the whole file
+                        // has its own place, and going back to the hunks
+                        // returns to theirs.
+                        v.set_view_mode(ViewMode::Diff, cx);
+                        assert_eq!(v.diff_hunks_scroll.offset(), top);
+                        v.diff_hunks_scroll.set_offset(point(px(0.), px(-60.)));
+                        v.set_view_mode(ViewMode::File, cx);
+                        assert_eq!(v.diff_hunks_scroll.offset(), deep);
+                        v.set_view_mode(ViewMode::Diff, cx);
+                        assert_eq!(v.diff_hunks_scroll.offset(), point(px(0.), px(-60.)));
+                    });
+                });
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

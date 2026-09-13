@@ -46,6 +46,9 @@ gpui_kit::actions!(
         DiffSearch,
         DiffSearchNext,
         DiffSearchPrev,
+        FileSearch,
+        FileSearchNext,
+        FileSearchPrev,
         ToggleViewMode,
         TermSearch,
         TermSearchNext,
@@ -184,6 +187,17 @@ pub struct AppView {
     /// cycle position. Lives in [`diff`]'s module; always constructed,
     /// the `open` flag folds its visibility.
     pub(crate) diff_search: diff::DiffSearch,
+    /// The file tree's quick open (⌘P): the sidebar layer's search bar,
+    /// the working tree's path list and the ranked hits.
+    pub(crate) file_search: diff::FileSearch,
+    /// Where each file was last scrolled to, keyed by working tree,
+    /// path and view mode. Switching files and coming back lands where
+    /// the file was left; in memory only — a relaunch starts at the top.
+    pub(crate) file_positions:
+        std::collections::HashMap<(std::path::PathBuf, String, ViewMode), Point<Pixels>>,
+    /// A remembered position whose rows are not on screen yet (see
+    /// `AppView::restore_scroll`): `(path, mode, offset)`.
+    pub(crate) pending_scroll: Option<(String, ViewMode, Point<Pixels>)>,
     /// Guards against stale poll results overwriting newer ones.
     diff_seq: u64,
     /// Which surface the right pane shows (⌘⇧M toggles it); per session,
@@ -298,6 +312,15 @@ pub(crate) const FIND_ACCEL: &str = if cfg!(target_os = "macos") {
     "ctrl-shift-f"
 };
 
+/// The quick open's chord: ⌘P on macOS, and on Linux another chord the
+/// shell gives up (⌃P is readline's previous-history) — the same trade
+/// ⌃R already makes, for a search over every file in the project.
+pub(crate) const FILE_SEARCH_ACCEL: &str = if cfg!(target_os = "macos") {
+    "cmd-p"
+} else {
+    "ctrl-p"
+};
+
 /// Shortcut label for user-facing text (`⌘N` on macOS, `Ctrl+N` elsewhere).
 pub(crate) fn accel_hint(key: &str) -> String {
     if cfg!(target_os = "macos") {
@@ -329,6 +352,8 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-n", NewSession, None),
         KeyBinding::new("secondary-o", AddProject, None),
         KeyBinding::new("secondary-t", ToggleDiffTree, None),
+        // Quick open: the sidebar's file search.
+        KeyBinding::new(FILE_SEARCH_ACCEL, FileSearch, None),
         KeyBinding::new("secondary-b", ToggleSessions, None),
         KeyBinding::new("secondary-r", ToggleDiff, None),
         KeyBinding::new("secondary-w", CloseSession, None),
@@ -388,6 +413,11 @@ fn key_bindings() -> Vec<KeyBinding> {
         // `ui::diff_panel`.
         KeyBinding::new("secondary-g", DiffSearchNext, Some("DiffSearch")),
         KeyBinding::new("secondary-shift-g", DiffSearchPrev, Some("DiffSearch")),
+        // The quick open's: while its input holds focus the "FileSearch"
+        // context is on the dispatch path, and the plain arrows belong
+        // to the input's own caret. Enter/Escape come from the input.
+        KeyBinding::new("secondary-g", FileSearchNext, Some("FileSearch")),
+        KeyBinding::new("secondary-shift-g", FileSearchPrev, Some("FileSearch")),
         // The terminal bar's match-cycling: its "TerminalSearch"
         // context (set on the bar in `ui::terminal`) is deeper
         // than the surface's "Terminal", so these win while its
@@ -403,7 +433,7 @@ fn key_bindings() -> Vec<KeyBinding> {
 
 #[cfg(test)]
 mod tests {
-    use super::{COPY_ACCEL, FIND_ACCEL, PASTE_ACCEL, key_bindings};
+    use super::{COPY_ACCEL, FILE_SEARCH_ACCEL, FIND_ACCEL, PASTE_ACCEL, key_bindings};
     use gpui_kit::{KeyContext, Keymap, Keystroke};
 
     /// The fallback chain gpui would dispatch for `keystroke`, in
@@ -463,6 +493,27 @@ mod tests {
             vec!["input::Copy", "ddu::TermCopy"]
         );
         assert_eq!(chain(COPY_ACCEL, &["Root"]), vec!["input::Copy"]);
+    }
+
+    /// The quick open is the app's chord everywhere — including in the
+    /// terminal, where the shell would otherwise read ⌃P as "previous
+    /// history". It is a deliberate trade, like ⌃R before it: the test
+    /// states it so a later binding cannot take the chord back by
+    /// accident.
+    #[test]
+    fn the_quick_open_owns_its_chord_in_every_context() {
+        for stack in [
+            vec!["Root"],
+            vec!["Root", "Terminal"],
+            vec!["Root", "Terminal", "TerminalSearch"],
+            vec!["Root", "Input"],
+        ] {
+            assert_eq!(
+                winner(FILE_SEARCH_ACCEL, &stack),
+                "ddu::FileSearch",
+                "{FILE_SEARCH_ACCEL} with {stack:?}"
+            );
+        }
     }
 
     /// The terminal shares the keyboard with the shell it runs, so the
@@ -569,6 +620,9 @@ impl AppView {
             tree_seeded: false,
             diff_error: None,
             diff_search: diff::DiffSearch::new(window, cx),
+            file_search: diff::FileSearch::new(window, cx),
+            file_positions: std::collections::HashMap::new(),
+            pending_scroll: None,
             diff_seq: 0,
             view_mode: ViewMode::default(),
             file_view: None,
@@ -660,6 +714,23 @@ impl AppView {
             },
         )
         .detach();
+        // Quick-open keystrokes: re-rank the hits against the working
+        // tree. Same contract as the find bar's subscription — the
+        // input emits on every edit, and AppView is not borrowed while
+        // it does.
+        {
+            let input = this.file_search.input.clone();
+            cx.subscribe_in(
+                &input,
+                window,
+                |this, _, event: &input::InputEvent, _, cx| {
+                    if matches!(event, input::InputEvent::Change) {
+                        this.refresh_file_search(cx);
+                    }
+                },
+            )
+            .detach();
+        }
         // Find-bar keystrokes: recompute matches against the open
         // file. `InputEvent::Change` fires on every edit, so the
         // counter/highlight track typing live; AppView isn't borrowed
@@ -1004,9 +1075,13 @@ impl Render for AppView {
                 let six = this.current_session;
                 this.request_close_session(p, six, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleSessions, _, cx| this.toggle_sessions(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSessions, window, cx| {
+                this.toggle_sessions(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
-            .on_action(cx.listener(|this, _: &ToggleDiffTree, _, cx| this.toggle_diff_tree(cx)))
+            .on_action(cx.listener(|this, _: &ToggleDiffTree, window, cx| {
+                this.toggle_diff_tree(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleViewMode, _, cx| this.toggle_view_mode(cx)))
             // The diff pane's find bar. ⌘G/⌘⇧G resolve only while the
             // bar's input holds focus (the "DiffSearch" key context);
@@ -1020,6 +1095,18 @@ impl Render for AppView {
             }))
             .on_action(cx.listener(|this, _: &DiffSearchPrev, _, cx| {
                 this.diff_search_step(true, cx);
+            }))
+            // The file tree's quick open. ⌘G/⌘⇧G resolve only while its
+            // input holds focus ("FileSearch"); the handlers live here so
+            // they keep working if focus drifts mid-search.
+            .on_action(cx.listener(|this, _: &FileSearch, window, cx| {
+                this.open_file_search(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FileSearchNext, _, cx| {
+                this.file_search_step(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FileSearchPrev, _, cx| {
+                this.file_search_step(true, cx);
             }))
             // ⌘Q: confirm dialog, then graceful shutdown — live agents
             // get Ctrl-C, their resume ids land in state.json, then the
