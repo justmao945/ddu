@@ -1,14 +1,47 @@
-//! git2 queries: HEAD→workdir diff with per-file stats and hunks.
+//! git2 queries: HEAD→workdir diff with per-file stats and hunks, plus
+//! the working-tree listing the sidebar's file tree is built from.
 
 use std::cell::RefCell;
 use std::path::Path;
 
-use super::{DiffFile, DiffHunk, DiffLine, GitDiff, MAX_LINES_PER_FILE};
+use super::{tree::FileTree, DiffFile, DiffHunk, DiffLine, GitDiff, Snapshot, MAX_LINES_PER_FILE};
 use git2::{DiffDelta, Repository};
 
-/// Diff the project against HEAD (staged + unstaged + untracked).
-pub fn head_diff(path: &Path, limits: &std::collections::HashMap<String, usize>) -> anyhow::Result<GitDiff> {
+/// One poll: the project's diff against HEAD (staged + unstaged +
+/// untracked) **and** the full working-tree listing, from one `git2`
+/// pass over the same repository — no second workdir walk, no
+/// subprocess (`docs/FILE_TREE.md` §4.1).
+pub fn snapshot(
+    path: &Path,
+    limits: &std::collections::HashMap<String, usize>,
+) -> anyhow::Result<Snapshot> {
     let repo = Repository::discover(path)?;
+    let diff = head_diff_in(&repo, limits)?;
+    let tree = worktree_tree(&repo, &diff.files)?;
+    Ok(Snapshot { diff, tree })
+}
+
+/// The tracked files, as git stores them: the index, minus submodule
+/// gitlinks (not files — v1 lists them nowhere). The index is sorted, and
+/// so is [`tree::build`]'s other input, which is what lets the two merge
+/// without a sort of every path in the repository.
+fn worktree_tree(repo: &Repository, diff: &[DiffFile]) -> anyhow::Result<FileTree> {
+    let index = repo.index()?;
+    let mut tracked = Vec::with_capacity(index.len());
+    for entry in index.iter() {
+        if entry.mode == 0o160000 {
+            continue;
+        }
+        tracked.push(String::from_utf8_lossy(&entry.path).into_owned());
+    }
+    Ok(super::tree::build(tracked, diff))
+}
+
+/// Diff the project against HEAD (staged + unstaged + untracked).
+fn head_diff_in(
+    repo: &Repository,
+    limits: &std::collections::HashMap<String, usize>,
+) -> anyhow::Result<GitDiff> {
     let branch = repo
         .head()
         .ok()
@@ -122,7 +155,7 @@ mod tests {
         std::fs::write(&file, "line one\nline two changed\n").unwrap();
         std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
 
-        let diff = head_diff(&dir, &Default::default()).expect("head_diff");
+        let diff = snapshot(&dir, &Default::default()).expect("snapshot").diff;
         assert_eq!(diff.branch.as_deref(), repo.head().unwrap().shorthand());
 
         let hello = diff
@@ -155,14 +188,20 @@ mod tests {
 
         let nested = dir.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
-        assert_eq!(head_diff(&nested, &Default::default()).unwrap(), diff);
+        // From a nested directory the snapshot is identical: discovery
+        // walks up to the same repository root.
+        assert_eq!(
+            snapshot(&nested, &Default::default()).unwrap().diff,
+            diff
+        );
         std::fs::write(
             dir.join("large.txt"),
             "line\n".repeat(MAX_LINES_PER_FILE + 10),
         )
         .unwrap();
-        let large = head_diff(&dir, &Default::default())
+        let large = snapshot(&dir, &Default::default())
             .unwrap()
+            .diff
             .files
             .into_iter()
             .find(|f| f.path == "large.txt")
@@ -178,14 +217,25 @@ mod tests {
         // full once the pane's scroll-driven expansion kicks in.
         let mut limits = std::collections::HashMap::new();
         limits.insert("large.txt".to_owned(), MAX_LINES_PER_FILE * 4);
-        let large = head_diff(&dir, &limits)
+        let large = snapshot(&dir, &limits)
             .unwrap()
+            .diff
             .files
             .into_iter()
             .find(|f| f.path == "large.txt")
             .unwrap();
         assert!(!large.truncated);
         assert_eq!(large.lines_total, MAX_LINES_PER_FILE + 10);
+        // The same pass lists the working tree: tracked, untracked and
+        // the file deleted in the workdir, with the diff's stats folded
+        // in.
+        let snap = snapshot(&dir, &Default::default()).unwrap();
+        assert!(snap.tree.get("hello.txt").expect("hello.txt").changed);
+        assert!(snap.tree.get("new.txt").expect("new.txt").changed);
+        assert!(snap.tree.get("large.txt").expect("large.txt").changed);
+        assert!(!snap.tree.get("README.md").is_some());
+        assert_eq!(snap.tree.changed(), snap.diff.files.len());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

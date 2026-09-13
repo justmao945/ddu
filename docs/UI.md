@@ -28,6 +28,22 @@ list that fits). That host must also be a flex container (`v_flex`), or the
 `flex_1` scroller inside never gets a bounded height and long content is
 clipped instead of scrolling.
 
+## Splitter widths
+
+Panel widths come from two sources that must not fight: the drag (live, several
+updates a second) and the persisted record (which catches up a tick later,
+through the `ResizablePanelEvent` subscription). Anything that re-asserts a
+recorded width therefore has to be keyed to something a drag cannot produce —
+here, **the container size**: the drift it heals (a resize that landed while
+every slot was still pinned) always changes the container, and a drag never
+does. Correcting on every render instead reverts whatever the pointer just did,
+which reads as a divider that refuses to be dragged.
+
+Related: a render is not a repaint. `AppView::apply_snapshot` returns whether
+the poll actually moved anything, and the 3 s tick only notifies when it did —
+an idle tick that repaints anyway is a visible flash whenever a pane's content
+is rebuilt from a cache keyed on the changed state.
+
 ## Virtualized lists
 
 Both long lists (the terminal's diff pane rows and the sidebar's file tree) are

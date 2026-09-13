@@ -582,7 +582,8 @@ mod tests {
                 closed_dirs: vec![],
                 tree_height: None,
                 view_mode: None,
-            }
+                tree_filter: None,
+}
         }
 
         /// Build a window whose only project holds `sessions` finished

@@ -273,6 +273,10 @@ pub struct SavedSession {
     /// / `preview`); absent in files written before the view panel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_mode: Option<String>,
+    /// Which files the sidebar's tree lists: `all` (the default) or
+    /// `changed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_filter: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -616,7 +620,8 @@ mod tests {
                 closed_dirs: vec![],
                 tree_height: Some(260.),
                 view_mode: None,
-            }],
+                tree_filter: None,
+}],
         }]);
         let saved = serde_json::to_string(&state).unwrap();
         let back: State = serde_json::from_str(&saved).unwrap();

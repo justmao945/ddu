@@ -142,6 +142,8 @@ pub struct AgentSession {
     /// The row's persisted right-pane mode (`diff` / `file` / `preview`),
     /// written on save and adopted on switch.
     pub view_mode: Option<String>,
+    /// The row's persisted file-tree filter (`all` / `changed`).
+    pub tree_filter: Option<String>,
 }
 
 impl AgentSession {

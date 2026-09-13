@@ -6,6 +6,7 @@
 //! untracked). Per-session worktree scoping comes later.
 
 pub mod git;
+pub mod tree;
 pub mod view;
 
 /// Hard cap on search matches per file; keeps the highlight set and the
@@ -84,10 +85,13 @@ pub struct GitDiff {
     pub files: Vec<DiffFile>,
 }
 
-impl GitDiff {
-    pub fn is_empty(&self) -> bool {
-        self.files.is_empty()
-    }
+/// One poll's view of the project: the diff and the **full** working-tree
+/// listing, read together so the tree's badges and the pane's rows can
+/// never disagree about which files changed (`docs/FILE_TREE.md` §4.1).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Snapshot {
+    pub diff: GitDiff,
+    pub tree: tree::FileTree,
 }
 
 /// One row of a pane row stream.

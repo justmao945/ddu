@@ -106,6 +106,7 @@ impl AppView {
                 diff_closed: Default::default(),
                 diff_tree_height: None,
                 view_mode: None,
+                tree_filter: None,
             });
             self.current_session = project.sessions.len() - 1;
         }
@@ -132,6 +133,10 @@ impl AppView {
         // The splitter under the outgoing session keeps its live
         // height — read it before borrowing the session slot mutably.
         let live_h = self.live_tree_height(cx);
+        // Read before the session slot is borrowed mutably.
+        let selected_path = self.current_diff_path().map(str::to_owned);
+        let tree_filter = Some(self.tree_filter.as_str().to_owned());
+        let has_snapshot = self.snapshot.is_some();
         if let Some((fp, fs)) = from {
             if let Some(s) = self
                 .projects
@@ -144,23 +149,19 @@ impl AppView {
                 // the stored path with `None`.
                 // As in `persist`: never overwrite the stored path
                 // with `None` before the diff has loaded.
-                let selected = self
-                    .diff
-                    .as_ref()
-                    .and_then(|d| self.diff_file.and_then(|ix| d.files.get(ix)))
-                    .map(|f| f.path.to_string());
-                if selected.is_some() || self.diff.is_some() {
-                    s.diff_selected = selected;
+                if selected_path.is_some() || has_snapshot {
+                    s.diff_selected = selected_path;
                 }
                 s.diff_closed = self.diff_tree_closed.clone();
                 s.view_mode = Some(self.view_mode.as_str().to_owned());
+                s.tree_filter = tree_filter;
                 // Hidden layer reports no live height — keep the stored one.
                 if let Some(h) = live_h {
                     s.diff_tree_height = Some(h);
                 }
             }
         }
-        let (seed, closed, height, mode) = {
+        let (seed, closed, height, mode, filter) = {
             let incoming = self.projects.get(to.0).and_then(|p| p.sessions.get(to.1));
             (
                 incoming.and_then(|s| s.diff_selected.clone()),
@@ -169,8 +170,13 @@ impl AppView {
                 incoming
                     .and_then(|s| s.view_mode.as_deref())
                     .and_then(ViewMode::parse),
+                incoming
+                    .and_then(|s| s.tree_filter.as_deref())
+                    .and_then(crate::ui::diff_tree::TreeFilter::parse),
             )
         };
+        self.tree_filter = filter.unwrap_or_default();
+        self.tree_seeded = false;
         self.diff_seed_path = seed;
         // The adopted height must beat a pinned drag size on the live
         // splitter (a bare seed only wins while the panel is unpinned),
@@ -850,7 +856,8 @@ mod tests {
             closed_dirs: vec![],
             tree_height: None,
             view_mode: None,
-        };
+            tree_filter: None,
+};
         let finished_row = SavedSession {
             kind: "omp".into(),
             title: "omp".into(),
@@ -860,7 +867,8 @@ mod tests {
             closed_dirs: vec![],
             tree_height: None,
             view_mode: None,
-        };
+            tree_filter: None,
+};
         gpui::run_test_once(
             0,
             Box::new(move |dispatcher| {

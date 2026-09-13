@@ -16,12 +16,12 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::diff::{GitDiff, git};
+use crate::diff::Snapshot;
 use crate::session::{AgentStatus, Project, initial_projects};
 use crate::terminal::{TermEvent, TermSession};
 use crate::ui;
 use crate::ui::diff_panel::ViewMode;
-use crate::ui::diff_tree::{tree_max_h, tree_min_h};
+use crate::ui::diff_tree::{TreeFilter, tree_max_h, tree_min_h};
 
 // Global keyboard actions: new session, dock toggles, close session.
 gpui_kit::actions!(
@@ -46,6 +46,7 @@ gpui_kit::actions!(
         DiffSearchNext,
         DiffSearchPrev,
         CycleViewMode,
+        ToggleTreeFilter,
         TermSearch,
         TermSearchNext,
         TermSearchPrev,
@@ -60,6 +61,14 @@ gpui_kit::actions!(
         SelectSession9
     ]
 );
+
+/// The pane's selection (see [`AppView::selection`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Selection {
+    pub path: String,
+    /// Index into `snapshot.diff.files` — `None` for an unchanged file.
+    pub changed: Option<usize>,
+}
 
 /// Seconds between working-tree diff polls.
 const DIFF_POLL_SECS: u64 = 3;
@@ -118,17 +127,26 @@ pub struct AppView {
     /// toggle-open instead of snapping back to the default.
     pub(crate) last_sidebar_size: Option<Pixels>,
     pub(crate) last_diff_size: Option<Pixels>,
+    /// The container size the shell / panes splitter was last healed
+    /// for: the drift this corrects comes from a *container* resize that
+    /// landed while every slot was still pinned, so one heal per
+    /// container size is exactly right — and it keeps the correction out
+    /// of a drag's way, which never changes the container.
+    healed_shell_at: Pixels,
+    healed_panes_at: Pixels,
     /// Resized events the render-time width re-assertion emits on
     /// purpose: the subscription must not record those as user drags
     /// (nothing changed semantically, and persisting a default would
     /// pin it against later text-scale changes). Counted, since one
     /// render pass can correct both splitters.
     pub(crate) suppress_resize_records: u8,
+    /// The pane's selection: a path in the working tree — clean files are
+    /// selectable, the tree lists them — plus the index of its diff
+    /// record when the poll found one, so the pane never searches a
+    /// multi-thousand-file diff per frame.
+    pub(crate) selection: Option<Selection>,
     /// Session row currently under the mouse: reveals its delete button.
     pub(crate) hovered_session: Option<(usize, usize)>,
-    /// The tree-selected file driving the right pane; `None` shows the
-    /// pane's empty state. Clicking a file sets this and opens the pane.
-    pub(crate) diff_file: Option<usize>,
     /// Left-button drag in progress (window-level). The
     /// `TextSelectionLayer` picks up mouse events through
     /// `Window::on_mouse_event`, whose listeners exist only for one
@@ -145,7 +163,18 @@ pub struct AppView {
     /// render time); refreshed on every session switch.
     pub(crate) diff_tree_height_seed: Option<Pixels>,
     pub(crate) session_seq: usize,
-    pub(crate) diff: Option<GitDiff>,
+    /// The last applied poll: the diff **and** the full working-tree
+    /// listing, always written together (one poll, one snapshot — the
+    /// tree and the pane can never disagree about what changed).
+    pub(crate) snapshot: Option<Snapshot>,
+    /// Which files the sidebar's tree lists: everything in the working
+    /// tree, or only the changes (per session, persisted).
+    pub(crate) tree_filter: TreeFilter,
+    /// Whether the clean directories have been folded away for the
+    /// current session yet — the default-collapse rule runs once per
+    /// session, on the first snapshot that carries a tree, and never
+    /// overrides a directory the user has touched since.
+    pub(crate) tree_seeded: bool,
     pub(crate) diff_error: Option<String>,
     /// The right pane's find bar (⌘F): input entity, match list and
     /// cycle position. Lives in [`diff`]'s module; always constructed,
@@ -261,6 +290,14 @@ pub(crate) const FIND_ACCEL: &str = if cfg!(target_os = "macos") {
     "ctrl-shift-f"
 };
 
+/// The file tree's All/Changed filter. On Linux `⌃⇧F` is the terminal's
+/// find, so the filter takes `⌃⇧A` there.
+pub(crate) const TREE_FILTER_ACCEL: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-f"
+} else {
+    "ctrl-shift-a"
+};
+
 /// Shortcut label for user-facing text (`⌘N` on macOS, `Ctrl+N` elsewhere).
 pub(crate) fn accel_hint(key: &str) -> String {
     if cfg!(target_os = "macos") {
@@ -298,6 +335,9 @@ fn key_bindings() -> Vec<KeyBinding> {
         // Cycle the right pane's surface: diff hunks → whole file →
         // rendered Markdown (Markdown files only).
         KeyBinding::new("secondary-shift-m", CycleViewMode, None),
+        // The file tree's All/Changed filter (the strip's two toggles
+        // drive the same action).
+        KeyBinding::new(TREE_FILTER_ACCEL, ToggleTreeFilter, None),
         // Secondary +/− (with their shifted variants) zoom the
         // terminal font size; persisted like the settings field.
         KeyBinding::new("secondary-=", FontLarger, None),
@@ -519,13 +559,17 @@ impl AppView {
             menu_project: None,
             last_sidebar_size: None,
             last_diff_size: None,
-            diff_file: None,
+            selection: None,
             selection_active: false,
             diff_seed_path: None,
             diff_tree_height_seed: None,
             session_seq: 0,
+            healed_shell_at: px(0.),
+            healed_panes_at: px(0.),
             suppress_resize_records: 0,
-            diff: None,
+            snapshot: None,
+            tree_filter: TreeFilter::default(),
+            tree_seeded: false,
             diff_error: None,
             diff_search: diff::DiffSearch::new(window, cx),
             diff_seq: 0,
@@ -727,6 +771,64 @@ impl AppView {
         this
     }
 
+    /// Re-assert the recorded sidebar / diff widths after the *window*
+    /// changed size: a resize that lands while every slot was still
+    /// pinned (startup's burst, a monitor switch) leaves the panels at
+    /// proportions nobody asked for.
+    ///
+    /// This must **not** run from `render`. A drag changes a panel's size
+    /// several times a second while the persisted record only catches up a
+    /// tick later, so a render in between (a stream frame, the 1 s clock,
+    /// the poll) would "correct" a live drag back to the width it started
+    /// at — the divider that sometimes refuses to be dragged. Window
+    /// bounds change for reasons a drag cannot, which is exactly the
+    /// trigger this healing wants.
+    fn heal_splitter_widths(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A drag redistributes within one container: it never changes
+        // this, which is what keeps the healing from fighting one.
+        let shell_container = self.shell_state.read(cx).container_size();
+        if self.show_sessions && shell_container != self.healed_shell_at {
+            self.healed_shell_at = shell_container;
+            let sidebar_w = self.last_sidebar_w();
+            let panes_min =
+                center_min() + if self.show_diff { diff_min() } else { 0. } + ui::scaled(8.);
+            let fits =
+                sidebar_w + px(panes_min + 12.) <= self.shell_state.read(cx).container_size();
+            if fits
+                && self
+                    .shell_state
+                    .read(cx)
+                    .sizes()
+                    .first()
+                    .is_some_and(|cur| (*cur - sidebar_w).abs() > px(1.))
+            {
+                self.suppress_resize_records += 1;
+                self.shell_state.update(cx, |state, cx| {
+                    state.resize_panel(0, sidebar_w, window, cx);
+                });
+            }
+        }
+        let panes_container = self.panes_state.read(cx).container_size();
+        if self.show_diff && panes_container != self.healed_panes_at {
+            self.healed_panes_at = panes_container;
+            let diff_w = self.last_diff_w();
+            let fits = diff_w + px(center_min() + 12.) <= panes_container;
+            if fits
+                && self
+                    .panes_state
+                    .read(cx)
+                    .sizes()
+                    .last()
+                    .is_some_and(|cur| (*cur - diff_w).abs() > px(1.))
+            {
+                self.suppress_resize_records += 1;
+                self.panes_state.update(cx, |state, cx| {
+                    state.resize_panel(1, diff_w, window, cx);
+                });
+            }
+        }
+    }
+
     /// `None` once the user removed the last project (empty workspace).
     pub(crate) fn current_project(&self) -> Option<&Project> {
         self.projects.get(self.current_project)
@@ -914,6 +1016,9 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleDiffTree, _, cx| this.toggle_diff_tree(cx)))
             .on_action(cx.listener(|this, _: &CycleViewMode, _, cx| this.cycle_view_mode(cx)))
+            .on_action(cx.listener(|this, _: &ToggleTreeFilter, _, cx| {
+                this.toggle_tree_filter(cx)
+            }))
             // The diff pane's find bar. ⌘G/⌘⇧G resolve only while the
             // bar's input holds focus (the "DiffSearch" key context);
             // the handlers live here, not on the bar, so they keep
@@ -977,48 +1082,12 @@ impl Render for AppView {
                         state.reset_panel(0, cx);
                     }
                 });
-                // Heal drift baked in while every slot was still
-                // pinned (startup's resize burst): re-assert the
-                // recorded widths. Skipped when the window is too
-                // narrow to honor them — the clamped layout is then
-                // correct as-is, and retrying would emit a Resized
-                // event every frame.
-                if self.show_sessions {
-                    let sidebar_w = self.last_sidebar_w();
-                    let fits =
-                        sidebar_w + px(panes_min + 12.) <= self.shell_state.read(cx).container_size();
-                    if fits
-                        && self
-                            .shell_state
-                            .read(cx)
-                            .sizes()
-                            .first()
-                            .is_some_and(|cur| (*cur - sidebar_w).abs() > px(1.))
-                    {
-                        self.suppress_resize_records += 1;
-                        self.shell_state.update(cx, |state, cx| {
-                            state.resize_panel(0, sidebar_w, window, cx);
-                        });
-                    }
-                }
-                if self.show_diff {
-                    let diff_w = self.last_diff_w();
-                    let fits =
-                        diff_w + px(center_min() + 12.) <= self.panes_state.read(cx).container_size();
-                    if fits
-                        && self
-                            .panes_state
-                            .read(cx)
-                            .sizes()
-                            .last()
-                            .is_some_and(|cur| (*cur - diff_w).abs() > px(1.))
-                    {
-                        self.suppress_resize_records += 1;
-                        self.panes_state.update(cx, |state, cx| {
-                            state.resize_panel(1, diff_w, window, cx);
-                        });
-                    }
-                }
+                // Heal drift baked in while every slot was still pinned
+                // (the launch resize burst): re-assert the recorded
+                // widths, once per container size. A drag cannot trigger
+                // it — a drag leaves the container alone — which is what
+                // keeps a mid-drag frame from yanking the divider back.
+                self.heal_splitter_widths(window, cx);
                 let mut shell = h_resizable("shell").with_state(&self.shell_state);
                 if self.show_sessions {
                     shell = shell.child(
@@ -1435,26 +1504,223 @@ mod panel_cache_tests {
         );
     }
 
-    /// The other half: a state change that a panel renders must reach
-    /// it, or the panel keeps showing a stale frame (the cache's price).
+    /// Selecting a row pins the path, and the diff record only when the
+    /// poll found one: the tree lists clean files, so a selection without
+    /// a diff is normal (the pane shows the file itself).
     #[test]
-    fn app_state_change_reaches_every_panel() {
+    fn select_path_pins_clean_and_changed_files_alike() {
+        use crate::diff::{tree::build as build_tree, DiffFile, GitDiff, Snapshot};
         gpui::run_test_once(
             0,
             Box::new(|dispatcher| {
-                let (mut cx0, view, counts) =
-                    app_with_panel_counters(dispatcher, 1, "app_state_change_reaches_panels");
+                let mut cx0 = TestAppContext::build(dispatcher, Some("select_path_pins"));
                 let cx = &mut cx0;
-                // A real mutation path (here: collapsing the sidebar),
-                // not a bare notify_panels call.
-                cx.update(|cx| view.update(cx, |v, cx| v.toggle_sessions(cx)));
-                cx.run_until_parked();
-                assert_eq!(
-                    counts.clone().map(|c| c.get()),
-                    [1, 1, 1],
-                    "an app-level notify reaches all three panels"
-                );
+                cx.update(gpui_kit::init);
+                cx.update(|cx| {
+                    cx.set_global(Config::default());
+                    cx.set_global(LoadWarnings(vec![]));
+                    cx.set_global(State::default());
+                });
+                let (view, vcx) = cx.add_window_view(|window, cx| AppView::new(window, cx));
+                vcx.update(|_, cx| {
+                    view.update(cx, |v, cx| {
+                        let files = vec![DiffFile {
+                            path: "changed.txt".into(),
+                            added: 2,
+                            removed: 1,
+                            ..Default::default()
+                        }];
+                        let tree = build_tree(
+                            vec!["changed.txt".to_owned(), "clean.txt".to_owned()],
+                            &files,
+                        );
+                        v.snapshot = Some(Snapshot {
+                            diff: GitDiff {
+                                branch: None,
+                                files,
+                            },
+                            tree,
+                        });
+                        v.select_path("clean.txt".to_owned());
+                        assert_eq!(v.current_diff_path(), Some("clean.txt"));
+                        assert_eq!(
+                            v.selection.as_ref().and_then(|s| s.changed),
+                            None,
+                            "a clean file has no diff record"
+                        );
+                        assert!(v.selected_diff_file().is_none());
 
+                        v.select_path("changed.txt".to_owned());
+                        assert_eq!(
+                            v.selection.as_ref().and_then(|s| s.changed),
+                            Some(0),
+                            "a changed file pins its index"
+                        );
+                        assert_eq!(
+                            v.selected_diff_file().map(|f| f.added),
+                            Some(2),
+                            "and the index points at the runner"
+                        );
+                        cx.notify();
+                    });
+                });
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    /// An idle poll changes nothing: no repaint, no cache invalidation, no
+    /// tree rebuild. Regression for the periodic flash — every 3 s tick
+    /// used to bump the generation the pane's caches compare against, so
+    /// File/Preview blanked to "Reading the file…" and rebuilt while the
+    /// diff had not moved an inch.
+    #[test]
+    fn an_idle_poll_moves_nothing() {
+        use crate::diff::{tree::build as build_tree, DiffFile, GitDiff, Snapshot};
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 = TestAppContext::build(dispatcher, Some("idle_poll_moves_nothing"));
+                let cx = &mut cx0;
+                cx.update(gpui_kit::init);
+                cx.update(|cx| {
+                    cx.set_global(Config::default());
+                    cx.set_global(LoadWarnings(vec![]));
+                    cx.set_global(State::default());
+                });
+                let (view, vcx) = cx.add_window_view(|window, cx| AppView::new(window, cx));
+                vcx.update(|_, cx| {
+                    let snapshot = Snapshot {
+                        diff: GitDiff {
+                            branch: Some("main".into()),
+                            files: vec![DiffFile {
+                                path: "a.txt".into(),
+                                added: 1,
+                                removed: 0,
+                                ..Default::default()
+                            }],
+                        },
+                        tree: build_tree(vec!["a.txt".to_owned()], &[]),
+                    };
+                    let first = view.update(cx, |v, cx| {
+                        v.apply_snapshot(Ok(snapshot.clone()), cx)
+                    });
+                    let generation = view.read(cx).diff_gen;
+                    assert!(first, "the first snapshot is a change");
+                    assert_eq!(view.read(cx).current_diff_path(), None, "no click, no selection");
+
+                    // The same poll again: not a change.
+                    let second = view.update(cx, |v, cx| {
+                        v.apply_snapshot(Ok(snapshot.clone()), cx)
+                    });
+                    assert!(!second, "an identical snapshot must move nothing");
+                    assert_eq!(
+                        view.read(cx).diff_gen,
+                        generation,
+                        "no cache invalidation"
+                    );
+
+                    // A real edit does move it.
+                    let mut edited = snapshot.clone();
+                    edited.diff.files[0].added = 2;
+                    let third = view.update(cx, |v, cx| v.apply_snapshot(Ok(edited), cx));
+                    assert!(third, "an edit is a change");
+                    assert_eq!(view.read(cx).diff_gen, generation + 1);
+                });
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    /// Dragging the sidebar's handle with a render landing mid-gesture
+    /// must leave the divider where the pointer put it.
+    ///
+    /// Regression: the recorded width only catches up a tick after the
+    /// drag, and the render path used to "correct" a panel back to that
+    /// record — so any render mid-drag (a stream frame, the clock, the
+    /// poll) yanked the divider back and the splitter looked
+    /// undraggable.
+    #[test]
+    fn a_dragged_splitter_is_not_reverted_by_a_render() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 =
+                    TestAppContext::build(dispatcher, Some("dragged_splitter_survives_render"));
+                let cx = &mut cx0;
+                cx.update(gpui_kit::init);
+                cx.update(|cx| {
+                    cx.set_app_identity("dev.just.ddu", "Day Day Up");
+                    cx.set_global(Config {
+                        shell: ShellConfig {
+                            program: "/bin/cat".into(),
+                        },
+                        ..Default::default()
+                    });
+                    cx.set_global(LoadWarnings(vec![]));
+                    cx.set_global(State {
+                        projects: Some(vec![ProjectConfig {
+                            name: "proj".into(),
+                            path: std::env::temp_dir(),
+                            expanded: true,
+                            sessions: vec![],
+                        }]),
+                        ..Default::default()
+                    });
+                });
+                let (view, vcx) = cx.add_window_view(|window, cx| AppView::new(window, cx));
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, _| v.show_sessions = true);
+                    // Two frames: the splitter states measure their slots
+                    // on the first and honor them on the second.
+                    let _ = window.draw(cx);
+                    let _ = window.draw(cx);
+                });
+                // Grab the divider where it actually is.
+                let boundary = vcx.update(|_, cx| {
+                    let sizes = view.read(cx).shell_state.read(cx).sizes().clone();
+                    sizes[0]
+                });
+                vcx.simulate_mouse_down(
+                    gpui_kit::point(boundary - gpui_kit::px(1.), gpui_kit::px(50.)),
+                    gpui_kit::MouseButton::Left,
+                    gpui_kit::Modifiers::default(),
+                );
+                let dragged = boundary + gpui_kit::px(40.);
+                // Two moves: the first starts the drag (gpui's threshold),
+                // the second is the one that resizes.
+                vcx.simulate_mouse_move(
+                    gpui_kit::point(boundary + gpui_kit::px(10.), gpui_kit::px(50.)),
+                    Some(gpui_kit::MouseButton::Left),
+                    gpui_kit::Modifiers::default(),
+                );
+                vcx.simulate_mouse_move(
+                    gpui_kit::point(dragged, gpui_kit::px(50.)),
+                    Some(gpui_kit::MouseButton::Left),
+                    gpui_kit::Modifiers::default(),
+                );
+                // A render while the button is still down (the executor
+                // is not pumped, so the record has not caught up).
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                let mid = vcx.update(|_, cx| view.read(cx).shell_state.read(cx).sizes()[0]);
+                assert_eq!(mid, dragged, "the drag survives a mid-gesture frame");
+                vcx.simulate_mouse_up(
+                    gpui_kit::point(dragged, gpui_kit::px(50.)),
+                    gpui_kit::MouseButton::Left,
+                    gpui_kit::Modifiers::default(),
+                );
+                let after = vcx.update(|_, cx| view.read(cx).shell_state.read(cx).sizes()[0]);
+                assert_eq!(after, dragged, "and the release leaves it there");
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();
                     cx.quit();

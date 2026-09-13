@@ -6,6 +6,7 @@ use std::time::Duration;
 use gpui_kit::component::input::InputState;
 
 use super::*;
+use crate::diff::git;
 
 /// State behind the diff pane's find bar (⌘F). `open` folds the bar's
 /// whole lifecycle: closed → hidden, matches stay empty.
@@ -39,9 +40,10 @@ impl DiffSearch {
 
 impl AppView {
     pub(super) fn reset_diff(&mut self) {
-        self.diff = None;
+        self.snapshot = None;
         self.diff_error = None;
-        self.diff_file = None;
+        self.selection = None;
+        self.tree_seeded = false;
         self.diff_limits.clear();
         self.file_view = None;
         self.file_view_key = None;
@@ -143,58 +145,80 @@ impl AppView {
         self.reload_diff(cx);
     }
 
-    pub(super) fn apply_diff(&mut self, result: anyhow::Result<GitDiff>, cx: &mut Context<Self>) {
+    /// Apply one poll. Returns whether anything moved — an **idle** poll
+    /// must not repaint: a 3 s tick that re-rendered the pane and rebuilt
+    /// the row caches produced a visible flash over whatever the user was
+    /// reading, for a diff that had not changed at all.
+    pub(super) fn apply_snapshot(
+        &mut self,
+        result: anyhow::Result<crate::diff::Snapshot>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         // The live selection's path: `None` stays `None` (no click =
         // empty pane — the poll never auto-selects a file).
-        let selected = self
-            .diff
-            .as_ref()
-            .and_then(|d| self.diff_file.and_then(|ix| d.files.get(ix)))
-            .map(|f| f.path.clone());
+        let selected = self.selection.as_ref().map(|s| s.path.clone());
         // First paint after a cold start: the persisted selection wins
         // when the path still exists in the working tree.
-        let seed = if self.diff_seed_path.is_some() && self.diff.is_none() {
+        let seed = if self.diff_seed_path.is_some() && self.snapshot.is_none() {
             self.diff_seed_path.clone()
         } else {
             None
         };
         let selected = selected.or(seed);
-        match result {
-            Ok(diff) => {
+        let moved = match result {
+            Ok(snapshot) => {
+                // The selection is a path in the *tree*, so a clean file
+                // stays selected across polls; only a path that left the
+                // working tree clears the pane.
                 let next = selected
                     .as_ref()
-                    .and_then(|path| diff.files.iter().position(|f| &f.path == path));
-                if next.map(|ix| diff.files[ix].path.as_str()) != selected.as_deref() {
+                    .filter(|path| snapshot.tree.get(path).is_some())
+                    .map(|path| crate::app::Selection {
+                        path: path.clone(),
+                        changed: snapshot.diff.files.iter().position(|f| &f.path == path),
+                    });
+                let moved = self.snapshot.as_ref() != Some(&snapshot) || next != self.selection;
+                if next.as_ref().map(|s| s.path.as_str()) != selected.as_deref() {
                     self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
                 }
-                self.diff_file = next;
-                self.diff = Some(diff);
-                self.diff_error = None;
-                // Every applied diff invalidates the whole-file view and
-                // the preview source (they were merged against the
-                // previous snapshot).
-                self.diff_gen += 1;
-                let current = self.current_diff_path().map(str::to_owned);
-                let stale = |key: &Option<(String, u64)>| {
-                    key.as_ref()
-                        .is_some_and(|(p, _)| Some(p.as_str()) != current.as_deref())
-                };
-                if stale(&self.file_view_key) {
-                    self.file_view = None;
-                    self.file_view_key = None;
-                }
-                if self
-                    .preview
-                    .as_ref()
-                    .is_some_and(|b| Some(b.key.0.as_str()) != current.as_deref())
-                {
-                    self.preview = None;
-                }
+                self.selection = next;
+                self.snapshot = Some(snapshot);
+                let had_error = self.diff_error.take().is_some();
+                moved || had_error
             }
             Err(err) => {
-                self.diff = None;
-                self.diff_error = Some(err.to_string());
+                let text = err.to_string();
+                let moved = self.snapshot.take().is_some() || self.diff_error.as_deref() != Some(&text);
+                self.diff_error = Some(text);
+                moved
             }
+        };
+        if !moved {
+            // Nothing changed: leave the caches, the row list and the
+            // frame exactly as they are.
+            self.diff_seed_path = None;
+            return false;
+        }
+        // A newer snapshot invalidates the whole-file view and the
+        // preview source (they were merged against the previous one);
+        // the path check drops a build for a file that is no longer
+        // selected.
+        self.diff_gen += 1;
+        let current = self.current_diff_path().map(str::to_owned);
+        if self
+            .file_view_key
+            .as_ref()
+            .is_some_and(|(p, _)| Some(p.as_str()) != current.as_deref())
+        {
+            self.file_view = None;
+            self.file_view_key = None;
+        }
+        if self
+            .preview
+            .as_ref()
+            .is_some_and(|b| Some(b.key.0.as_str()) != current.as_deref())
+        {
+            self.preview = None;
         }
         self.diff_seed_path = None;
         self.rebuild_tree_index();
@@ -202,23 +226,86 @@ impl AppView {
         // search: keep matches and counter truthful.
         self.refresh_diff_search(cx);
         self.ensure_file_content(cx);
+        true
     }
 
-    /// Rebuild the sidebar tree's row list (diff changed, or a directory
-    /// was toggled). One O(files) pass, off the render path.
+    /// Rebuild the sidebar tree's row list (a new snapshot, a filter
+    /// switch, or a directory toggle). One O(files) pass, off the render
+    /// path; the first snapshot of a session also folds the clean
+    /// directories away (see `seed_clean_dirs`).
     pub(crate) fn rebuild_tree_index(&mut self) {
-        self.tree_index = self
-            .diff
-            .as_ref()
-            .map(|diff| crate::ui::diff_tree::build_index(&diff.files, &self.diff_tree_closed));
+        self.tree_index = self.snapshot.as_ref().map(|snapshot| {
+            if !self.tree_seeded {
+                self.tree_seeded = true;
+                crate::ui::diff_tree::seed_clean_dirs(
+                    &snapshot.tree,
+                    &mut self.diff_tree_closed,
+                );
+            }
+            crate::ui::diff_tree::build_index(
+                &snapshot.tree,
+                self.tree_filter,
+                &self.diff_tree_closed,
+            )
+        });
+    }
+
+    /// The project's diff, if a poll has landed.
+    pub(crate) fn diff(&self) -> Option<&crate::diff::GitDiff> {
+        self.snapshot.as_ref().map(|s| &s.diff)
+    }
+
+    /// The full working-tree listing, if a poll has landed.
+    pub(crate) fn tree(&self) -> Option<&crate::diff::tree::FileTree> {
+        self.snapshot.as_ref().map(|s| &s.tree)
+    }
+
+    /// The selection's diff record, when the selected file has one.
+    pub(crate) fn selected_diff_file(&self) -> Option<&crate::diff::DiffFile> {
+        let changed = self.selection.as_ref()?.changed?;
+        self.diff()?.files.get(changed)
+    }
+
+    /// The rows a mode falls back to when its own view is not ready yet:
+    /// the merged whole-file view when it is cached (a clean file has
+    /// nothing else), otherwise the diff's hunks if the file has any.
+    pub(crate) fn file_rows<'a>(
+        &'a self,
+        file: Option<&'a crate::diff::DiffFile>,
+    ) -> Option<crate::diff::RowStream<'a>> {
+        match (self.cached_file_view(), file) {
+            (Some(crate::diff::view::FileView::Text(view)), _) => {
+                Some(crate::diff::RowStream::view(view))
+            }
+            (_, Some(file)) => Some(crate::diff::RowStream::diff(file)),
+            (_, None) => None,
+        }
     }
 
     /// The selected file's repo-relative path, if one is selected.
     pub(crate) fn current_diff_path(&self) -> Option<&str> {
-        self.diff
-            .as_ref()
-            .and_then(|d| self.diff_file.and_then(|ix| d.files.get(ix)))
-            .map(|f| f.path.as_str())
+        self.selection.as_ref().map(|s| s.path.as_str())
+    }
+
+    /// Select a path (a tree row click): re-pin the diff index, and open
+    /// the pane if it is closed.
+    pub(crate) fn select_path(&mut self, path: String) {
+        let changed = self
+            .diff()
+            .and_then(|d| d.files.iter().position(|f| f.path == path));
+        let same = self.selection.as_ref().is_some_and(|s| s.path == path);
+        if !same {
+            self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
+        }
+        self.selection = Some(crate::app::Selection { path, changed });
+    }
+
+    /// ⌘⇧F / the strip's toggles: All ⇄ Changed.
+    pub(crate) fn toggle_tree_filter(&mut self, cx: &mut Context<Self>) {
+        self.tree_filter = self.tree_filter.next();
+        self.rebuild_tree_index();
+        self.persist(cx);
+        cx.notify();
     }
 
     /// The mode the pane actually renders. Preview is Markdown-only, so
@@ -234,16 +321,17 @@ impl AppView {
     /// Whether a cached build (or in-flight refusal) is still about the
     /// selected file, and still current.
     fn preview_is_current(&self, build: &crate::diff::view::PreviewBuild) -> bool {
-        self.current_diff_path() == Some(build.key.0.as_str()) && build.key.1 == self.diff_gen
+        self.current_diff_path() == Some(build.key.0.as_str()) && build.key.1 <= self.diff_gen
     }
 
-    /// The cached whole-file view for the selected file, while it is
-    /// still the file's (same path) and still current (same diff
-    /// generation).
+    /// The cached whole-file view for the selected file. A view built for
+    /// an *older* generation still renders: its replacement is being built
+    /// off-thread and blanking the pane in the meantime is the flash the
+    /// poll used to cause.
     pub(crate) fn cached_file_view(&self) -> Option<&crate::diff::view::FileView> {
         let path = self.current_diff_path()?;
         let (cached, generation) = self.file_view_key.as_ref()?;
-        (cached == path && *generation == self.diff_gen)
+        (cached == path && *generation <= self.diff_gen)
             .then(|| self.file_view.as_deref())
             .flatten()
     }
@@ -309,15 +397,13 @@ impl AppView {
         let Some(root) = self.current_session_cwd() else {
             return;
         };
-        let Some(file) = self
-            .diff
-            .as_ref()
-            .and_then(|d| self.diff_file.and_then(|ix| d.files.get(ix)))
-            .cloned()
-        else {
+        let Some(path) = self.current_diff_path().map(str::to_owned) else {
             return;
         };
-        let path = file.path.clone();
+        // A clean file has no diff record: the merged view degrades to
+        // its own lines untinted, which is exactly what File mode should
+        // show for a file nobody changed.
+        let file = self.selected_diff_file().cloned();
         let generation = self.diff_gen;
         let key = (path.clone(), generation);
         let want_view =
@@ -335,7 +421,7 @@ impl AppView {
             let built = cx
                 .background_spawn(async move {
                     let view = want_view.then(|| {
-                        crate::diff::view::FileView::build(&job_root, &job_path, Some(&file))
+                        crate::diff::view::FileView::build(&job_root, &job_path, file.as_ref())
                     });
                     let source = want_preview
                         .then(|| crate::diff::view::read_source(&job_root, &job_path));
@@ -372,7 +458,7 @@ impl AppView {
         self.diff_seq += 1;
         let seq = self.diff_seq;
         let Some(path) = self.current_session_cwd() else {
-            self.diff = None;
+            self.snapshot = None;
             self.diff_error = None;
             return;
         };
@@ -380,14 +466,13 @@ impl AppView {
         let this = cx.weak_entity();
         cx.spawn(async move |_, cx| {
             let result = cx
-                .background_spawn(async move { git::head_diff(&path, &limits) })
+                .background_spawn(async move { git::snapshot(&path, &limits) })
                 .await;
             if let Err(e) = &result {
                 eprintln!("[ddu] diff err: {e:#}");
             }
             let _ = this.update(cx, |v, cx| {
-                if v.diff_seq == seq {
-                    v.apply_diff(result, cx);
+                if v.diff_seq == seq && v.apply_snapshot(result, cx) {
                     cx.notify();
                 }
             });
@@ -410,11 +495,10 @@ impl AppView {
                 let Some(path) = path else { continue };
                 let limits = view.read_with(cx, |v, _| v.diff_limits.clone());
                 let result = cx
-                    .background_spawn(async move { git::head_diff(&path, &limits) })
+                    .background_spawn(async move { git::snapshot(&path, &limits) })
                     .await;
                 this.update(cx, |v, cx| {
-                    if v.diff_seq == seq {
-                        v.apply_diff(result, cx);
+                    if v.diff_seq == seq && v.apply_snapshot(result, cx) {
                         cx.notify();
                     }
                 })?;

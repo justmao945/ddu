@@ -80,6 +80,18 @@ editing, and where the long form lives.
 - **Long lists are virtual**: the diff pane and the tree declare row sizes and
   build only the visible slice; their rows come from a prebuilt index or a
   cached view, never from work redone per frame (`docs/UI.md`).
+- **An idle poll is inert**: `apply_snapshot` compares and reports whether
+  anything moved; only then repaint, invalidate the file-view/preview caches
+  (`diff_gen`) or rebuild the tree index. A poll that repaints regardless is a
+  flash every 3 s over content that did not change.
+- **Splitter widths heal per container size**, never per render: the correction
+  exists for a resize that landed while every slot was still pinned, and a drag
+  never changes the container — a per-render correction reverts the drag
+  (`docs/UI.md`, pinned by `a_dragged_splitter_is_not_reverted_by_a_render`).
+- **The tree lists the whole working tree** (`diff/tree.rs`: the index's paths
+  merged with the poll's diff): clean files are listed muted and selectable, so
+  anything that assumed "a row means a changed file" — the selection, the pane's
+  rows, the find bar — goes through `AppView::selection` (a path) instead.
 - **Repaint**: never poll-render — `PumpMsg` events drive it; `subscribe_term`
   is the single subscription point and repaints only the visible session; the
   adaptive `stream_interval` steps must sit above a real frame's paint cost

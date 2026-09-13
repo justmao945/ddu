@@ -1,8 +1,12 @@
-//! The diff file tree: the sidebar's lower layer. Grouped by directory
-//! with rolled-up +/− stats, guide-line indentation, and a per-file
-//! context menu. Selecting a file drives the right pane's hunks view.
+//! The file tree: the sidebar's lower layer. **Every** file in the
+//! working tree, grouped by directory, with the poll's changes carrying
+//! their `+/−` figures and tint while clean files stay listed and
+//! selectable (`docs/FILE_TREE.md` §4.1/§5.1). Two states — `All` and
+//! `Changed` — and a default-collapse rule that folds clean directories
+//! away so a 20k-file repository opens on its changes.
 
 use super::{diff_file_icon, hover_bg, meta_text, panel_header_px, row_px, scaled, selection_bg};
+use gpui_kit::component::button::{Toggle, ToggleVariant, ToggleVariants as _};
 use gpui_kit::component::menu::{PopupMenuItem, *};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
@@ -13,7 +17,7 @@ use crate::app::AppView;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use crate::diff::DiffFile;
+use crate::diff::tree::{DirNode, FileTree};
 
 /// Layer height bounds and default for the sidebar's vertical splitter
 /// (base sizes at factor 1.0 — see `scaled`).
@@ -42,20 +46,21 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         return empty_layer("No active session — select one in the project tree.", cx)
             .into_any_element();
     }
-    let Some(diff) = &this.diff else {
-        // The poll error, or the initial "loading" note.
-        let note = this.diff_error.as_deref().unwrap_or("Loading changes…");
+    // A clean working tree is not an empty tree: the listing is the
+    // point (FILE_TREE.md §1), so the only things that keep the layer
+    // empty are "no poll yet" and "not a repository".
+    let Some(tree) = this.tree() else {
+        let note = this.diff_error.as_deref().unwrap_or("Loading files…");
         return empty_layer(note, cx).into_any_element();
     };
-    if diff.is_empty() {
-        return empty_layer("No changes — working tree clean.", cx).into_any_element();
+    if tree.files() == 0 {
+        return empty_layer("No files in the working tree.", cx).into_any_element();
     }
-    // The row list is built once per diff (and per collapse toggle) in
-    // `build_index`, not per frame: a changed-only tree can still be
-    // thousands of rows, and flattening plus rolling up stats on every
-    // render is exactly what made a big repository crawl.
+    // The row list is built once per snapshot (and per filter/collapse
+    // change) in `build_index`, not per frame: flattening the tree plus
+    // its rollups on every render is what made a big repository crawl.
     let Some(index) = this.tree_index.as_ref() else {
-        return empty_layer("Loading changes…", cx).into_any_element();
+        return empty_layer("Loading files…", cx).into_any_element();
     };
     let sizes = Rc::new(vec![size(px(0.), px(row_px())); index.rows.len()]);
 
@@ -63,7 +68,7 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         .size_full()
         .min_w_0()
         .overflow_hidden()
-        // Summary strip: what the working tree changes in total.
+        // Summary strip: the two states, and what the changes total.
         .child(
             div()
                 .h(px(panel_header_px()))
@@ -73,7 +78,7 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                 .gap_2()
                 .pl(px(4.))
                 .pr_2()
-                .child(meta_text(format!("{} files changed", diff.files.len()), cx))
+                .child(filter_toggle(this, tree, cx))
                 .child(div().flex_1())
                 .child(plus_minus(index.added, index.removed, cx)),
         )
@@ -121,17 +126,6 @@ fn empty_layer(text: &str, cx: &mut Context<AppView>) -> impl IntoElement {
         .child(meta_text(text.to_string(), cx).w_full().text_center())
 }
 
-/// One level of the file tree, by index: `files` are rows at this
-/// depth (indices into the diff's file list), `dirs` maps full
-/// directory paths to their nested subtrees (insertion order
-/// preserved). Indices, not clones — the built tree has to outlive the
-/// borrow of the source slice without copying every hunk with it.
-#[derive(Default)]
-struct TreeNode {
-    files: Vec<usize>,
-    dirs: Vec<(String, TreeNode)>,
-}
-
 /// The tree's rows, ready for the virtual list: the flattened visible
 /// tree (collapse applied) plus the whole-tree `+/−` totals. Rebuilt
 /// when the diff changes or a directory is toggled — never per frame.
@@ -141,49 +135,71 @@ pub(crate) struct TreeIndex {
     pub(crate) removed: usize,
 }
 
-/// Group flat file rows into a nested directory tree keyed by full dir
-/// path (unique expansion keys, any nesting depth).
-fn build_tree(files: &[DiffFile]) -> TreeNode {
-    let mut root = TreeNode::default();
-    for (ix, f) in files.iter().enumerate() {
-        let parts: Vec<&str> = f.path.split('/').collect();
-        let mut node = &mut root;
-        for depth in 0..parts.len().saturating_sub(1) {
-            let full = parts[..=depth].join("/");
-            let pos = match node.dirs.iter().position(|(p, _)| *p == full) {
-                Some(p) => p,
-                None => {
-                    node.dirs.push((full, TreeNode::default()));
-                    node.dirs.len() - 1
-                }
-            };
-            node = &mut node.dirs[pos].1;
-        }
-        node.files.push(ix);
-    }
-    root
+/// Which files the layer lists.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum TreeFilter {
+    /// Every file in the working tree — the default once the listing
+    /// exists (a clean repository still shows its tree).
+    #[default]
+    All,
+    /// Only the files the diff found: the pre-listing behavior.
+    Changed,
 }
 
-/// Recursive +/− totals for a subtree (dir rows show rolled-up stats).
-fn tree_stats(node: &TreeNode, files: &[DiffFile]) -> (usize, usize) {
-    let mut stats = (
-        node.files.iter().map(|ix| files[*ix].added).sum::<usize>(),
-        node.files
-            .iter()
-            .map(|ix| files[*ix].removed)
-            .sum::<usize>(),
-    );
-    for (_, sub) in &node.dirs {
-        let (a, r) = tree_stats(sub, files);
-        stats.0 += a;
-        stats.1 += r;
+impl TreeFilter {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Changed => "changed",
+        }
     }
-    stats
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "all" => Some(Self::All),
+            "changed" => Some(Self::Changed),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::All => Self::Changed,
+            Self::Changed => Self::All,
+        }
+    }
+}
+
+/// Fold every directory without a changed descendant away, once per
+/// session (`FILE_TREE.md` §5.1's default-collapse rule): the layer opens
+/// on the changes and their ancestors, and the user's own toggles decide
+/// from there. Only dirs are considered, and a dir already in the set —
+/// e.g. restored from the session's saved state — is left alone.
+pub(crate) fn seed_clean_dirs(tree: &FileTree, closed: &mut HashSet<String>) {
+    fn walk(path: &str, node: &DirNode, closed: &mut HashSet<String>) {
+        if node.changed_total == 0 {
+            closed.insert(path.to_owned());
+            return;
+        }
+        for (name, sub) in &node.dirs {
+            let full = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}/{name}")
+            };
+            walk(&full, sub, closed);
+        }
+    }
+    for (name, sub) in &tree.root.dirs {
+        walk(name, sub, closed);
+    }
 }
 
 /// One rendered row of the flattened tree. `depth` drives the inner
 /// indent only — rows themselves stay full-width so hover/selection
-/// bands run edge-to-edge (window border to divider).
+/// bands run edge-to-edge (window border to divider). File rows name an
+/// entry of [`FileTree::entries`] by index: the row list never copies a
+/// path.
 pub(crate) enum TreeRow {
     File {
         ix: usize,
@@ -193,50 +209,69 @@ pub(crate) enum TreeRow {
         path: String,
         depth: usize,
         open: bool,
-        added: usize,
-        removed: usize,
+        /// Files under this directory, and how many of them changed.
+        files: usize,
+        changed: usize,
     },
 }
 
-/// Flatten a diff plus the session's collapsed set into the row list the
-/// virtual list renders. O(files) once per poll — the render path then
-/// only touches the visible slice.
-pub(crate) fn build_index(files: &[DiffFile], closed: &HashSet<String>) -> TreeIndex {
-    let tree = build_tree(files);
+/// Flatten the listing (through the filter) plus the session's collapsed
+/// set into the rows the virtual list renders. O(files) once per
+/// snapshot — the render path then only touches the visible slice.
+pub(crate) fn build_index(
+    tree: &FileTree,
+    filter: TreeFilter,
+    closed: &HashSet<String>,
+) -> TreeIndex {
     let mut rows = Vec::new();
-    flatten(&tree, files, 0, closed, &mut rows);
-    let (added, removed) = tree_stats(&tree, files);
+    flatten(&tree.root, "", tree, filter, 0, closed, &mut rows);
     TreeIndex {
         rows,
-        added,
-        removed,
+        added: tree.added(),
+        removed: tree.removed(),
     }
 }
 
-/// Depth-first flatten of the visible tree: files before subdirs,
-/// insertion order kept; collapsed subtrees drop out entirely.
+/// Depth-first flatten of the visible tree: files before subdirs, sorted
+/// order kept; collapsed subtrees drop out entirely. `Changed` skips both
+/// clean files and whole clean subtrees, which is what makes it cheap on
+/// a large repository. `path` is the node's full path (empty at the
+/// root).
+#[allow(clippy::too_many_arguments)]
 fn flatten(
-    tree: &TreeNode,
-    files: &[DiffFile],
+    node: &DirNode,
+    path: &str,
+    tree: &FileTree,
+    filter: TreeFilter,
     depth: usize,
     closed: &HashSet<String>,
     out: &mut Vec<TreeRow>,
 ) {
-    for ix in &tree.files {
+    for ix in &node.files {
+        if filter == TreeFilter::Changed && !tree.entries[*ix].changed {
+            continue;
+        }
         out.push(TreeRow::File { ix: *ix, depth });
     }
-    for (path, sub) in &tree.dirs {
-        let (added, removed) = tree_stats(sub, files);
-        let open = !closed.contains(path);
+    for (name, sub) in &node.dirs {
+        if filter == TreeFilter::Changed && sub.changed_total == 0 {
+            continue;
+        }
+        let full = if path.is_empty() {
+            name.clone()
+        } else {
+            format!("{path}/{name}")
+        };
+        let open = !closed.contains(&full);
         out.push(TreeRow::Dir {
-            path: path.clone(),
+            path: full.clone(),
             depth,
             open,
-            added,
-            removed,
+            files: sub.files_total,
+            changed: sub.changed_total,
         });
         if open {
-            flatten(sub, files, depth + 1, closed, out);
+            flatten(sub, &full, tree, filter, depth + 1, closed, out);
         }
     }
 }
@@ -259,17 +294,18 @@ fn guides(depth: usize, color: Hsla) -> Vec<Div> {
         .collect()
 }
 
-/// Builds the rows of one visible slice, straight off the cached index.
+/// Builds the rows of one visible slice, straight off the cached index
+/// and the entry list it indexes into.
 fn tree_rows(
     this: &AppView,
     range: std::ops::Range<usize>,
     _window: &mut Window,
     cx: &mut Context<AppView>,
 ) -> Vec<AnyElement> {
-    let (Some(diff), Some(index)) = (this.diff.as_ref(), this.tree_index.as_ref()) else {
+    let (Some(tree), Some(index)) = (this.tree(), this.tree_index.as_ref()) else {
         return Vec::new();
     };
-    let selected = this.diff_file.filter(|ix| *ix < diff.files.len());
+    let selected = this.current_diff_path();
     let active_bg = selection_bg(cx);
     let hov_bg = hover_bg(cx);
     let guide = cx.theme().foreground.opacity(0.12);
@@ -277,37 +313,93 @@ fn tree_rows(
     index.rows[range]
         .iter()
         .map(|row| match row {
-            TreeRow::File { ix, depth } => file_row(
-                *ix,
-                &diff.files[*ix],
-                Some(*ix) == selected,
-                *depth,
-                active_bg,
-                hov_bg,
-                guide,
-                cx,
-            )
-            .into_any_element(),
+            TreeRow::File { ix, depth } => {
+                let entry = &tree.entries[*ix];
+                file_row(
+                    entry,
+                    Some(entry.path.as_str()) == selected,
+                    *depth,
+                    active_bg,
+                    hov_bg,
+                    guide,
+                    cx,
+                )
+                .into_any_element()
+            }
             TreeRow::Dir {
                 path,
                 depth,
                 open,
-                added,
-                removed,
+                files,
+                changed,
             } => dir_row(
-                path, *depth, *open, *added, *removed, hov_bg, guide, cx,
+                path, *depth, *open, *files, *changed, hov_bg, guide, cx,
             )
             .into_any_element(),
         })
         .collect()
 }
 
+/// The layer's two states, one toggle each: `All 1 204` / `Changed 7`.
+/// Standalone toggles rather than a group, like the pane's mode switch
+/// (a group swallows its children's clicks).
+fn filter_toggle(this: &AppView, tree: &FileTree, cx: &mut Context<AppView>) -> impl IntoElement {
+    let active = this.tree_filter;
+    h_flex()
+        .flex_shrink_0()
+        .gap_1()
+        .children([TreeFilter::All, TreeFilter::Changed].map(|filter| {
+            let count = match filter {
+                TreeFilter::All => tree.files(),
+                TreeFilter::Changed => tree.changed(),
+            };
+            Toggle::new(SharedString::from(format!("tree-filter-{}", filter.as_str())))
+                .label(format!(
+                    "{} {}",
+                    match filter {
+                        TreeFilter::All => "All",
+                        TreeFilter::Changed => "Changed",
+                    },
+                    grouped(count)
+                ))
+                .checked(active == filter)
+                .with_variant(ToggleVariant::Ghost)
+                .with_size(gpui_kit::component::Size::XSmall)
+                .tooltip(match filter {
+                    TreeFilter::All => "List every file in the working tree",
+                    TreeFilter::Changed => "List only the changed files",
+                })
+                .on_click(cx.listener(move |this, _: &bool, _, cx| {
+                    if this.tree_filter != filter {
+                        this.toggle_tree_filter(cx);
+                    }
+                }))
+        }))
+}
+
+/// `1204` → `1 204`: thin spaces keep long counts readable and the two
+/// toggle labels from jumping around.
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (ix, ch) in digits.chars().enumerate() {
+        if ix > 0 && (digits.len() - ix) % 3 == 0 {
+            out.push('\u{2009}');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// A directory row: the name, its own changed-descendant badge (a
+/// rolled-up `+/−` across a whole subtree says very little — the count
+/// does), and the file total when it holds no changes.
 fn dir_row(
     path: &str,
     depth: usize,
     open: bool,
-    added: usize,
-    removed: usize,
+    files: usize,
+    changed: usize,
     hov_bg: Hsla,
     guide: Hsla,
     cx: &mut Context<AppView>,
@@ -318,9 +410,10 @@ fn dir_row(
         .id(SharedString::from(format!("diff-dir-{path}")))
         .role(Role::TreeItem)
         .aria_expanded(open)
-        .aria_label(SharedString::from(format!(
-            "{path}/ +{added} −{removed}"
-        )))
+        .aria_label(SharedString::from(match changed {
+            0 => format!("{path}/ {files} files"),
+            n => format!("{path}/ {files} files, {n} changed"),
+        }))
         .relative()
         .w_full()
         .h(px(row_px()))
@@ -363,12 +456,33 @@ fn dir_row(
                 .text_color(cx.theme().foreground.opacity(0.9))
                 .child(format!("{name}/")),
         )
-        .child(plus_minus(added, removed, cx))
+        .child(dir_badge(files, changed, cx))
 }
 
+/// The dir row's trailing figures: `● n` when the subtree changed,
+/// otherwise how many files are in it (muted — the badge is a state, the
+/// count is not).
+fn dir_badge(files: usize, changed: usize, cx: &mut Context<AppView>) -> impl IntoElement {
+    let tone = cx.theme().foreground.opacity(0.45);
+    h_flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap_1()
+        .text_sm()
+        .font_family(cx.theme().mono_font_family.clone())
+        .text_color(tone)
+        .when(changed > 0, |el| {
+            el.child(div().text_color(cx.theme().yellow).child("●"))
+                .child(div().text_color(cx.theme().yellow).child(changed.to_string()))
+        })
+        .when(changed == 0, |el| el.child(files.to_string()))
+}
+
+/// A file row: the name, tinted and carrying `+a/−b` when the diff found
+/// the file, muted and bare when it is unchanged — both selectable, both
+/// opening the pane.
 fn file_row(
-    ix: usize,
-    f: &DiffFile,
+    entry: &crate::diff::tree::TreeEntry,
     active: bool,
     depth: usize,
     active_bg: Hsla,
@@ -376,17 +490,20 @@ fn file_row(
     guide: Hsla,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let f = entry;
     let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
     let name_copy = name.clone();
     let path_copy = f.path.clone();
+    let path = f.path.clone();
     div()
-        .id(("diff-file", ix))
+        .id(SharedString::from(format!("diff-file-{}", f.path)))
         .role(Role::TreeItem)
         .aria_selected(active)
-        .aria_label(SharedString::from(format!(
-            "{} +{} −{}",
-            f.path, f.added, f.removed
-        )))
+        .aria_label(SharedString::from(if f.changed {
+            format!("{} +{} −{}", f.path, f.added, f.removed)
+        } else {
+            format!("{}", f.path)
+        }))
         .relative()
         .w_full()
         .h(px(row_px()))
@@ -402,11 +519,7 @@ fn file_row(
         .on_click(cx.listener(move |this, _, window, cx| {
             // Selecting a file IS opening the right pane: a closed
             // pane springs open on the first click.
-            let changed = this.diff_file != Some(ix);
-            if changed {
-                this.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
-            }
-            this.diff_file = Some(ix);
+            this.select_path(path.clone());
             // File/Preview mode: start reading the newly selected file
             // (no-op in Diff mode, and cheap when the cache still holds).
             this.ensure_file_content(cx);
@@ -433,9 +546,16 @@ fn file_row(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
+                .text_color(if f.changed {
+                    cx.theme().foreground.opacity(0.9)
+                } else {
+                    // Unchanged: listed, but visibly not what the agent
+                    // touched.
+                    cx.theme().foreground.opacity(0.45)
+                })
                 .child(name),
         )
-        .child(plus_minus(f.added, f.removed, cx))
+        .when(f.changed, |el| el.child(plus_minus(f.added, f.removed, cx)))
         .context_menu(move |menu, _, _| {
             let name_copy = name_copy.clone();
             let path_copy = path_copy.clone();
@@ -488,9 +608,92 @@ pub(crate) fn plus_minus(
 
 #[cfg(test)]
 mod tests {
+    use super::{build_index, seed_clean_dirs, TreeFilter, TreeIndex, TreeRow};
+    use crate::diff::tree::{build as build_tree, FileTree};
+    use crate::diff::DiffFile;
+    use std::collections::HashSet;
+
+    fn changed(path: &str, added: usize, removed: usize) -> DiffFile {
+        DiffFile {
+            path: path.to_owned(),
+            added,
+            removed,
+            ..Default::default()
+        }
+    }
+
+    fn rows(index: &TreeIndex, tree: &FileTree) -> Vec<String> {
+        index
+            .rows
+            .iter()
+            .map(|row| match row {
+                TreeRow::File { ix, .. } => tree.entries[*ix].path.clone(),
+                TreeRow::Dir { path, open, .. } => format!("{path}/{}", if *open { "open" } else { "closed" }),
+            })
+            .collect()
+    }
+
+    /// The default-collapse rule plus the two filters, over one tree:
+    /// `All` lists everything (clean directories folded away), `Changed`
+    /// lists only the changed subtrees.
+    #[test]
+    fn clean_dirs_collapse_and_changed_prunes_them() {
+        let index = vec![
+            "README.md".to_owned(),
+            "docs/a.md".to_owned(),
+            "docs/deep/b.md".to_owned(),
+            "src/changed.rs".to_owned(),
+        ];
+        let diff = vec![changed("src/changed.rs", 2, 1)];
+        let tree = build_tree(index, &diff);
+        assert_eq!((tree.files(), tree.changed()), (4, 1));
+
+        // Seeding: only the subtrees with changes stay open.
+        let mut closed = HashSet::new();
+        seed_clean_dirs(&tree, &mut closed);
+        assert_eq!(closed, HashSet::from(["docs".to_owned()]));
+
+        // All: the whole tree, with the clean directory collapsed.
+        let all = build_index(&tree, TreeFilter::All, &closed);
+        assert_eq!(
+            rows(&all, &tree),
+            ["README.md", "docs/closed", "src/open", "src/changed.rs"]
+        );
+        assert_eq!((all.added, all.removed), (2, 1));
+
+        // The dir row carries the file total and the changed count.
+        let TreeRow::Dir { files, changed, .. } = &all.rows[1] else {
+            panic!("a directory row");
+        };
+        assert_eq!((*files, *changed), (2, 0));
+        let TreeRow::Dir { files, changed, .. } = &all.rows[2] else {
+            panic!("a directory row");
+        };
+        assert_eq!((*files, *changed), (1, 1));
+
+        // Changed: clean files and whole clean subtrees drop out.
+        let changed_only = build_index(&tree, TreeFilter::Changed, &closed);
+        assert_eq!(rows(&changed_only, &tree), ["src/open", "src/changed.rs"]);
+
+        // An unchanged selection stays put with the filter on All.
+        assert!(tree.get("docs/deep/b.md").is_some());
+    }
+
+    /// The filter's persisted spelling round-trips, and the chord's step
+    /// is a two-state toggle.
+    #[test]
+    fn filter_spellings_round_trip() {
+        for filter in [TreeFilter::All, TreeFilter::Changed] {
+            assert_eq!(TreeFilter::parse(filter.as_str()), Some(filter));
+            assert_eq!(filter.next().next(), filter);
+        }
+        assert_eq!(TreeFilter::parse("nope"), None);
+        assert_eq!(TreeFilter::default(), TreeFilter::All);
+    }
+
     use crate::app::AppView;
     use crate::config::{Config, State};
-    use crate::diff::{DiffFile, DiffHunk, DiffLine, GitDiff};
+    use crate::diff::{DiffHunk, DiffLine, GitDiff};
     use gpui_kit::{Entity, TestAppContext, gpui};
 
     /// A changed-only tree of a few thousand rows: the layer must be a
@@ -501,7 +704,7 @@ mod tests {
     fn a_large_tree_scrolls_and_keeps_its_rows_indexed() {
         fn file(ix: usize) -> DiffFile {
             DiffFile {
-                path: format!("many/d{}/f{ix}.txt", ix / 100),
+                path: format!("many/d{:02}/f{ix:04}.txt", ix / 100),
                 added: 1,
                 removed: 0,
                 hunks: vec![DiffHunk {
@@ -541,13 +744,24 @@ mod tests {
                 vcx.update(|_, cx| {
                     view.update(cx, |v, cx| {
                         let files: Vec<DiffFile> = (0..3000).map(file).collect();
-                        v.show_diff_tree = true;
-                        v.diff = Some(GitDiff {
-                            branch: None,
-                            files,
+                        // Every file is changed, so no directory is clean
+                        // and the default-collapse rule leaves them all
+                        // open — the row list is the whole tree.
+                        let tree = crate::diff::tree::build(
+                            (0..3000)
+                                .map(|ix| format!("many/d{:02}/f{ix:04}.txt", ix / 100))
+                                .collect(),
+                            &files,
+                        );
+                        v.snapshot = Some(crate::diff::Snapshot {
+                            diff: GitDiff {
+                                branch: None,
+                                files,
+                            },
+                            tree,
                         });
+                        v.show_diff_tree = true;
                         v.rebuild_tree_index();
-                        v.diff_file = Some(0);
                         cx.notify();
                     });
                 });

@@ -14,6 +14,10 @@ impl AppView {
         // The splitter's live height belongs to the session under it —
         // read it before borrowing the session slot mutably.
         let live_h = self.live_tree_height(cx);
+        // Read before the session slot is borrowed mutably.
+        let selected_path = self.current_diff_path().map(str::to_owned);
+        let tree_filter = Some(self.tree_filter.as_str().to_owned());
+        let has_snapshot = self.snapshot.is_some();
         if let Some(s) = self
             .projects
             .get_mut(self.current_project)
@@ -28,16 +32,12 @@ impl AppView {
             // window-frame debounce does) knows nothing about the
             // working tree, and writing `None` there would drop the
             // row's selection.
-            let selected = self
-                .diff
-                .as_ref()
-                .and_then(|d| self.diff_file.and_then(|ix| d.files.get(ix)))
-                .map(|f| f.path.to_string());
-            if selected.is_some() || self.diff.is_some() {
-                s.diff_selected = selected;
+            if selected_path.is_some() || has_snapshot {
+                s.diff_selected = selected_path;
             }
             s.diff_closed = self.diff_tree_closed.clone();
             s.view_mode = Some(self.view_mode.as_str().to_owned());
+            s.tree_filter = tree_filter;
             // Hidden layer reports no live height — keep the stored one.
             if let Some(h) = live_h {
                 s.diff_tree_height = Some(h);
@@ -108,6 +108,7 @@ impl AppView {
                             closed_dirs: s.diff_closed.iter().cloned().collect(),
                             tree_height: s.diff_tree_height,
                             view_mode: s.view_mode.clone(),
+                            tree_filter: s.tree_filter.clone(),
                         })
                         .collect(),
                 })
@@ -194,6 +195,7 @@ impl AppView {
                         diff_closed: closed,
                         diff_tree_height: tree_height,
                         view_mode: s.view_mode.clone(),
+                        tree_filter: s.tree_filter.clone(),
                     });
             }
         }
@@ -279,7 +281,8 @@ mod tests {
             closed_dirs: vec![],
             tree_height: None,
             view_mode: None,
-        }
+            tree_filter: None,
+}
     }
 
     /// A workspace saved before the flag existed: no liveness on any row.
@@ -350,7 +353,8 @@ mod tests {
             closed_dirs: vec![],
             tree_height: None,
             view_mode: None,
-        };
+            tree_filter: None,
+};
         // A shell in a project the window does NOT open on: the old
         // restore left those as `Done` rows, which is exactly the
         // "click Resume to start it" complaint.
@@ -363,7 +367,8 @@ mod tests {
             closed_dirs: vec![],
             tree_height: None,
             view_mode: None,
-        };
+            tree_filter: None,
+};
         gpui::run_test_once(
             0,
             Box::new(move |dispatcher| {
@@ -467,7 +472,8 @@ mod tests {
             closed_dirs: vec![],
             tree_height: None,
             view_mode: None,
-        };
+            tree_filter: None,
+};
         gpui::run_test_once(
             0,
             Box::new(move |dispatcher| {

@@ -5,16 +5,21 @@
 > a **view panel** that shows a whole file with its diff merged in, plus a
 > **Markdown preview** mode.
 >
-> **Landed (2026-09-13, `DESIGN.md` §7/§12):** §4.2's merged row stream
-> (`src/diff/view.rs`), the pane's **File** and **Preview** modes with the
-> `⌘⇧M` switch (per session, persisted), and the virtualization §7 asked for —
+> **Landed (2026-09-13, `DESIGN.md` §7/§12):** §4.1's **index union** — the
+> sidebar lists the whole working tree (tracked + untracked, `.gitignore`
+> respected), with §5.1's `All n · Changed m` strip, the default-collapse rule
+> and the `● n` changed-descendant badge; §4.2's merged row stream
+> (`src/diff/view.rs`); the pane's **File** and **Preview** modes with the
+> `⌘⇧M` switch (per session, persisted); and the virtualization §7 asked for —
 > the pane renders a mode-independent `RowStream` through `v_virtual_list`, and
-> the tree renders a per-poll `TreeIndex` the same way. Preview is
-> virtualized too, by gpui-base's own per-block list; a Markdown source that
-> cannot be read falls back to rows with the same band File mode shows. **Not landed:** the full
-> working-tree listing (§4.1's index union), the `All · Changed` filter, the
-> default-collapse seeding rule, the `● n` dir badge, and §4.2's remaining caps
-> triage is now concrete — `MAX_VIEW_BYTES` 8 MiB / `MAX_VIEW_LINES` 200 000.
+> the tree renders a per-poll `TreeIndex` the same way. Preview is virtualized
+> too, by gpui-base's own per-block list; a Markdown source that cannot be read
+> falls back to rows with the same band File mode shows. **Not landed:** the
+> tree filter's shortcut on Linux diverges (`⌃⇧A`; `⌘⇧F` is free on macOS but
+> `⌃⇧F` is the terminal's find), `R`/column tuning of the strip, and §8's
+> deferred items (syntax highlighting, worktrees). Caps came out at
+> `MAX_VIEW_BYTES` 8 MiB / `MAX_VIEW_LINES` 200 000 (not the 1 MiB / 5 000
+> guessed here): the pane virtualizes, so a large file costs one build pass.
 > Framework: `gpui-kit = "0.6"` only. License: Apache-2.0, **GPL-free throughout**.
 
 ## 1. Goal
@@ -178,7 +183,8 @@ snapshot (render-time cost = visible rows only).
   type icon (`ui::diff_file_icon`) and the copy-name/copy-path context menu.
   Changed rows keep today's `+a/−b`; clean rows render the same row geometry with
   a muted name and no figures. `dir_row` shows a `● n` changed-descendant badge
-  instead of the `+a/−b` rollup, which is meaningless across a whole subtree.
+  instead of the `+a/−b` rollup, which is meaningless across a whole subtree —
+  and, when the subtree is clean, its file count in the same muted tone.
 * **Filter.** The layer's summary strip becomes `All 1 204 · Changed 7`
   (two-state toggle, ⌘⇧F). "Changed" is exactly today's tree. Persisted per
   session; "All" is the default once this ships.

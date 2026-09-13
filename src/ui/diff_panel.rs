@@ -13,7 +13,7 @@ use super::panel_view;
 use crate::app::AppView;
 use crate::diff::view::FileView;
 use crate::diff::{
-    DiffFile, DiffLine, NoteKind, PaneRow, RowStream, EXPAND_MAX_LINES, MAX_LINES_PER_FILE,
+    DiffLine, NoteKind, PaneRow, RowStream, EXPAND_MAX_LINES, MAX_LINES_PER_FILE,
 };
 use gpui_kit::base::SelectableText;
 use gpui_kit::component::button::{Button, ButtonVariants as _, Toggle, ToggleVariant, ToggleVariants as _};
@@ -53,10 +53,11 @@ pub(crate) fn render(
 ) -> AnyElement {
     // The file strip only makes sense with a selected file — without
     // one the body's empty state carries the panel on its own.
-    let has_file = this
-        .diff
-        .as_ref()
-        .is_some_and(|d| !d.is_empty() && this.diff_file.is_some_and(|ix| ix < d.files.len()));
+    // The strip only makes sense with a selected file: without one the
+    // body's empty state carries the panel on its own. A clean file (the
+    // listing lists them all) has a strip too — the mode toggles still
+    // apply to it.
+    let has_file = this.current_diff_path().is_some() && this.diff().is_some();
     let mut root = div();
     *root.style() = root_style();
     root.bg(cx.theme().background)
@@ -78,10 +79,16 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     // The pane shows exactly one file: the tree selection. Its path
     // leads the header, its +/- figures close the line. The totals
     // ("N files changed") live atop the tree layer.
-    let file = this
-        .diff
-        .as_ref()
-        .and_then(|d| this.diff_file.and_then(|ix| d.files.get(ix)));
+    let path = this.current_diff_path().unwrap_or_default();
+    let file = this.selected_diff_file();
+    // Ellipsize the *directory*, never the file name: at the pane's
+    // default width the strip is at capacity, and ".." where the file
+    // should be is worse than a shortened parent. The prefix shrinks
+    // and ellipsizes, the name holds its width.
+    let (dir, name) = match path.rfind('/') {
+        Some(ix) => (&path[..=ix], &path[ix + 1..]),
+        None => ("", path),
+    };
 
     div()
         .h(px(panel_header_px()))
@@ -91,33 +98,48 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .items_center()
         .gap_2()
         .child(
-            div()
+            h_flex()
+                .flex_1()
                 .min_w_0()
                 .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
                 .text_sm()
                 .font_medium()
-                .text_color(cx.theme().foreground.opacity(0.9))
-                .child(file.map(|f| f.path.clone()).unwrap_or_default()),
-        )
-        .child(div().flex_1())
-        .when_some(file, |el, f| {
-            el.child(mode_toggle(this, f.path.as_str(), cx))
-                .when_some(file_line_count(this), |el, count| {
-                    el.child(super::meta_text(format!("{} lines", count), cx))
+                .whitespace_nowrap()
+                .when(!dir.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(cx.theme().foreground.opacity(0.5))
+                            .child(dir.to_string()),
+                    )
                 })
-                .child(plus_minus(f.added, f.removed, cx))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_color(cx.theme().foreground.opacity(0.9))
+                        .child(name.to_string()),
+                ),
+        )
+        .child(mode_toggle(this, path, cx))
+        // No line-count chip: at the pane's default width the strip is
+        // already at capacity, and a header that ellipsizes the file's
+        // name to print its length has its priorities backwards (File
+        // mode's gutter numbers every line anyway).
+        .child(match file {
+            // An unchanged file has no figures — say so instead of
+            // printing `+0 −0`.
+            None => div()
+                .flex_shrink_0()
+                .text_sm()
+                .text_color(cx.theme().foreground.opacity(0.45))
+                .child("unchanged")
+                .into_any_element(),
+            Some(f) => plus_minus(f.added, f.removed, cx).into_any_element(),
         })
-}
-
-/// The whole-file view's line count, when File mode has one to show
-/// (the header's one piece of extra context in that mode).
-fn file_line_count(this: &AppView) -> Option<String> {
-    match this.cached_file_view()? {
-        FileView::Text(view) => Some(grouped(view.lines_total)),
-        _ => None,
-    }
 }
 
 /// The mode switch: one `Toggle` per surface (`⌘⇧M` cycles the same
@@ -209,6 +231,8 @@ pub(crate) fn is_markdown(path: &str) -> bool {
 }
 
 const NOTE_READING: &str = "Reading the file…";
+/// Diff mode on a file nobody changed: there are no hunks to show.
+const NOTE_UNCHANGED: &str = "No changes in this file — try File or Preview (⌘⇧M).";
 
 /// The mode's row stream for the selected file, plus the reason the
 /// requested mode could not be shown (the pane renders the diff's hunks
@@ -216,38 +240,36 @@ const NOTE_READING: &str = "Reading the file…";
 /// nothing of its own to render — Preview hands the body to the
 /// Markdown view instead.
 pub(crate) fn pane_rows(this: &AppView) -> (Option<RowStream<'_>>, Option<&'static str>) {
-    let Some(diff) = &this.diff else {
+    if this.current_diff_path().is_none() {
         return (None, None);
-    };
-    let Some(file) = this.diff_file.and_then(|ix| diff.files.get(ix)) else {
-        return (None, None);
-    };
+    }
+    let file = this.selected_diff_file();
     match this.effective_view_mode() {
         // Preview's body is the rendered document, not rows — but a
         // source that cannot be read renders rows like File mode does,
-        // banding the same reason. `None` here (no source, no refusal)
-        // means the read is still in flight; the pane's `body` decides
-        // between the reading note and the Markdown view.
+        // banding the same reason. `None` rows here mean the Markdown
+        // view takes the body; the pane's `body` asks this first.
         ViewMode::Preview => match (this.cached_preview(), this.preview_refusal()) {
             (Some(_), _) => (None, None),
-            (None, Some(refusal)) => (
-                Some(match this.cached_file_view() {
-                    Some(FileView::Text(view)) => RowStream::view(view),
-                    _ => RowStream::diff(file),
-                }),
-                Some(refusal.note()),
+            (None, refusal) => (
+                this.file_rows(file),
+                Some(refusal.map_or(NOTE_READING, |r| r.note())),
             ),
-            (None, None) => (Some(RowStream::diff(file)), Some(NOTE_READING)),
         },
-        ViewMode::Diff => (Some(RowStream::diff(file)), None),
-        ViewMode::File => match this.cached_file_view() {
-            Some(FileView::Text(view)) => (Some(RowStream::view(view)), None),
-            Some(view) => (
-                Some(RowStream::diff(file)),
-                Some(view.refusal().map_or(NOTE_READING, |r| r.note())),
-            ),
-            None => (Some(RowStream::diff(file)), Some(NOTE_READING)),
+        // A clean file has no hunks to show: Diff mode says so instead of
+        // rendering an empty pane.
+        ViewMode::Diff => match file {
+            Some(file) => (Some(RowStream::diff(file)), None),
+            None => (None, Some(NOTE_UNCHANGED)),
         },
+        ViewMode::File => (
+            this.file_rows(file),
+            match this.cached_file_view() {
+                Some(FileView::Text(_)) => None,
+                Some(view) => Some(view.refusal().map_or(NOTE_READING, |r| r.note())),
+                None => Some(NOTE_READING),
+            },
+        ),
     }
 }
 
@@ -257,27 +279,28 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
         return empty("No active session — select one in the project tree.", cx)
             .into_any_element();
     }
-    let Some(diff) = &this.diff else {
-        return empty(this.diff_error.as_deref().unwrap_or("Loading changes…"), cx)
+    let Some(diff) = this.diff() else {
+        return empty(this.diff_error.as_deref().unwrap_or("Loading files…"), cx)
             .into_any_element();
     };
-    if diff.is_empty() {
-        return empty("No changes — working tree clean.", cx).into_any_element();
-    }
+    let _ = diff;
     // No selection, no content: the pane stays empty until a tree
     // click picks a file.
-    let Some(file_ix) = this.diff_file.filter(|ix| *ix < diff.files.len()) else {
+    if this.current_diff_path().is_none() {
         return empty("Select a file in the tree.", cx).into_any_element();
-    };
-    let file = &diff.files[file_ix];
+    }
     // The rendered document replaces the rows only when its source is
     // actually there: a Preview that could not be read falls through to
     // `pane_rows`, which shows the file's rows and bands the reason.
     if this.effective_view_mode() == ViewMode::Preview && this.cached_preview().is_some() {
-        return preview_body(this, file).into_any_element();
+        return preview_body(this).into_any_element();
     }
-    let (Some(stream), note) = pane_rows(this) else {
-        return empty("Select a file in the tree.", cx).into_any_element();
+    let selected_path = this.current_diff_path().unwrap_or_default().to_owned();
+    let (stream, note) = pane_rows(this);
+    let Some(stream) = stream else {
+        // No rows at all: the note (an unchanged file in Diff mode) or
+        // the generic empty state carries the pane.
+        return empty(note.unwrap_or("Select a file in the tree."), cx).into_any_element();
     };
     let gutter_w = gutter_width(&stream, window, cx);
     let content_w = measure_content_width(&stream, gutter_w, window, cx);
@@ -320,8 +343,8 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
                 )
                 .scrollbar(&this.diff_hunks_scroll, scroll::ScrollbarAxis::Both)
                 .context_menu({
-                    let path = file.path.clone();
-                    let contents = file_text(this, file);
+                    let path = selected_path.clone();
+                    let contents = file_text(this);
                     move |menu, _, _| {
                         let path = path.clone();
                         let contents = contents.clone();
@@ -363,7 +386,7 @@ fn notice_band(text: &str, cx: &Context<AppView>) -> impl IntoElement {
 /// gpui-component's own text view (its parser handles the GFM set —
 /// tables, task lists, strikethrough). Kept to the same size cap as
 /// File mode, so a runaway document cannot stall a frame.
-fn preview_body(this: &AppView, file: &DiffFile) -> impl IntoElement {
+fn preview_body(this: &AppView) -> impl IntoElement {
     let text = this.cached_preview().map(|text| text.to_owned()).unwrap_or_default();
     div()
         .flex_1()
@@ -372,7 +395,10 @@ fn preview_body(this: &AppView, file: &DiffFile) -> impl IntoElement {
         .overflow_hidden()
         .child(
             TextView::markdown(
-                SharedString::from(format!("md-preview-{}", file.path)),
+                SharedString::from(format!(
+                    "md-preview-{}",
+                    this.current_diff_path().unwrap_or_default()
+                )),
                 text,
             )
                 .selectable(true)
@@ -489,7 +515,7 @@ fn note_text(this: &AppView, stream: &RowStream<'_>) -> String {
 /// The selected file's text for "Copy File Contents": the real file when
 /// File mode has read it, otherwise the diff's own reconstruction (every
 /// line the diff did not remove).
-fn file_text(this: &AppView, file: &DiffFile) -> String {
+fn file_text(this: &AppView) -> String {
     if let Some(FileView::Text(view)) = this.cached_file_view() {
         return view
             .rows
@@ -503,13 +529,19 @@ fn file_text(this: &AppView, file: &DiffFile) -> String {
             .collect::<Vec<_>>()
             .join("\n");
     }
-    file.hunks
-        .iter()
-        .flat_map(|h| h.lines.iter())
-        .filter(|l| l.kind != '-')
-        .map(|l| l.text.clone())
-        .collect::<Vec<_>>()
-        .join("\n")
+    // Changed but not yet read (or unreadable): reconstruct from the
+    // diff's own lines. A clean file has no diff to fall back to.
+    this.selected_diff_file()
+        .map(|file| {
+            file.hunks
+                .iter()
+                .flat_map(|h| h.lines.iter())
+                .filter(|l| l.kind != '-')
+                .map(|l| l.text.clone())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
 }
 
 /// Builds the rows of one visible slice, in the mode's stream order. A
@@ -1128,9 +1160,7 @@ mod tests {
                     cx.add_window_view(|window, cx| AppView::new(window, cx));
                 vcx.update(|_, cx| {
                     view.update(cx, |v, cx| {
-                        v.diff = Some(GitDiff {
-                            branch: None,
-                            files: vec![DiffFile {
+                        let files = vec![DiffFile {
                                 path: "notes.md".into(),
                                 added: 1,
                                 removed: 0,
@@ -1143,11 +1173,20 @@ mod tests {
                                         text: "# Title".into(),
                                     }],
                                 }],
-                                lines_total: 1,
-                                truncated: false,
-                            }],
+                            lines_total: 1,
+                            truncated: false,
+                        }];
+                        v.selection = Some(crate::app::Selection {
+                            path: files[0].path.clone(),
+                            changed: Some(0),
                         });
-                        v.diff_file = Some(0);
+                        v.snapshot = Some(crate::diff::Snapshot {
+                            diff: GitDiff {
+                                branch: None,
+                                files,
+                            },
+                            tree: crate::diff::tree::build(vec!["notes.md".to_owned()], &[]),
+                        });
                         v.view_mode = super::ViewMode::Preview;
                         cx.notify();
                     });
@@ -1201,6 +1240,36 @@ mod tests {
                 });
                 assert_eq!((stream, note), (None, None));
                 assert!(read);
+
+                // A clean file: the tree lists it, so the pane has a
+                // strip for it — Diff mode says there is nothing to show.
+                vcx.update(|_, cx| {
+                    view.update(cx, |v, cx| {
+                        v.view_mode = super::ViewMode::Diff;
+                        v.selection = Some(crate::app::Selection {
+                            path: "clean.md".to_owned(),
+                            changed: None,
+                        });
+                        v.snapshot = Some(crate::diff::Snapshot {
+                            diff: GitDiff {
+                                branch: None,
+                                files: Vec::new(),
+                            },
+                            tree: crate::diff::tree::build(
+                                vec!["clean.md".to_owned()],
+                                &[],
+                            ),
+                        });
+                        cx.notify();
+                    });
+                });
+                let (stream, note) = vcx.update(|_, cx| {
+                    let v = view.read(cx);
+                    let (rows, note) = super::pane_rows(v);
+                    (rows.map(|s| s.rows()), note)
+                });
+                assert_eq!(stream, None);
+                assert_eq!(note, Some(super::NOTE_UNCHANGED));
 
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();

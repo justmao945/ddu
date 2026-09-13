@@ -97,8 +97,6 @@ pub enum ViewRow {
 /// A whole file, ready to render.
 pub struct TextFileView {
     pub rows: Vec<ViewRow>,
-    /// Lines in the workdir file (the header's count).
-    pub lines_total: usize,
     /// Highest line number any row carries (the gutter's width).
     pub max_line_no: u32,
     /// The diff that tinted this view was capped, or was too stale to
@@ -132,7 +130,13 @@ impl FileView {
                 // than splice the changes into the wrong lines.
                 None => (context_only(&lines), true),
             },
-            None => (context_only(&lines), true),
+            // No diff record at all: the file is *clean* (the tree lists
+            // every file, so this is the normal case for an unchanged
+            // one). Nothing is missing — claiming the tints were capped
+            // would band "Loading the file's changes…" over a file that
+            // has none, and the pane's scroll-driven budget grower would
+            // chase a note it can never clear.
+            None => (context_only(&lines), false),
         };
         FileView::Text(TextFileView::new(rows, &lines, tints_capped))
     }
@@ -140,8 +144,7 @@ impl FileView {
 
 impl TextFileView {
     fn new(rows: Vec<ViewRow>, lines: &[&str], tints_capped: bool) -> Self {
-        let lines_total = lines.len();
-        let max_line_no = lines_total.max(1) as u32;
+        let max_line_no = lines.len().max(1) as u32;
         // Rank by display cells once, here: the pane re-measures a
         // handful of candidates per frame, not every row.
         let mut hints: Vec<(usize, usize)> = Vec::with_capacity(WIDTH_HINTS + 1);
@@ -165,7 +168,6 @@ impl TextFileView {
         width_hints.sort_unstable();
         Self {
             rows,
-            lines_total,
             max_line_no,
             tints_capped,
             width_hints,
@@ -473,7 +475,6 @@ mod tests {
         // The invariant: every hunk contributes its header, every
         // workdir line appears once, every deletion is spliced in.
         assert_eq!(view.rows.len(), 2 + lines.len() + deleted);
-        assert_eq!(view.lines_total, lines.len());
         assert_eq!(view.max_line_no, lines.len() as u32);
     }
 
@@ -507,7 +508,7 @@ mod tests {
         assert!(view.tints_capped);
         // One hunk header plus every workdir line, in order.
         assert_eq!(view.rows.len(), lines.len() + 1);
-        assert_eq!(view.lines_total, lines.len());
+        assert_eq!(view.max_line_no, lines.len() as u32);
     }
 
     #[test]
@@ -555,7 +556,7 @@ mod tests {
             panic!("text view");
         };
         let stream = crate::diff::RowStream::view(&view);
-        assert_eq!(view.lines_total, 20_000);
+        assert_eq!(view.max_line_no, 20_000);
         assert_eq!(stream.rows(), 20_000 + 1 + 1);
         // Deep random access: the last row is the file's last line.
         let last = stream.row(stream.rows() - 1).expect("row");
@@ -614,7 +615,7 @@ mod tests {
         let FileView::Text(view) = FileView::build(&dir, "f.txt", Some(&diff)) else {
             panic!("text view");
         };
-        assert_eq!(view.lines_total, 3);
+        assert_eq!(view.max_line_no, 3);
         assert!(!view.tints_capped);
         assert!(!view.width_hints.is_empty());
         let texts: Vec<&str> = view
@@ -635,6 +636,14 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, [' ', '-', '+', ' ']);
+
+        // A clean file: complete, untinted, and — unlike a stale diff —
+        // with nothing to say about tints (the pane has no note to band).
+        let FileView::Text(clean) = FileView::build(&dir, "f.txt", None) else {
+            panic!("text view");
+        };
+        assert!(!clean.tints_capped, "a clean file has no tints to cap");
+        assert!(crate::diff::RowStream::view(&clean).note().is_none());
 
         // A diff that no longer matches the file: complete, untinted.
         std::fs::write(dir.join("f.txt"), "one\nEDITED\nthree\n").unwrap();
