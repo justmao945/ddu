@@ -105,6 +105,7 @@ impl AppView {
                 diff_selected: None,
                 diff_closed: Default::default(),
                 diff_tree_height: None,
+                view_mode: None,
             });
             self.current_session = project.sessions.len() - 1;
         }
@@ -137,24 +138,37 @@ impl AppView {
                 .get_mut(fp)
                 .and_then(|p| p.sessions.get_mut(fs))
             {
-                s.diff_selected = self
+                // Only the loaded diff knows the truth about the
+                // selection: a save that lands before the first poll
+                // (the window-frame debounce does) must not overwrite
+                // the stored path with `None`.
+                // As in `persist`: never overwrite the stored path
+                // with `None` before the diff has loaded.
+                let selected = self
                     .diff
                     .as_ref()
                     .and_then(|d| self.diff_file.and_then(|ix| d.files.get(ix)))
                     .map(|f| f.path.to_string());
+                if selected.is_some() || self.diff.is_some() {
+                    s.diff_selected = selected;
+                }
                 s.diff_closed = self.diff_tree_closed.clone();
+                s.view_mode = Some(self.view_mode.as_str().to_owned());
                 // Hidden layer reports no live height — keep the stored one.
                 if let Some(h) = live_h {
                     s.diff_tree_height = Some(h);
                 }
             }
         }
-        let (seed, closed, height) = {
+        let (seed, closed, height, mode) = {
             let incoming = self.projects.get(to.0).and_then(|p| p.sessions.get(to.1));
             (
                 incoming.and_then(|s| s.diff_selected.clone()),
                 incoming.map(|s| s.diff_closed.clone()).unwrap_or_default(),
                 incoming.and_then(|s| s.diff_tree_height),
+                incoming
+                    .and_then(|s| s.view_mode.as_deref())
+                    .and_then(ViewMode::parse),
             )
         };
         self.diff_seed_path = seed;
@@ -172,7 +186,12 @@ impl AppView {
             });
         }
         self.reset_diff();
+        // The pane's mode is per session too: the incoming row's mode,
+        // stock Diff for a row that never chose one.
+        self.view_mode = mode.unwrap_or_default();
+        self.ensure_file_content(cx);
         self.diff_tree_closed = closed;
+        self.rebuild_tree_index();
         self.reload_diff(cx);
     }
 
@@ -830,6 +849,7 @@ mod tests {
             selected_file: None,
             closed_dirs: vec![],
             tree_height: None,
+            view_mode: None,
         };
         let finished_row = SavedSession {
             kind: "omp".into(),
@@ -839,6 +859,7 @@ mod tests {
             selected_file: None,
             closed_dirs: vec![],
             tree_height: None,
+            view_mode: None,
         };
         gpui::run_test_once(
             0,

@@ -11,9 +11,14 @@ use super::{panel_header_px, scaled};
 use super::diff_tree::plus_minus;
 use super::panel_view;
 use crate::app::AppView;
-use crate::diff::{DiffFile, DiffLine, DiffRow};
+use crate::diff::view::FileView;
+use crate::diff::{
+    DiffFile, DiffLine, NoteKind, PaneRow, RowStream, EXPAND_MAX_LINES, MAX_LINES_PER_FILE,
+};
 use gpui_kit::base::SelectableText;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _, Toggle, ToggleVariant, ToggleVariants as _};
+use gpui_kit::component::text::TextView;
+use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{self, Input};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -97,7 +102,140 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                 .child(file.map(|f| f.path.clone()).unwrap_or_default()),
         )
         .child(div().flex_1())
-        .when_some(file, |el, f| el.child(plus_minus(f.added, f.removed, cx)))
+        .when_some(file, |el, f| {
+            el.child(mode_toggle(this, f.path.as_str(), cx))
+                .when_some(file_line_count(this), |el, count| {
+                    el.child(super::meta_text(format!("{} lines", count), cx))
+                })
+                .child(plus_minus(f.added, f.removed, cx))
+        })
+}
+
+/// The whole-file view's line count, when File mode has one to show
+/// (the header's one piece of extra context in that mode).
+fn file_line_count(this: &AppView) -> Option<String> {
+    match this.cached_file_view()? {
+        FileView::Text(view) => Some(grouped(view.lines_total)),
+        _ => None,
+    }
+}
+
+/// The mode switch: one `Toggle` per surface (`⌘⇧M` cycles the same
+/// three). Standalone toggles rather than a `ToggleGroup`: the group
+/// takes over its children's clicks and keyboard activation never
+/// reaches its callback, so the keyboard-switchable control has to own
+/// each item's click itself.
+fn mode_toggle(this: &AppView, path: &str, cx: &mut Context<AppView>) -> impl IntoElement {
+    let active = this.effective_view_mode();
+    h_flex()
+        .flex_shrink_0()
+        .gap_1()
+        .children([ViewMode::Diff, ViewMode::File, ViewMode::Preview].map(|mode| {
+            Toggle::new(SharedString::from(format!("view-mode-{}", mode.as_str())))
+                .label(match mode {
+                    ViewMode::Diff => "Diff",
+                    ViewMode::File => "File",
+                    ViewMode::Preview => "Preview",
+                })
+                .checked(active == mode)
+                .with_variant(ToggleVariant::Ghost)
+                .with_size(gpui_kit::component::Size::XSmall)
+                .disabled(!mode.available(path))
+                .tooltip(match mode {
+                    ViewMode::Diff => "Show the diff hunks",
+                    ViewMode::File => "Show the whole file with changes tinted",
+                    ViewMode::Preview => "Render the Markdown",
+                })
+                .on_click(cx.listener(move |this, _: &bool, _, cx| {
+                    this.set_view_mode(mode, cx);
+                }))
+        }))
+}
+
+/// Which surface the right pane shows for the selected file. The mode
+/// is per session (persisted) and every mode reads the same
+/// [`RowStream`] contract, so the find bar, `scroll_to_item` and the
+/// drag selection behave identically in all of them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum ViewMode {
+    /// The file's hunks — the original pane, unchanged.
+    #[default]
+    Diff,
+    /// The whole file with the diff's changes tinted in place.
+    File,
+    /// Rendered Markdown (`.md` / `.markdown` / `.mdx` only).
+    Preview,
+}
+
+impl ViewMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Diff => "diff",
+            Self::File => "file",
+            Self::Preview => "preview",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "diff" => Some(Self::Diff),
+            "file" => Some(Self::File),
+            "preview" => Some(Self::Preview),
+            _ => None,
+        }
+    }
+
+    /// Whether the mode can render this file: Preview is Markdown-only.
+    pub(crate) fn available(self, path: &str) -> bool {
+        self != Self::Preview || is_markdown(path)
+    }
+
+    /// Where `⌘⇧M` goes from here.
+    pub(crate) fn next(self, path: &str) -> Self {
+        match self {
+            Self::Diff => Self::File,
+            Self::File if is_markdown(path) => Self::Preview,
+            Self::File | Self::Preview => Self::Diff,
+        }
+    }
+}
+
+/// Preview's extension gate.
+pub(crate) fn is_markdown(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [".md", ".markdown", ".mdx"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
+const NOTE_BINARY: &str = "Binary file — showing the diff.";
+const NOTE_TOO_LARGE: &str = "Too large to view — showing the diff.";
+const NOTE_MISSING: &str = "No longer on disk — showing the diff.";
+const NOTE_READING: &str = "Reading the file…";
+
+/// The mode's row stream for the selected file, plus the reason the
+/// requested mode could not be shown (the pane renders the diff's hunks
+/// and bands the reason above them). `None` rows mean the pane has
+/// nothing of its own to render — Preview hands the body to the
+/// Markdown view instead.
+pub(crate) fn pane_rows(this: &AppView) -> (Option<RowStream<'_>>, Option<&'static str>) {
+    let Some(diff) = &this.diff else {
+        return (None, None);
+    };
+    let Some(file) = this.diff_file.and_then(|ix| diff.files.get(ix)) else {
+        return (None, None);
+    };
+    match this.effective_view_mode() {
+        ViewMode::Preview => (None, None),
+        ViewMode::Diff => (Some(RowStream::diff(file)), None),
+        ViewMode::File => match this.cached_file_view() {
+            Some(FileView::Text(view)) => (Some(RowStream::view(view)), None),
+            Some(FileView::Binary) => (Some(RowStream::diff(file)), Some(NOTE_BINARY)),
+            Some(FileView::TooLarge) => (Some(RowStream::diff(file)), Some(NOTE_TOO_LARGE)),
+            Some(FileView::Missing) => (Some(RowStream::diff(file)), Some(NOTE_MISSING)),
+            None => (Some(RowStream::diff(file)), Some(NOTE_READING)),
+        },
+    }
 }
 
 fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -119,84 +257,131 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
         return empty("Select a file in the tree.", cx).into_any_element();
     };
     let file = &diff.files[file_ix];
-    let gutter_w = gutter_width(file, window, cx);
-    let content_w = measure_content_width(file, gutter_w, window, cx);
+    if this.effective_view_mode() == ViewMode::Preview {
+        return preview_body(this, file, cx).into_any_element();
+    }
+    let (Some(stream), note) = pane_rows(this) else {
+        return empty("Select a file in the tree.", cx).into_any_element();
+    };
+    let gutter_w = gutter_width(&stream, window, cx);
+    let content_w = measure_content_width(&stream, gutter_w, window, cx);
     let heights = RowHeights::new(window);
-    let sizes = Rc::new(row_sizes(file, heights));
+    let sizes = Rc::new(row_sizes(&stream, heights));
+    let mode = this.effective_view_mode();
 
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
+        .when_some(note, |el, note| el.child(notice_band(note, cx)))
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .child(
+                    // v_virtual_list builds only the visible slice per
+                    // frame: row heights are declared up front (see
+                    // `RowHeights`), so scrolling even a 200k-line file
+                    // costs one range render instead of rebuilding every
+                    // row. Item indices mirror the mode's `RowStream`
+                    // walk (plus the note row), which is what keeps
+                    // search's `scroll_to_item` landing on the right row
+                    // in every mode.
+                    v_virtual_list(
+                        cx.entity(),
+                        SharedString::from(format!("diff-rows-{}", mode.as_str())),
+                        sizes,
+                        move |this, range, window, cx| {
+                            render_rows(
+                                this, mode, range, content_w, gutter_w, heights, window, cx,
+                            )
+                        },
+                    )
+                    .track_scroll(&this.diff_hunks_scroll)
+                    .size_full()
+                    .p_2(),
+                )
+                .scrollbar(&this.diff_hunks_scroll, scroll::ScrollbarAxis::Both)
+                .context_menu({
+                    let path = file.path.clone();
+                    let contents = file_text(this, file);
+                    move |menu, _, _| {
+                        let path = path.clone();
+                        let contents = contents.clone();
+                        menu.item(
+                            PopupMenuItem::new("Copy File Path")
+                                .icon(Icon::new(IconName::Copy))
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Copy File Contents")
+                                .icon(Icon::new(IconName::Copy))
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(contents.clone()));
+                                }),
+                        )
+                    }
+                }),
+        )
+        .into_any_element()
+}
 
+/// The one-line band above the rows: why the pane is showing something
+/// other than what the mode asked for (binary, oversized, deleted,
+/// still reading).
+fn notice_band(text: &str, cx: &Context<AppView>) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .px_3()
+        .py_1()
+        .bg(cx.theme().foreground.opacity(0.05))
+        .text_xs()
+        .text_color(cx.theme().foreground.opacity(0.5))
+        .child(text.to_string())
+}
+
+/// The Preview mode body: the file's Markdown source, rendered by
+/// gpui-component's own text view (its parser handles the GFM set —
+/// tables, task lists, strikethrough). Kept to the same size cap as
+/// File mode, so a runaway document cannot stall a frame.
+fn preview_body(this: &AppView, file: &DiffFile, cx: &mut Context<AppView>) -> impl IntoElement {
+    let Some(text) = this.cached_preview().map(|text| text.to_owned()) else {
+        return div()
+            .flex_1()
+            .min_h_0()
+            .child(notice_band(NOTE_READING, cx))
+            .into_any_element();
+    };
     div()
         .flex_1()
         .min_h_0()
         .min_w_0()
+        .overflow_hidden()
         .child(
-            // v_virtual_list builds only the visible slice per frame:
-            // row heights are declared up front (see `RowHeights`), so
-            // scrolling even a huge diff costs one range render instead
-            // of rebuilding every row. Item indices still mirror the
-            // `DiffFile::rows` walk (plus the binary/truncation notes),
-            // which is what keeps search's `scroll_to_item` landing on
-            // the right row.
-            v_virtual_list(
-                cx.entity(),
-                "diff-hunks",
-                sizes,
-                move |this, range, window, cx| {
-                    render_rows(this, file_ix, range, content_w, gutter_w, heights, window, cx)
-                },
+            TextView::markdown(
+                SharedString::from(format!("md-preview-{}", file.path)),
+                text,
             )
-            .track_scroll(&this.diff_hunks_scroll)
-            .size_full()
-            .p_2(),
+                .selectable(true)
+                .scrollable(true),
         )
-        .scrollbar(&this.diff_hunks_scroll, scroll::ScrollbarAxis::Both)
-        .context_menu({
-            let path = diff.files[file_ix].path.clone();
-            let lines = diff.files[file_ix]
-                .hunks
-                .iter()
-                .flat_map(|h| h.lines.iter())
-                .filter(|l| l.kind != '-')
-                .map(|l| l.text.clone())
-                .collect::<Vec<_>>();
-            move |menu, _, _| {
-                let path = path.clone();
-                let contents = lines.join("\n");
-                menu.item(
-                    PopupMenuItem::new("Copy File Path")
-                        .icon(Icon::new(IconName::Copy))
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
-                        }),
-                )
-                .item(
-                    PopupMenuItem::new("Copy File Contents")
-                        .icon(Icon::new(IconName::Copy))
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(contents.clone()));
-                        }),
-                )
-            }
-        })
         .into_any_element()
 }
 
-/// Longest lines shaped exactly per render (bound on text-system calls).
-const MEASURE_CANDIDATES: usize = 16;
-/// Chrome left of a diff line's text besides the two number gutters
-/// (their width is measured per file — see `gutter_width`): the sign
-/// column (14px) and the text block's `pl_2`/`pr_3` padding.
-const LINE_CHROME_EXTRAS: f32 = 14. + 8. + 12.;
-/// Hunk header horizontal padding (`px_2` on both sides).
-const HEADER_CHROME: f32 = 16.;
-
+/// Builds the rows of one visible slice. The walk is the same
+/// [`DiffFile::rows`] order `diff::match_rows` numbers, so a row's
+/// item index IS its search index; a hunk header is spaced iff it is
+/// not the file's first row.
 /// Declared row heights for the virtual list. Line rows are single
-/// nowrap lines of `text_sm`, so one height fits all of them (the
-/// number gutters carry the row's only extra: `pt(2px)`); hunk header
-/// bands add their padding, with extra top spacing between hunks.
-/// Computed with the framework's own text-style math so the declared
-/// sizes match what the rows lay out at.
-#[derive(Clone, Copy)]
+/// nowrap lines of `text_sm`, so one height fits all of them (the number
+/// gutters carry the row's only extra: `pt(2px)`); hunk header bands add
+/// their padding, with extra top spacing between hunks; a note row is a
+/// bare line. Computed with the framework's own text-style math so the
+/// declared sizes match what the rows lay out at.
+#[derive(Clone, Copy, PartialEq)]
 struct RowHeights {
     line: Pixels,
     header: Pixels,
@@ -220,44 +405,109 @@ impl RowHeights {
     }
 }
 
-/// Every row's height, in the pane's item order: per hunk the `@@`
-/// header then its lines, in [`DiffFile::rows`] order, with the
-/// binary/empty note standing alone and the truncation note appended
-/// last. Widths are unused by `v_virtual_list` (it measures one row
-/// for the cross axis); the rows carry the definite `content_w`
-/// themselves, which is what gives the horizontal scrollbar its range
-/// and keeps the +/- tint bands uniform.
-fn row_sizes(file: &DiffFile, heights: RowHeights) -> Vec<gpui_kit::Size<Pixels>> {
-    if file.hunks.is_empty() {
-        return vec![size(px(0.), heights.meta)];
+/// Height of the row at `ix`, in the stream's item order.
+fn row_height(stream: &RowStream<'_>, ix: usize, heights: RowHeights) -> Pixels {
+    match stream.row(ix) {
+        Some(PaneRow::Header(_)) if ix > 0 => heights.header_spaced,
+        Some(PaneRow::Header(_)) => heights.header,
+        Some(PaneRow::Line(_)) => heights.line,
+        // The trailing note row, and any index past the end.
+        _ => heights.meta,
     }
-    let extra = if file.truncated { 1 } else { 0 };
-    let mut sizes =
-        Vec::with_capacity(file.hunks.iter().map(|h| h.lines.len() + 1).sum::<usize>() + extra);
-    for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
-        sizes.push(size(
-            px(0.),
-            if hunk_ix == 0 {
-                heights.header
-            } else {
-                heights.header_spaced
-            },
-        ));
-        sizes.extend(std::iter::repeat_n(size(px(0.), heights.line), hunk.lines.len()));
-    }
-    if file.truncated {
-        sizes.push(size(px(0.), heights.meta));
-    }
-    sizes
 }
 
-/// Builds the rows of one visible slice. The walk is the same
-/// [`DiffFile::rows`] order `diff::match_rows` numbers, so a row's
-/// item index IS its search index; a hunk header is spaced iff it is
-/// not the file's first row.
+/// Every row's height, in the stream's item order — what the virtual
+/// list is handed so it can place a slice without measuring the rows it
+/// does not build. Widths are unused (it measures one row for the cross
+/// axis); the rows carry the definite `content_w` themselves, which is
+/// what gives the horizontal scrollbar its range and keeps the +/-
+/// tint bands uniform.
+fn row_sizes(stream: &RowStream<'_>, heights: RowHeights) -> Vec<gpui_kit::Size<Pixels>> {
+    (0..stream.len())
+        .map(|ix| size(px(0.), row_height(stream, ix, heights)))
+        .collect()
+}
+
+/// The diff-line budget in force for the selected file.
+fn line_budget(this: &AppView) -> usize {
+    this.current_diff_path()
+        .and_then(|path| this.diff_limits.get(path).copied())
+        .unwrap_or(MAX_LINES_PER_FILE)
+}
+
+/// Whether the note row's slice should grow the file's budget on sight.
+fn note_expandable(this: &AppView, stream: &RowStream<'_>) -> bool {
+    matches!(
+        stream.note(),
+        Some(NoteKind::DiffCapped | NoteKind::TintsCapped)
+    ) && line_budget(this) < EXPAND_MAX_LINES
+}
+
+/// The note row's text: the stream says which note it appended, the pane
+/// says what it reads like (and how far the budget has grown).
+fn note_text(this: &AppView, stream: &RowStream<'_>) -> String {
+    match stream.note() {
+        None => String::new(),
+        Some(NoteKind::NoTextChanges) => {
+            "No text changes to display (binary, empty file, or metadata change).".to_owned()
+        }
+        Some(NoteKind::EmptyFile) => "Empty file.".to_owned(),
+        Some(note @ (NoteKind::DiffCapped | NoteKind::TintsCapped)) => {
+            let limit = line_budget(this);
+            if limit < EXPAND_MAX_LINES {
+                return if note == NoteKind::TintsCapped {
+                    "Loading the file's changes…".to_owned()
+                } else {
+                    "Loading more lines…".to_owned()
+                };
+            }
+            if note == NoteKind::TintsCapped {
+                format!(
+                    "Change tints stop at {} lines. Change totals include the entire file.",
+                    grouped(limit)
+                )
+            } else {
+                format!(
+                    "Preview limited to {} lines. Change totals include the entire file.",
+                    grouped(limit)
+                )
+            }
+        }
+    }
+}
+
+/// The selected file's text for "Copy File Contents": the real file when
+/// File mode has read it, otherwise the diff's own reconstruction (every
+/// line the diff did not remove).
+fn file_text(this: &AppView, file: &DiffFile) -> String {
+    if let Some(FileView::Text(view)) = this.cached_file_view() {
+        return view
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                crate::diff::view::ViewRow::Line(line) if line.kind != '-' => {
+                    Some(line.text.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    file.hunks
+        .iter()
+        .flat_map(|h| h.lines.iter())
+        .filter(|l| l.kind != '-')
+        .map(|l| l.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Builds the rows of one visible slice, in the mode's stream order. A
+/// row's item index IS its search index in every mode, so the find bar's
+/// `scroll_to_item` and the highlight set need no mode-specific logic.
 fn render_rows(
     this: &AppView,
-    file_ix: usize,
+    mode: ViewMode,
     range: std::ops::Range<usize>,
     content_w: Pixels,
     gutter_w: Pixels,
@@ -265,88 +515,54 @@ fn render_rows(
     window: &mut Window,
     cx: &mut Context<AppView>,
 ) -> Vec<AnyElement> {
-    let Some(diff) = &this.diff else {
-        return Vec::new();
-    };
-    let Some(file) = diff.files.get(file_ix) else {
+    let (Some(stream), _) = pane_rows(this) else {
         return Vec::new();
     };
     let matches = &this.diff_search.matches;
     let current_row = matches.get(this.diff_search.current).copied();
-    if file.hunks.is_empty() {
-        return if range.start == 0 {
-            vec![row_box(
-                meta_row("No text changes to display (binary, empty file, or metadata change).", cx),
-                content_w,
-                heights.meta,
-            )
-            .into_any_element()]
-        } else {
-            Vec::new()
+    let mut rows: Vec<AnyElement> = Vec::with_capacity(range.end.saturating_sub(range.start));
+    for ix in range.clone() {
+        let Some(row) = stream.row(ix) else {
+            continue;
         };
-    }
-    let mut rows: Vec<AnyElement> = Vec::with_capacity(range.end - range.start);
-    for (row_ix, row) in file
-        .rows()
-        .enumerate()
-        .skip(range.start)
-        .take(range.end - range.start)
-    {
         rows.push(match row {
-            DiffRow::Header(header) => row_box(
-                hunk_header(header.to_string(), row_ix > 0, cx),
+            PaneRow::Header(header) => row_box(
+                hunk_header(header.to_string(), ix > 0, cx),
                 content_w,
-                if row_ix > 0 {
-                    heights.header_spaced
-                } else {
-                    heights.header
-                },
+                row_height(&stream, ix, heights),
             )
             .into_any_element(),
-            DiffRow::Line(line) => {
-                let hit = matches.binary_search(&row_ix).is_ok();
+            PaneRow::Line(line) => {
+                let hit = matches.binary_search(&ix).is_ok();
                 row_box(
-                    diff_line(row_ix, line, hit, current_row == Some(row_ix), gutter_w, cx),
+                    diff_line(ix, line, hit, current_row == Some(ix), gutter_w, cx),
                     content_w,
                     heights.line,
                 )
                 .into_any_element()
             }
+            PaneRow::Note => {
+                row_box(meta_row(&note_text(this, &stream), cx), content_w, heights.meta)
+                    .into_any_element()
+            }
         });
     }
-    if file.truncated {
-        let note_ix = file.hunks.iter().map(|h| h.lines.len() + 1).sum::<usize>();
-        if range.start <= note_ix && note_ix < range.end {
-            let limit = this
-                .diff_limits
-                .get(&file.path)
-                .copied()
-                .unwrap_or(crate::diff::MAX_LINES_PER_FILE);
-            let note = if file.lines_total >= limit && limit < crate::diff::EXPAND_MAX_LINES {
-                // The rendered slice reached the cap note: grow the
-                // file's budget and reload (next frame — this closure
-                // runs mid-layout, the entity is on the stack).
-                let path = file.path.clone();
+    // The rendered slice reached the cap note: grow this file's budget
+    // and reload (next frame — this closure runs mid-layout, the entity
+    // is on the stack).
+    let _ = mode;
+    if let Some(note_ix) = stream.note_ix() {
+        if range.start <= note_ix && note_ix < range.end && note_expandable(this, &stream) {
+            if let Some(path) = this.current_diff_path().map(str::to_owned) {
                 cx.on_next_frame(window, move |this, _window, cx| {
                     this.expand_diff_limit(&path, cx);
                 });
-                "Loading more lines…".to_owned()
-            } else {
-                format!(
-                    "Preview limited to {} lines. Change totals include the entire file.",
-                    grouped(limit)
-                )
-            };
-            rows.push(row_box(meta_row(&note, cx), content_w, heights.meta).into_any_element());
+            }
         }
     }
     rows
 }
 
-/// Every row carries the file's definite width plus the full-width
-/// minimum, so row bands stay uniform and the list's measured cross
-/// size gives the horizontal scrollbar a real range. The height is
-/// the one declared to `v_virtual_list`.
 fn row_box<E: Styled>(el: E, w: Pixels, h: Pixels) -> E {
     el.w(w).min_w_full().h(h)
 }
@@ -435,11 +651,23 @@ fn diff_line(
         )
 }
 
+/// Longest lines shaped exactly per render (bound on text-system calls).
+const MEASURE_CANDIDATES: usize = 16;
+/// Chrome left of a line's text besides the two number gutters (their
+/// width is measured per stream — see `gutter_width`): the sign column
+/// (14px) and the text block's `pl_2`/`pr_3` padding.
+const LINE_CHROME_EXTRAS: f32 = 14. + 8. + 12.;
+/// Hunk header horizontal padding (`px_2` on both sides).
+const HEADER_CHROME: f32 = 16.;
+
 /// Width the content column needs so the longest line never clips.
-/// Candidates are ranked by a display-cell estimate (non-ASCII ~2 cells),
-/// then the top few are shaped exactly with the mono font at `text_sm`.
+/// Candidates come from the stream — a whole-file view hands back the
+/// handful it ranked when it was built, so a 200k-line file costs the
+/// same here as a small one — are ordered by a display-cell estimate
+/// (non-ASCII ~2 cells) and the top few are shaped exactly with the mono
+/// font at `text_sm`.
 fn measure_content_width(
-    file: &DiffFile,
+    stream: &RowStream<'_>,
     gutter_w: Pixels,
     window: &mut Window,
     cx: &mut Context<AppView>,
@@ -450,18 +678,18 @@ fn measure_content_width(
         ..Default::default()
     };
     let size = px(0.75 * f32::from(window.rem_size()));
-    let estimate = |s: &str| {
-        s.chars()
-            .fold(0usize, |n, c| n + if c.is_ascii() { 1 } else { 2 })
-    };
 
-    let mut candidates: Vec<(usize, &str, f32)> = Vec::new();
-    for hunk in &file.hunks {
-        candidates.push((estimate(&hunk.header), hunk.header.as_str(), HEADER_CHROME));
-        for line in &hunk.lines {
-            candidates.push((estimate(&line.text), line.text.as_str(), line_chrome));
-        }
-    }
+    let mut candidates: Vec<(usize, &str, f32)> = stream
+        .width_candidates()
+        .into_iter()
+        .map(|(text, is_header)| {
+            (
+                crate::diff::cells(text),
+                text,
+                if is_header { HEADER_CHROME } else { line_chrome },
+            )
+        })
+        .collect();
     candidates.sort_unstable_by(|a, b| b.0.cmp(&a.0));
 
     let mut max_w = px(0.);
@@ -610,19 +838,12 @@ fn find_bar(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         )
 }
 
-/// Gutter width for the file's largest line number, measured in the mono
-/// font at `text_sm`: the stock 36px (scaled) fits three digits, and a
-/// wider number would wrap into the next row (row heights are fixed).
+/// Gutter width for the stream's largest line number, measured in the
+/// mono font at `text_sm`: the stock 36px (scaled) fits three digits, and
+/// a wider number would wrap into the next row (row heights are fixed).
 /// Floored at the stock width so small diffs don't shift.
-fn gutter_width(file: &DiffFile, window: &mut Window, cx: &mut Context<AppView>) -> Pixels {
-    let max_no = file
-        .hunks
-        .iter()
-        .flat_map(|h| h.lines.iter())
-        .filter_map(|l| l.old_no.max(l.new_no))
-        .max()
-        .unwrap_or(0);
-    let digits = max_no.to_string().len();
+fn gutter_width(stream: &RowStream<'_>, window: &mut Window, cx: &mut Context<AppView>) -> Pixels {
+    let digits = stream.max_line_no().to_string().len();
     let sample: SharedString = "8".repeat(digits).into();
     let run = TextRun {
         len: sample.len(),

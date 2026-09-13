@@ -28,6 +28,26 @@ list that fits). That host must also be a flex container (`v_flex`), or the
 `flex_1` scroller inside never gets a bounded height and long content is
 clipped instead of scrolling.
 
+## Virtualized lists
+
+Both long lists (the terminal's diff pane rows and the sidebar's file tree) are
+`v_virtual_list`s: the item sizes are declared up front and only the visible
+slice is built per frame — a 3 000-row tree builds ~8 rows, measured. Two
+consequences:
+
+* The host of a virtual list must give it a **bounded height** (a flex container
+  whose `flex_1` slot is definite — see "Scroll regions" above); a plain block
+  host leaves the list at content height, and the layer then clips instead of
+  scrolling.
+* Anything a row needs must be cheap and precomputed: the tree's rows come from
+  `AppView::tree_index` (one `build_index` per diff and per collapse toggle),
+  the whole-file view from the File-mode cache (one background `FileView::build`
+  per `(path, diff generation)`). Render only ever reads them.
+
+`v_virtual_list` needs the full `Rc<Vec<Size<Pixels>>>` every frame, so a list's
+sizes are an O(rows) allocation per frame by design; what must not be O(rows) is
+element building, path splitting, stat rollups or file IO.
+
 ## Cached panels
 
 The three shell panels are cached child views (`panel_view!` in

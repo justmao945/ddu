@@ -269,6 +269,10 @@ pub struct SavedSession {
     /// clamped to the layer's min/max on restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree_height: Option<f32>,
+    /// Which surface this row's right pane was showing (`diff` / `file`
+    /// / `preview`); absent in files written before the view panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_mode: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -611,6 +615,7 @@ mod tests {
                 selected_file: None,
                 closed_dirs: vec![],
                 tree_height: Some(260.),
+                view_mode: None,
             }],
         }]);
         let saved = serde_json::to_string(&state).unwrap();

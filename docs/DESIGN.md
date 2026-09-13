@@ -61,13 +61,15 @@ ddu/
       element.rs      # custom GPUI Element painting the grid
       attention.rs    # BEL / OSC 9 / OSC 777 hand-back markers
       boxart.rs       # vector box-drawing glyphs
-    diff/             # git diff model
-      mod.rs          # DiffFile / DiffHunk / DiffLine / GitDiff types
+    diff/             # git diff model + the pane's row stream
+      mod.rs          # DiffFile / DiffHunk / DiffLine / GitDiff, PaneRow, RowStream
       git.rs          # git2 HEAD→workdir query (+ tests)
+      view.rs         # whole-file view: file lines with the diff merged in
     ui/               # surface regions, thin composition over the models
       mod.rs          # scaled(), dialog_footer(), panel_view!, shared metrics
       terminal.rs     # center pane: focus, keys, scroll, exit banner
       session_panel.rs / diff_panel.rs / diff_tree.rs / status_bar.rs / title_bar.rs
+                      # diff_tree also builds the row index the virtual list renders
       settings/       # settings window: mod.rs (pages) + theme/shell/notify
   scripts/            # dev.sh / install.sh / make-bundle.sh + make-signing-identity.sh
                       # (macOS bundle + signing), linux.sh, lib.sh
@@ -184,7 +186,12 @@ Agent CLIs (claude/codex/omp) daily need streaming output, ANSI colors, line-wra
 
 * Data: `Repository::discover(project.path)` → `diff_tree_to_workdir_with_index(head, opts)` with `include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true)` — staged, unstaged and untracked in one pass, no subprocess. Refreshed by the 3 s poll (every session switch reloads immediately); there is **no** `notify`-crate `.git` watcher and no manual refresh control.
 * Truncation: a file's collected lines are capped at `MAX_LINES_PER_FILE` (5 000) with the stat counts still counted in full; the pane renders a cap note and reaching it grows that file's budget ×4 up to `EXPAND_MAX_LINES` (200 000).
-* View: the file list is the sidebar's diff tree layer (`ui/diff_tree.rs`) — changed paths split into directories, `+a/−b` per file and rolled up per directory, per-session collapse state; the hunk area (`ui/diff_panel.rs`) paints its own rows: two number gutters + a sign column, green `+` / red `-` / untinted context rows, `@@` header bands, `SelectableText` per line and a find bar (⌘F) whose match indices are the pane's child indices.
+* View: the file list is the sidebar's diff tree layer (`ui/diff_tree.rs`) — changed paths split into directories, `+a/−b` per file and rolled up per directory, per-session collapse state. Its rows come from a **`TreeIndex`** built once per diff (and per collapse toggle) into `AppView::tree_index` — flatten + stats rollup are O(files) off the render path — and a `v_virtual_list` builds only the visible slice, so a 3 000-file tree renders like a 30-file one.
+* Pane modes: the hunk area (`ui/diff_panel.rs`) shows the selected file in one of three modes, `⌘⇧M` cycles (per session, persisted):
+  * **Diff** — hunks only: two number gutters (measured per file) + a sign column, green `+` / red `-` / untinted context rows, `@@` header bands.
+  * **File** — the whole file with the changes merged in (`diff/view.rs`): every workdir line once, deletions spliced above the line that replaced them, hunk headers kept as bands, `+`/`-` rows tinted in place. Built off the UI thread once per `(path, diff generation)`; a stale diff (the file moved under the 3 s poll) degrades to untinted context instead of splicing at the wrong line, and a capped diff tints only its prefix (the cap note then grows the file's budget as in Diff mode). Refuses what it cannot show — binary (NUL in the first 8 KiB), over `MAX_VIEW_BYTES` (8 MiB) / `MAX_VIEW_LINES` (200 000), or gone from disk — and bands the reason above the hunks.
+  * **Preview** — rendered Markdown (`TextView::markdown`, `.md`/`.markdown`/`.mdx` only; the toggle disables itself elsewhere and a non-Markdown selection renders File while the mode survives). The find bar has no match list here: ⌘F switches back to File.
+  Both modes are one **`RowStream`** (`diff/mod.rs`): a row's item index *is* its search index, so the find bar, `scroll_to_item` and drag selection are mode-agnostic; the pane's `v_virtual_list` builds only the visible slice of either. Plain lines are `SelectableText` participants ordered by `document_order` (drag selection copies them joined by newlines).
 * Scope: project-level HEAD→workdir diff by default; per-session scope (branch/worktree) comes later — with multiple sessions in one repo they share the project diff. The branch is captured on `GitDiff` but has no display yet.
 * The full working-tree listing and the pane's File/Preview modes are designed in `FILE_TREE.md` (not implemented).
 
@@ -228,7 +235,7 @@ struct AgentCmd { program: String, args: Vec<String> }
 * State `state.json` — the runtime workspace snapshot: projects with their session
   rows (including `resume_id` and the per-row `live` flag), the active
   project/session, panel visibility and widths, per-session diff selection /
-  collapsed directories / tree height, and window placement. PTY *contents* are
+  collapsed directories / tree height / **pane mode**, and window placement. PTY *contents* are
   never persisted; a row that was still running is respawned on the next launch,
   agents resumed from their id.
 * Both files live under `~/Library/Application Support/ddu/` (macOS) or
@@ -238,8 +245,9 @@ struct AgentCmd { program: String, args: Vec<String> }
   temp file and are renamed over the target.
 * Shortcuts, all `secondary-` (⌘ on macOS, ⌃ elsewhere): ⌘N new session, ⌘O add
   project, ⌘1…⌘9 select the Nth session, ⌘T toggle the diff file tree, ⌘B toggle
-  the sidebar, ⌘R toggle the changes pane, ⌘W close session, ⌘, settings, ⌘Q quit,
-  ⌘+/⌘− terminal font zoom. Copy/paste/find are `secondary-` on macOS and
+  the sidebar, ⌘R toggle the changes pane, ⌘⇧M cycle the pane's mode (Diff →
+  File → Preview), ⌘W close session, ⌘, settings, ⌘Q quit, ⌘+/⌘− terminal font
+  zoom. Copy/paste/find are `secondary-` on macOS and
   `⌃⇧C` / `⌃⇧V` / `⌃⇧F` on Linux, so the terminal keeps `Ctrl+C` for SIGINT. A
   chord the app binds is never forwarded to the shell — on Linux `⌃N/O/T/B/R/W`
   and friends are ddu's, not readline's — while everything unbound still reaches
@@ -281,7 +289,13 @@ struct AgentCmd { program: String, args: Vec<String> }
   other `cx.notify()` fans out through `AppView::notify_panels`. This is what keeps
   a streaming agent from rebuilding the changes pane 20×/s.
 * The terminal element paints only the visible window; large diffs are capped per
-  file (§7) and the diff pane renders only the rows in view.
+  file (§7) and both the pane and the tree are virtual lists: only the visible
+  slice is built per frame (a 3 000-row tree builds ~8 rows), with row heights
+  declared up front so a deep scroll never re-measures or re-walks.
+* The whole-file view and the tree's row index are built outside the frame:
+  `FileView` off the UI thread once per `(path, diff generation)`, `TreeIndex`
+  once per applied diff. Rendering reads them — it never re-reads the workdir
+  or re-flattens the tree.
 * `render` stays declarative: read state, compose elements; parsing/mutation go in
   named methods. One `cx.notify()` per mutation.
 * Pin `gpui-kit 0.6` (i.e. `gpui-pre 0.3.3`); upgrade only by following gpui-kit.
@@ -292,11 +306,12 @@ struct AgentCmd { program: String, args: Vec<String> }
 * ~~M2 Real PTY~~ ✅ shipped: `terminal/` runs real agents (`claude`/`codex`/`omp`, shell fallback), streaming, colors, scrollback, resize, keystroke encoding. Acceptance met: the app is interactive; headless roundtrip tests cover spawn → parse → grid → exit.
 * ~~M3 Real diff~~ ✅ shipped: `diff/` queries HEAD→workdir (staged + unstaged + untracked) via git2; 3 s poll; stat counts with directory roll-ups; per-file line cap with a growing budget (§7).
 * ~~M4 Session management~~ ✅ shipped: open / kill / restart / exit status / confirmations / **persistence** — `state.json` restores projects, layout and per-session state, and rows that were still running come back running, agents resumed from their captured id.
-* M5 File tree + worktree + polish — open:
-  * the full working-tree file tree and the pane's file/preview modes: designed in `FILE_TREE.md`, not implemented;
-  * per-session worktrees (one branch + one directory per session) — sessions share the project diff today;
-  * syntax highlighting in the file view — deferred there too (`FILE_TREE.md` §8.4).
-  Shortcuts, theme switching, the settings window and the sidebar's diff tree layer are shipped.
+* M5 File tree + worktree + polish — partly shipped:
+  * ✅ the view panel: File mode (whole file, diff merged in, `diff/view.rs`), Preview mode (rendered Markdown) and the `⌘⇧M` mode switch, all on a virtualized row stream;
+  * ✅ virtualization: the tree renders from a per-poll `TreeIndex` through `v_virtual_list`, so changed-only trees of thousands of rows are cheap;
+  * open: the **full working-tree listing** (every file, `.gitignore` respected, `All n · Changed m` filter) and its default-collapse seeding — designed in `FILE_TREE.md`;
+  * open: per-session worktrees (one branch + one directory per session) — sessions share the project diff today;
+  * open: syntax highlighting in the file view — deferred (`FILE_TREE.md` §8.4).
 * Desktop notifications ✅ shipped: `terminal/attention.rs` decodes the agent's own hand-back markers (`BEL` / `OSC 9` / `OSC 777`) off the PTY stream, `AppView` posts one `show_system_notification` per row unless that terminal is the one on screen; Settings → General toggles it.
 
 ## 13. Risks

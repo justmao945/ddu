@@ -19,12 +19,25 @@ impl AppView {
             .get_mut(self.current_project)
             .and_then(|p| p.sessions.get_mut(self.current_session))
         {
-            s.diff_selected = self
+            // Only the loaded diff knows the truth about the
+            // selection: a save that lands before the first poll
+            // (the window-frame debounce does) must not overwrite
+            // the stored path with `None`.
+            // The stored path is only overwritten once the diff has
+            // loaded: a save landing before the first poll (the
+            // window-frame debounce does) knows nothing about the
+            // working tree, and writing `None` there would drop the
+            // row's selection.
+            let selected = self
                 .diff
                 .as_ref()
                 .and_then(|d| self.diff_file.and_then(|ix| d.files.get(ix)))
                 .map(|f| f.path.to_string());
+            if selected.is_some() || self.diff.is_some() {
+                s.diff_selected = selected;
+            }
             s.diff_closed = self.diff_tree_closed.clone();
+            s.view_mode = Some(self.view_mode.as_str().to_owned());
             // Hidden layer reports no live height — keep the stored one.
             if let Some(h) = live_h {
                 s.diff_tree_height = Some(h);
@@ -94,6 +107,7 @@ impl AppView {
                             selected_file: s.diff_selected.clone(),
                             closed_dirs: s.diff_closed.iter().cloned().collect(),
                             tree_height: s.diff_tree_height,
+                            view_mode: s.view_mode.clone(),
                         })
                         .collect(),
                 })
@@ -179,6 +193,7 @@ impl AppView {
                         diff_selected: selected,
                         diff_closed: closed,
                         diff_tree_height: tree_height,
+                        view_mode: s.view_mode.clone(),
                     });
             }
         }
@@ -263,6 +278,7 @@ mod tests {
             selected_file: None,
             closed_dirs: vec![],
             tree_height: None,
+            view_mode: None,
         }
     }
 
@@ -333,6 +349,7 @@ mod tests {
             selected_file: None,
             closed_dirs: vec![],
             tree_height: None,
+            view_mode: None,
         };
         // A shell in a project the window does NOT open on: the old
         // restore left those as `Done` rows, which is exactly the
@@ -345,6 +362,7 @@ mod tests {
             selected_file: None,
             closed_dirs: vec![],
             tree_height: None,
+            view_mode: None,
         };
         gpui::run_test_once(
             0,
@@ -448,6 +466,7 @@ mod tests {
             selected_file: None,
             closed_dirs: vec![],
             tree_height: None,
+            view_mode: None,
         };
         gpui::run_test_once(
             0,

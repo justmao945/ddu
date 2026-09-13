@@ -581,6 +581,7 @@ mod tests {
                 selected_file: None,
                 closed_dirs: vec![],
                 tree_height: None,
+                view_mode: None,
             }
         }
 

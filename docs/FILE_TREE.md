@@ -1,9 +1,18 @@
-# File Tree + View Panel (design, not yet implemented)
+# File Tree + View Panel (design)
 
 > Upgrade plan for M5/§8 of `DESIGN.md`: turn the changed-files diff tree into a
 > **complete file tree** with the diff folded into it, and turn the diff pane into
 > a **view panel** that shows a whole file with its diff merged in, plus a
 > **Markdown preview** mode.
+>
+> **Landed (2026-09-13, `DESIGN.md` §7/§12):** §4.2's merged row stream
+> (`src/diff/view.rs`), the pane's **File** and **Preview** modes with the
+> `⌘⇧M` switch (per session, persisted), and the virtualization §7 asked for —
+> the pane renders a mode-independent `RowStream` through `v_virtual_list`, and
+> the tree renders a per-poll `TreeIndex` the same way. **Not landed:** the full
+> working-tree listing (§4.1's index union), the `All · Changed` filter, the
+> default-collapse seeding rule, the `● n` dir badge, and §4.2's remaining caps
+> triage is now concrete — `MAX_VIEW_BYTES` 8 MiB / `MAX_VIEW_LINES` 200 000.
 > Framework: `gpui-kit = "0.6"` only. License: Apache-2.0, **GPL-free throughout**.
 
 ## 1. Goal
@@ -134,8 +143,9 @@ Merge algorithm for a changed file (`diff` present, workdir content readable):
      needs a test: a trailing deletion belongs after the last context line);
 4. after the last hunk, emit the remaining workdir lines as `Context`, then any
    still-pending deletions.
-5. Invariant, asserted in tests: every workdir line number appears exactly once,
-   and `rows.len() == file_lines + deleted_lines`.
+5. Invariant, asserted in tests: every workdir line number appears exactly once
+   and `rows.len() == hunks + file_lines + deleted_lines` (the stream keeps
+   `/\*\* @@ … @@ \*\/` headers as rows, so they count too).
 
 Other shapes: an untracked/fully-added file falls out of the same walk (one
 `+` block); a clean file is all `Context`; a deleted file returns `Missing` and
@@ -288,8 +298,9 @@ audit — `DESIGN.md` §13 mandates the check) and turning style ranges into
     removed placement, the trailing-deletion anchor, insertion-only hunks, and
     the `rows.len()` invariant.
   * `view_falls_back_for_deleted_binary_and_huge_files`.
-  * `view_rows_match_pane_child_indices` — the `rows()`/child-index identity,
-    mirroring the existing `match_rows` tests.
+  * `view_rows_match_pane_child_indices` — the row-index/search-index identity
+    over the merged stream (`deep_rows_are_indexed_and_searchable` covers it at
+    20k rows today).
   * `panel_cache_tests` extension: a mode switch notifies the diff pane and not
     the sidebar/terminal.
 * Visual, through the `computer` device (macOS; `VERIFICATION.md`): drive the

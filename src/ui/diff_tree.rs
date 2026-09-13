@@ -10,6 +10,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::app::AppView;
+use std::collections::HashSet;
+use std::rc::Rc;
+
 use crate::diff::DiffFile;
 
 /// Layer height bounds and default for the sidebar's vertical splitter
@@ -47,10 +50,15 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
     if diff.is_empty() {
         return empty_layer("No changes — working tree clean.", cx).into_any_element();
     }
+    // The row list is built once per diff (and per collapse toggle) in
+    // `build_index`, not per frame: a changed-only tree can still be
+    // thousands of rows, and flattening plus rolling up stats on every
+    // render is exactly what made a big repository crawl.
+    let Some(index) = this.tree_index.as_ref() else {
+        return empty_layer("Loading changes…", cx).into_any_element();
+    };
+    let sizes = Rc::new(vec![size(px(0.), px(row_px())); index.rows.len()]);
 
-    let selected = this.diff_file.filter(|ix| *ix < diff.files.len());
-    let tree = build_tree(&diff.files);
-    let (added, removed) = tree_stats(&tree);
     v_flex()
         .size_full()
         .min_w_0()
@@ -67,27 +75,35 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                 .pr_2()
                 .child(meta_text(format!("{} files changed", diff.files.len()), cx))
                 .child(div().flex_1())
-                .child(plus_minus(added, removed, cx)),
+                .child(plus_minus(index.added, index.removed, cx)),
         )
         .child(
-            div()
+            // A flex host, not a plain block: the virtual list inside
+            // takes its height from this box, and a block parent leaves
+            // it unbounded (the list lays out at content height and the
+            // layer clips instead of scrolling — see AGENTS.md).
+            v_flex()
                 .relative()
                 .flex_1()
                 .min_h_0()
                 .child(
-                    div()
-                        .id("diff-tree-scroll")
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&this.diff_tree_scroll)
-                        // No horizontal padding: hover and selection
-                        // bands run edge-to-edge — window border to
-                        // the divider.
-                        .pt_2()
-                        .pb_2()
-                        .child(tree_rows(&diff.files, &this.diff_tree_closed, &tree, selected, cx)),
+                    // Only the visible slice is built per frame; the
+                    // rows themselves come from the cached index, so a
+                    // scroll costs one range render.
+                    v_virtual_list(
+                        cx.entity(),
+                        "diff-tree",
+                        sizes,
+                        |this, range, window, cx| tree_rows(this, range, window, cx),
+                    )
+                    .track_scroll(&this.diff_tree_scroll)
+                    .size_full()
+                    // No horizontal padding: hover and selection bands
+                    // run edge-to-edge — window border to the divider.
+                    .pt_2()
+                    .pb_2(),
                 )
-                .vertical_scrollbar(&this.diff_tree_scroll),
+                .scrollbar(&this.diff_tree_scroll, scroll::ScrollbarAxis::Vertical),
         )
         .into_any_element()
 }
@@ -105,14 +121,24 @@ fn empty_layer(text: &str, cx: &mut Context<AppView>) -> impl IntoElement {
         .child(meta_text(text.to_string(), cx).w_full().text_center())
 }
 
-/// One level of the file tree. `files` are entries at this depth,
-/// `dirs` maps full directory paths to their nested subtrees (insertion
-/// order preserved). Owns clones so the built tree outlives the borrow
-/// of the source slice.
-#[derive(Clone, Default)]
+/// One level of the file tree, by index: `files` are rows at this
+/// depth (indices into the diff's file list), `dirs` maps full
+/// directory paths to their nested subtrees (insertion order
+/// preserved). Indices, not clones — the built tree has to outlive the
+/// borrow of the source slice without copying every hunk with it.
+#[derive(Default)]
 struct TreeNode {
-    files: Vec<(usize, DiffFile)>,
+    files: Vec<usize>,
     dirs: Vec<(String, TreeNode)>,
+}
+
+/// The tree's rows, ready for the virtual list: the flattened visible
+/// tree (collapse applied) plus the whole-tree `+/−` totals. Rebuilt
+/// when the diff changes or a directory is toggled — never per frame.
+pub(crate) struct TreeIndex {
+    pub(crate) rows: Vec<TreeRow>,
+    pub(crate) added: usize,
+    pub(crate) removed: usize,
 }
 
 /// Group flat file rows into a nested directory tree keyed by full dir
@@ -122,7 +148,7 @@ fn build_tree(files: &[DiffFile]) -> TreeNode {
     for (ix, f) in files.iter().enumerate() {
         let parts: Vec<&str> = f.path.split('/').collect();
         let mut node = &mut root;
-        for (depth, _) in parts.iter().enumerate().take(parts.len() - 1) {
+        for depth in 0..parts.len().saturating_sub(1) {
             let full = parts[..=depth].join("/");
             let pos = match node.dirs.iter().position(|(p, _)| *p == full) {
                 Some(p) => p,
@@ -133,19 +159,22 @@ fn build_tree(files: &[DiffFile]) -> TreeNode {
             };
             node = &mut node.dirs[pos].1;
         }
-        node.files.push((ix, f.clone()));
+        node.files.push(ix);
     }
     root
 }
 
 /// Recursive +/− totals for a subtree (dir rows show rolled-up stats).
-fn tree_stats(node: &TreeNode) -> (usize, usize) {
+fn tree_stats(node: &TreeNode, files: &[DiffFile]) -> (usize, usize) {
     let mut stats = (
-        node.files.iter().map(|(_, f)| f.added).sum::<usize>(),
-        node.files.iter().map(|(_, f)| f.removed).sum::<usize>(),
+        node.files.iter().map(|ix| files[*ix].added).sum::<usize>(),
+        node.files
+            .iter()
+            .map(|ix| files[*ix].removed)
+            .sum::<usize>(),
     );
     for (_, sub) in &node.dirs {
-        let (a, r) = tree_stats(sub);
+        let (a, r) = tree_stats(sub, files);
         stats.0 += a;
         stats.1 += r;
     }
@@ -155,7 +184,7 @@ fn tree_stats(node: &TreeNode) -> (usize, usize) {
 /// One rendered row of the flattened tree. `depth` drives the inner
 /// indent only — rows themselves stay full-width so hover/selection
 /// bands run edge-to-edge (window border to divider).
-enum TreeRow {
+pub(crate) enum TreeRow {
     File {
         ix: usize,
         depth: usize,
@@ -169,19 +198,35 @@ enum TreeRow {
     },
 }
 
+/// Flatten a diff plus the session's collapsed set into the row list the
+/// virtual list renders. O(files) once per poll — the render path then
+/// only touches the visible slice.
+pub(crate) fn build_index(files: &[DiffFile], closed: &HashSet<String>) -> TreeIndex {
+    let tree = build_tree(files);
+    let mut rows = Vec::new();
+    flatten(&tree, files, 0, closed, &mut rows);
+    let (added, removed) = tree_stats(&tree, files);
+    TreeIndex {
+        rows,
+        added,
+        removed,
+    }
+}
+
 /// Depth-first flatten of the visible tree: files before subdirs,
 /// insertion order kept; collapsed subtrees drop out entirely.
 fn flatten(
     tree: &TreeNode,
+    files: &[DiffFile],
     depth: usize,
-    closed: &std::collections::HashSet<String>,
+    closed: &HashSet<String>,
     out: &mut Vec<TreeRow>,
 ) {
-    for (ix, _) in &tree.files {
+    for ix in &tree.files {
         out.push(TreeRow::File { ix: *ix, depth });
     }
     for (path, sub) in &tree.dirs {
-        let (added, removed) = tree_stats(sub);
+        let (added, removed) = tree_stats(sub, files);
         let open = !closed.contains(path);
         out.push(TreeRow::Dir {
             path: path.clone(),
@@ -191,7 +236,7 @@ fn flatten(
             removed,
         });
         if open {
-            flatten(sub, depth + 1, closed, out);
+            flatten(sub, files, depth + 1, closed, out);
         }
     }
 }
@@ -214,28 +259,29 @@ fn guides(depth: usize, color: Hsla) -> Vec<Div> {
         .collect()
 }
 
-/// The flattened, full-width row list inside the scroll area.
+/// Builds the rows of one visible slice, straight off the cached index.
 fn tree_rows(
-    files: &[DiffFile],
-    closed: &std::collections::HashSet<String>,
-    tree: &TreeNode,
-    selected: Option<usize>,
+    this: &AppView,
+    range: std::ops::Range<usize>,
+    _window: &mut Window,
     cx: &mut Context<AppView>,
-) -> impl IntoElement {
+) -> Vec<AnyElement> {
+    let (Some(diff), Some(index)) = (this.diff.as_ref(), this.tree_index.as_ref()) else {
+        return Vec::new();
+    };
+    let selected = this.diff_file.filter(|ix| *ix < diff.files.len());
     let active_bg = selection_bg(cx);
     let hov_bg = hover_bg(cx);
     let guide = cx.theme().foreground.opacity(0.12);
 
-    let mut rows = Vec::new();
-    flatten(tree, 0, closed, &mut rows);
-
-    v_flex().flex_shrink_0().children(rows.into_iter().map(|row| {
-        match row {
+    index.rows[range]
+        .iter()
+        .map(|row| match row {
             TreeRow::File { ix, depth } => file_row(
-                ix,
-                &files[ix],
-                Some(ix) == selected,
-                depth,
+                *ix,
+                &diff.files[*ix],
+                Some(*ix) == selected,
+                *depth,
                 active_bg,
                 hov_bg,
                 guide,
@@ -248,13 +294,16 @@ fn tree_rows(
                 open,
                 added,
                 removed,
-            } => dir_row(path, depth, open, added, removed, hov_bg, guide, cx).into_any_element(),
-        }
-    }))
+            } => dir_row(
+                path, *depth, *open, *added, *removed, hov_bg, guide, cx,
+            )
+            .into_any_element(),
+        })
+        .collect()
 }
 
 fn dir_row(
-    path: String,
+    path: &str,
     depth: usize,
     open: bool,
     added: usize,
@@ -263,8 +312,8 @@ fn dir_row(
     guide: Hsla,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-    let toggle = path.clone();
+    let name = path.rsplit('/').next().unwrap_or(path).to_string();
+    let toggle = path.to_owned();
     div()
         .id(SharedString::from(format!("diff-dir-{path}")))
         .role(Role::TreeItem)
@@ -290,6 +339,7 @@ fn dir_row(
             if !this.diff_tree_closed.remove(&toggle) {
                 this.diff_tree_closed.insert(toggle.clone());
             }
+            this.rebuild_tree_index();
             cx.notify();
         }))
         .children(guides(depth, guide))
@@ -357,6 +407,9 @@ fn file_row(
                 this.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
             }
             this.diff_file = Some(ix);
+            // File/Preview mode: start reading the newly selected file
+            // (no-op in Diff mode, and cheap when the cache still holds).
+            this.ensure_file_content(cx);
             // An open find bar re-anchors to the newly shown file
             // (the query persists across files).
             this.refresh_diff_search(cx);
@@ -431,4 +484,96 @@ pub(crate) fn plus_minus(
                 .text_color(cx.theme().red)
                 .child(format!("−{removed}")),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::AppView;
+    use crate::config::{Config, State};
+    use crate::diff::{DiffFile, DiffHunk, DiffLine, GitDiff};
+    use gpui_kit::{Entity, TestAppContext, gpui};
+
+    /// A changed-only tree of a few thousand rows: the layer must be a
+    /// real scroller (its rows come from the cached index, the visible
+    /// slice from the virtual list) — the scroll region rule that a
+    /// padded or unbounded host silently breaks.
+    #[test]
+    fn a_large_tree_scrolls_and_keeps_its_rows_indexed() {
+        fn file(ix: usize) -> DiffFile {
+            DiffFile {
+                path: format!("many/d{}/f{ix}.txt", ix / 100),
+                added: 1,
+                removed: 0,
+                hunks: vec![DiffHunk {
+                    header: "@@ -1 +1,2 @@".into(),
+                    lines: vec![DiffLine {
+                        kind: '+',
+                        old_no: None,
+                        new_no: Some(2),
+                        text: "changed".into(),
+                    }],
+                }],
+                lines_total: 1,
+                truncated: false,
+            }
+        }
+
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 = TestAppContext::build(dispatcher, Some("diff_tree_virtual"));
+                let cx = &mut cx0;
+                cx.update(gpui_kit::init);
+                cx.update(|cx| {
+                    cx.set_global(Config::default());
+                    cx.set_global(crate::config::LoadWarnings(vec![]));
+                    // No saved workspace: the launch seeds the cwd
+                    // project and spawns its default session, which is
+                    // what puts the tree layer on screen at all.
+                    cx.set_global(State::default());
+                });
+                let (view, vcx): (Entity<AppView>, _) =
+                    cx.add_window_view(|window, cx| AppView::new(window, cx));
+                // Inject, then draw in the NEXT update: a `cx.notify()`
+                // reaches the cached sidebar panel when the update cycle
+                // flushes, so the frame that shows the new rows is the
+                // one drawn after it.
+                vcx.update(|_, cx| {
+                    view.update(cx, |v, cx| {
+                        let files: Vec<DiffFile> = (0..3000).map(file).collect();
+                        v.show_diff_tree = true;
+                        v.diff = Some(GitDiff {
+                            branch: None,
+                            files,
+                        });
+                        v.rebuild_tree_index();
+                        v.diff_file = Some(0);
+                        cx.notify();
+                    });
+                });
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                let (rows, max) = vcx.update(|_, cx| {
+                    let v = view.read(cx);
+                    (
+                        v.tree_index.as_ref().map(|i| i.rows.len()).unwrap_or(0),
+                        f32::from(v.diff_tree_scroll.base_handle().max_offset().y),
+                    )
+                });
+                // The index is the row list: 3000 files plus one dir row
+                // per `dN/` (30 of them, plus `many/`).
+                assert_eq!(rows, 3000 + 31, "the tree index survived the frame");
+                assert!(
+                    max > 0.,
+                    "3000 rows in a 220px layer must scroll (max offset {max})"
+                );
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
 }

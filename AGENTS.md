@@ -77,6 +77,9 @@ editing, and where the long form lives.
 - **Splitters**: keep the flex slots unpinned and correct widths through
   `resize_panel` + `suppress_resize_records`, never an unconditional
   render-time fixup (`docs/UI.md`).
+- **Long lists are virtual**: the diff pane and the tree declare row sizes and
+  build only the visible slice; their rows come from a prebuilt index or a
+  cached view, never from work redone per frame (`docs/UI.md`).
 - **Repaint**: never poll-render — `PumpMsg` events drive it; `subscribe_term`
   is the single subscription point and repaints only the visible session; the
   adaptive `stream_interval` steps must sit above a real frame's paint cost

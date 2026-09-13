@@ -20,6 +20,7 @@ use crate::diff::{GitDiff, git};
 use crate::session::{AgentStatus, Project, initial_projects};
 use crate::terminal::{TermEvent, TermSession};
 use crate::ui;
+use crate::ui::diff_panel::ViewMode;
 use crate::ui::diff_tree::{tree_max_h, tree_min_h};
 
 // Global keyboard actions: new session, dock toggles, close session.
@@ -44,6 +45,7 @@ gpui_kit::actions!(
         DiffSearch,
         DiffSearchNext,
         DiffSearchPrev,
+        CycleViewMode,
         TermSearch,
         TermSearchNext,
         TermSearchPrev,
@@ -93,7 +95,7 @@ pub struct AppView {
     /// [terminal | changes]. It ends above the region's unified status
     /// strip, so this divider never cuts through it (see `set_diff`).
     pub(crate) panes_state: Entity<ResizableState>,
-    pub(crate) diff_tree_scroll: ScrollHandle,
+    pub(crate) diff_tree_scroll: VirtualListScrollHandle,
     pub(crate) diff_hunks_scroll: VirtualListScrollHandle,
     /// Project/session tree scroll (sidebar upper layer) — drives its
     /// auto-hide scrollbar.
@@ -104,6 +106,9 @@ pub struct AppView {
     /// tree in the sidebar.
     pub(crate) show_diff_tree: bool,
     pub(crate) diff_tree_closed: std::collections::HashSet<String>,
+    /// The tree's flattened rows + totals, rebuilt when the diff or the
+    /// collapsed set changes (never per frame — see `build_index`).
+    pub(crate) tree_index: Option<crate::ui::diff_tree::TreeIndex>,
     pub(crate) hovered_project: Option<usize>,
     /// Project whose `...` menu is open: keeps the row's buttons mounted
     /// while the mouse travels into the popup (the popup occludes the
@@ -148,6 +153,20 @@ pub struct AppView {
     pub(crate) diff_search: diff::DiffSearch,
     /// Guards against stale poll results overwriting newer ones.
     diff_seq: u64,
+    /// Which surface the right pane shows (⌘⇧M cycles it); per session,
+    /// persisted like the selection.
+    pub(crate) view_mode: ViewMode,
+    /// Cached whole-file view for File mode (read off the UI thread),
+    /// and the `(path, generation)` it was built for: the pane only
+    /// renders it while both still match.
+    pub(crate) file_view: Option<std::rc::Rc<crate::diff::view::FileView>>,
+    pub(crate) file_view_key: Option<(String, u64)>,
+    /// Cached Markdown source for Preview mode, same keying.
+    pub(crate) preview_text: Option<std::rc::Rc<str>>,
+    pub(crate) preview_key: Option<(String, u64)>,
+    /// Bumped on every applied diff: what the two caches above (and
+    /// their in-flight builds) compare against.
+    pub(crate) diff_gen: u64,
     /// Per-path line budgets for truncated files: reaching the cap note
     /// grows the entry ×4 (see `expand_diff_limit`); empty = every file
     /// at `diff::MAX_LINES_PER_FILE`. Runtime-only, cleared with the diff.
@@ -273,6 +292,9 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-b", ToggleSessions, None),
         KeyBinding::new("secondary-r", ToggleDiff, None),
         KeyBinding::new("secondary-w", CloseSession, None),
+        // Cycle the right pane's surface: diff hunks → whole file →
+        // rendered Markdown (Markdown files only).
+        KeyBinding::new("secondary-shift-m", CycleViewMode, None),
         // Secondary +/− (with their shifted variants) zoom the
         // terminal font size; persisted like the settings field.
         KeyBinding::new("secondary-=", FontLarger, None),
@@ -482,12 +504,13 @@ impl AppView {
             show_diff: state.show_diff,
             shell_state: cx.new(|_| ResizableState::default()),
             panes_state: cx.new(|_| ResizableState::default()),
-            diff_tree_scroll: ScrollHandle::new(),
+            diff_tree_scroll: VirtualListScrollHandle::new(),
             diff_hunks_scroll: VirtualListScrollHandle::new(),
             sessions_scroll: ScrollHandle::new(),
             sidebar_split_state: cx.new(|_| ResizableState::default()),
             show_diff_tree: state.show_diff_tree,
             diff_tree_closed: HashSet::new(),
+            tree_index: None,
             hovered_project: None,
             hovered_session: None,
             menu_project: None,
@@ -503,6 +526,12 @@ impl AppView {
             diff_error: None,
             diff_search: diff::DiffSearch::new(window, cx),
             diff_seq: 0,
+            view_mode: ViewMode::default(),
+            file_view: None,
+            file_view_key: None,
+            preview_text: None,
+            preview_key: None,
+            diff_gen: 0,
             diff_limits: std::collections::HashMap::new(),
             shutting_down: false,
             quit_after_shutdown: false,
@@ -655,15 +684,18 @@ impl AppView {
         // Seed the diff pane from the restored current session —
         // selection, collapsed dirs and the tree-layer height are all
         // per-session; a fresh spawn carries none (default height).
-        let (seed, closed, height) = match this.current_session() {
+        let (seed, closed, height, mode) = match this.current_session() {
             Some(s) => (
                 s.diff_selected.clone(),
                 s.diff_closed.clone(),
                 s.diff_tree_height,
+                s.view_mode.as_deref().and_then(ViewMode::parse),
             ),
-            None => (None, Default::default(), None),
+            None => (None, Default::default(), None, None),
         };
         this.diff_seed_path = seed;
+        // The pane's mode is per session and restored with the row.
+        this.view_mode = mode.unwrap_or_default();
         this.diff_tree_closed = closed;
         this.diff_tree_height_seed = height
             .map(gpui::px)
@@ -879,6 +911,7 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &ToggleSessions, _, cx| this.toggle_sessions(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleDiffTree, _, cx| this.toggle_diff_tree(cx)))
+            .on_action(cx.listener(|this, _: &CycleViewMode, _, cx| this.cycle_view_mode(cx)))
             // The diff pane's find bar. ⌘G/⌘⇧G resolve only while the
             // bar's input holds focus (the "DiffSearch" key context);
             // the handlers live here, not on the bar, so they keep
