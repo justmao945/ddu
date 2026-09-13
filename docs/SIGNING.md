@@ -1,8 +1,8 @@
 # Signing, code identity and TCC grants
 
 `ddu` is signed with a local self-signed certificate (`Day Day Up Local
-Signing`) instead of ad-hoc. This is the long form of the short rule in
-AGENTS.md.
+Signing`) instead of ad-hoc. This is the long form of the signing rules in
+`AGENTS.md` / `RUNNING.md`.
 
 ## Why the identity has to be stable
 

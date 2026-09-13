@@ -1,7 +1,7 @@
 #!/bin/sh
 # Provision the local code-signing identity that make-bundle.sh signs with.
 #
-# Why this exists (the long version is in AGENTS.md): the app's TCC grants
+# Why this exists (the long version is in docs/SIGNING.md): the app's TCC grants
 # (Screen Recording, notifications) are stored against its *designated
 # requirement*. Ad-hoc signing's requirement is a bare `cdhash`, so every
 # re-sign changed it and each install silently invalidated the grants. A

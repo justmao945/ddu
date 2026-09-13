@@ -33,7 +33,16 @@ ddu/
     AGENT_CORE.md     # in-process agent core (design, not implemented)
     FILE_TREE.md      # full file tree + view panel (design, not implemented)
     SIGNING.md        # macOS code identity and the TCC grants it keys
+    RUNNING.md        # build/run/install per platform + macOS launch rules
+    VERIFICATION.md   # how to prove a change, per platform
+    UI.md             # GPUI/panel invariants and their measurements
     omarchy/          # desktop tweak notes (host config, not this app)
+  assets/
+    icon.svg          # app icon (installed into hicolor by linux.sh)
+    icons/            # brand + file-kind SVGs (claude/openai from simple-icons,
+                      # CC0; omp.svg hand-drawn π) layered over the gpui-kit icon
+                      # set; monochrome, tinted via text_color
+    screenshots/      # README screenshot
   src/
     main.rs           # app shell: init + open_window + Root + menus, composition only
     app/              # AppView: three-pane assembly + global state ownership
@@ -114,6 +123,8 @@ its own `v_resizable("sidebar-split")`.
 * `ElementId` must use domain ids (e.g. `("project-row", project)`, `("diff-line", id)`), **never list indexes**, or add/remove will mix up row state. Never generate random ids inside `render`.
 * Panels are cached child views (`panel_view!`): a panel's subtree — render, layout, paint, hitboxes, listeners, key contexts, focus — is replayed until that panel is notified, so every panel states its own root style *including a size*.
 * Focus: the terminal owns a `FocusHandle`; clicking a pane focuses the root handle so the cursor goes hollow. `Tab`/`Shift-Tab` are bound in the `Terminal` context (they reach the PTY instead of Root's focus cycling), and the settings window binds Escape/⌘W in its own context.
+* Settings window: a standalone native window with its own `WindowOptions`, singleton via a global `SettingsWindowSlot` — reopening focuses the live one instead of stacking a second. Its content is gpui-component `Settings` chrome, which exposes nothing to accessibility (see `VERIFICATION.md`).
+* The long form of every panel/render invariant below — and the measurements behind them — is `UI.md`.
 
 ## 5. State Model
 
@@ -258,6 +269,8 @@ struct AgentCmd { program: String, args: Vec<String> }
   install.
 
 ## 11. Performance and Correctness
+
+> Summary only — `UI.md` carries the invariants and the measurements.
 
 * Repaint pacing is adaptive: the pump spaces output-driven repaints by a
   `stream_interval(paint_ms)` (50 ms → 66 → 100 ms as a frame's own paint cost
