@@ -40,8 +40,11 @@ editing, and where the long form lives.
   `grid.rs` alacritty grid, `element.rs` custom paint element, `attention.rs`
   (`BEL`/`OSC 9`/`OSC 777` → desktop notification), `boxart.rs`.
 - `src/ui/` — panels (`session_panel`, `terminal`, `diff_panel`, `diff_tree`,
-  `status_bar`, `title_bar`), `settings/` (standalone window), and `mod.rs`
-  with the shared metrics + `scaled()`.
+  `status_bar`, `title_bar`), `settings/` (standalone window), `markdown.rs`
+  (the image plugin a rendered document goes through: gpui's own text view sends
+  every `![]()`/`<img>` to the *http* client, which cannot read a path, so the
+  block holding an image is rendered here through `img(Resource::Path)`), and
+  `mod.rs` with the shared metrics + `scaled()`.
 - `contrib/usage/` — UsageTray (MIT; not a cargo member, the Rust build never
   touches it).
 - `.omp/agents/AGENTS.md` — the global agent-rules payload deployed to
@@ -88,10 +91,14 @@ editing, and where the long form lives.
   exists for a resize that landed while every slot was still pinned, and a drag
   never changes the container — a per-render correction reverts the drag
   (`docs/UI.md`, pinned by `a_dragged_splitter_is_not_reverted_by_a_render`).
-- **The tree lists the whole working tree** (`diff/tree.rs`: the index's paths
-  merged with the poll's diff): clean files are listed muted and selectable, so
-  anything that assumed "a row means a changed file" — the selection, the pane's
-  rows, the find bar — goes through `AppView::selection` (a path) instead.
+- **The tree lists the working tree lazily** (`diff/tree.rs`): only the root and
+  the directories the user has expanded are read (`list_dir`), merged with the
+  poll's diff, so a 40k-file repository draws a few hundred rows. Clean files are
+  listed muted and selectable, so anything that assumed "a row means a changed
+  file" — the selection, the pane's rows, the find bar — goes through
+  `AppView::selection` (a path) instead. A file nobody changed renders as the
+  file itself (`AppView::surface` folds Diff into File), and a zero figure is
+  never printed (`+8`, not `+8 −0`).
 - **Repaint**: never poll-render — `PumpMsg` events drive it; `subscribe_term`
   is the single subscription point and repaints only the visible session; the
   adaptive `stream_interval` steps must sit above a real frame's paint cost

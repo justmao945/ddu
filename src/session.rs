@@ -135,15 +135,13 @@ pub struct AgentSession {
     /// Session-scoped diff tree state: with per-session worktrees each
     /// session's changes, selection and collapsed dirs are its own.
     pub diff_selected: Option<String>,
-    pub diff_closed: std::collections::HashSet<String>,
+    pub diff_open: std::collections::HashSet<String>,
     /// This session's sidebar splitter height (diff tree layer, px) —
     /// per-session layout, restored when the session is selected.
     pub diff_tree_height: Option<f32>,
     /// The row's persisted right-pane mode (`diff` / `file`),
     /// written on save and adopted on switch.
     pub view_mode: Option<String>,
-    /// The row's persisted file-tree filter (`all` / `changed`).
-    pub tree_filter: Option<String>,
 }
 
 impl AgentSession {

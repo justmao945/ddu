@@ -75,7 +75,10 @@ is rebuilt from a cache keyed on the changed state.
 
 Both long lists (the terminal's diff pane rows and the sidebar's file tree) are
 `v_virtual_list`s: the item sizes are declared up front and only the visible
-slice is built per frame — a 3 000-row tree builds ~8 rows, measured. Two
+slice is built per frame — a 3 000-row tree builds ~8 rows, measured. The tree's
+list is short by construction — it holds the directories the user opened, listed
+on demand (`diff_tree::build_index` over `diff::tree::list_dir`), not every file
+in the repository — so its per-frame size table stays small too. Two
 consequences:
 
 * The host of a virtual list must give it a **bounded height** (a flex container
@@ -83,9 +86,12 @@ consequences:
   host leaves the list at content height, and the layer then clips instead of
   scrolling.
 * Anything a row needs must be cheap and precomputed: the tree's rows come from
-  `AppView::tree_index` (one `build_index` per diff and per collapse toggle),
-  the whole-file view from the File-mode cache (one background `FileView::build`
-  per `(path, diff generation)`). Render only ever reads them.
+  `AppView::tree_index` (one `build_index` per diff and per expansion toggle —
+  each one listing only the open directories), the whole-file view from the
+  File-mode cache (one background `FileView::build` per `(path, diff
+  generation)`). Render only ever reads them: `diff_tree::render` does no IO, and
+  neither does `list_dir` — that runs from `rebuild_tree_index`, off the render
+  path.
 
 `v_virtual_list` needs the full `Rc<Vec<Size<Pixels>>>` every frame, so a list's
 sizes are an O(rows) allocation per frame by design; what must not be O(rows) is

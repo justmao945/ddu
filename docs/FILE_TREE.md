@@ -14,9 +14,16 @@
 > §7 asked for — the pane renders a mode-independent `RowStream` through
 > `v_virtual_list`, and the tree renders a per-poll `TreeIndex` the same way.
 > A Markdown file renders in File mode through gpui-base's own per-block list;
-> a source that cannot be read falls back to rows with the same band. **Not landed:** the
-> tree filter's shortcut on Linux diverges (`⌃⇧A`; `⌘⇧F` is free on macOS but
-> `⌃⇧F` is the terminal's find), `R`/column tuning of the strip, and §8's
+> a source that cannot be read falls back to rows with the same band. > **Landed (2026-09-13, later the same day):** the tree is **lazy** — §4.1's
+> index union is gone again, in its place a per-directory `list_dir` the layer
+> calls only for the directories it shows, and §5.1's `All n · Changed m` strip
+> with it (one merged tree, no filter, no counts: `+0 −0` and a file total are
+> noise). The pane's header carries its figures the same way (`+8`, not
+> `+8 −0`), a file nobody changed renders as the file itself rather than an
+> empty hunks pane, and **images** — an image file, and `![](…)`/`<img>` inside
+> a rendered document — draw through `src/ui/markdown.rs` instead of going to
+> the http client that cannot read a path.
+> **Not landed:** `R`/column tuning of the strip, and §8's
 > deferred items (syntax highlighting, worktrees). Caps came out at
 > `MAX_VIEW_BYTES` 8 MiB / `MAX_VIEW_LINES` 200 000 (not the 1 MiB / 5 000
 > guessed here): the pane virtualizes, so a large file costs one build pass.
@@ -75,6 +82,17 @@ Two facts drive the whole design:
 ## 4. Data layer
 
 ### 4.1 One snapshot per poll
+
+> **Superseded by the lazy listing.** `Snapshot` carries the diff and nothing
+> else; the poll does not read the working tree at all. What the tree needs from
+> the diff — "is this path changed", "how many changed files are under this
+> directory" — is answered off the diff's own records, path-sorted
+> (`diff/tree.rs::Changes`), so a directory's children can be listed from the
+> filesystem on demand (`list_dir`) and merged with the changes as they are
+> read. Measured on a 40k-file repository: the poll drops from 70.7 ms to
+> 57 ms (the tree's share, 17.8 ms, plus the snapshot comparison it forced,
+> ~2 ms), and the ~5 MB of paths the eager `FileTree` held are gone. The sketch
+> below is kept as the design that led there.
 
 Replace `head_diff(path) -> GitDiff` with:
 
@@ -166,44 +184,55 @@ cached in `AppView` against `(path, snapshot generation)` — never per poll.
 
 ### 5.1 Sidebar layer (file tree)
 
-`render` stops calling `build_tree`; it flattens the prebuilt `FileTree` from the
-snapshot (render-time cost = visible rows only).
+`render` reads a `TreeIndex` the app rebuilds off the render path; the index is
+the root plus the **expanded** directories, each listed on demand
+(`build_index(open, list)`, `list` = `tree::list_dir`). Nothing else is read:
+the layer's cost is the visible tree, not the repository.
 
-* **Default collapse rule.** The current set means "present = collapsed" and
-  defaults to all-open. For a full tree the default inverts: on the first
-  snapshot of a session, every directory that has **no changed descendant** is
-  seeded into `diff_tree_closed`; directories containing changes start open,
-  and their ancestors stay open. New directories that appear later join the
-  closed set when they arrive clean. Explicit user toggles always win afterwards
-  (`toggle` semantics unchanged: presence in the set = collapsed).
-  Net effect: the visible row count starts at "changed subtrees + root level"
-  and only grows where the user opens folders — no virtualization needed, and no
-  behavior change for the changed-only mental model the app has today.
+* **Default expansion.** The set means "present = expanded" and starts empty.
+  On the first snapshot of a session, `seed_open` opens every directory on the
+  way to a changed file; everything else is one click away. A clean repository
+  therefore opens folded — one root listing. User toggles win afterwards.
 * **Rows.** `file_row` keeps the edge-to-edge band, `guides(depth)` stripes, the
   type icon (`ui::diff_file_icon`) and the copy-name/copy-path context menu.
-  Changed rows keep today's `+a/−b`; clean rows render the same row geometry with
-  a muted name and no figures. `dir_row` shows a `● n` changed-descendant badge
-  instead of the `+a/−b` rollup, which is meaningless across a whole subtree —
-  and, when the subtree is clean, its file count in the same muted tone.
-* **Filter.** The layer's summary strip becomes `All 1 204 · Changed 7`
-  (two-state toggle, ⌘⇧F). "Changed" is exactly today's tree. Persisted per
-  session; "All" is the default once this ships.
+  Changed rows carry `+/−` figures and a bright name; clean rows the same
+  geometry with a muted name and no figures. **A zero side is not printed**
+  (`+8`, never `+8 −0`; a binary or empty change prints nothing at all), and
+  `dir_row` shows a `● n` changed-descendant badge — never a file count, which
+  the lazy listing cannot know and the user does not need.
+* **No filter.** One tree with the diff merged in: the `All / Changed` toggles
+  are gone (with the counts they carried), and so is their chord. "Changed only"
+  is what the default expansion already gives.
 * **Refresh.** A changed file appearing/disappearing only changes badges and
-  tints — no collapse state is disturbed, so the tree does not jump under the
+  tints — no expansion state is disturbed, so the tree does not jump under the
   user when an agent saves a file.
 
 ### 5.2 View panel
 
-* Header: `path` + `+a/−b` + a three-way mode toggle
-  (`component::button::toggle::{Toggle, ToggleGroup}` — `button/toggle.rs:34` /
-  `:221` — `Size::XSmall`, ids `("view-mode", mode)`),
-  plus the find bar overlay unchanged.
-* **Diff** mode = `file_rows` exactly as today.
+* Header: `path`, then the change figures (a zero side left out), then **one
+  icon button at the far right**, wearing the surface it switches to
+  (document = whole file, two-versions = hunks), tooltip + `⌘⇧M`, plus the find
+  bar overlay unchanged. Labeled toggle groups were the wrong trade at the
+  pane's width: three labels ellipsized the file's own name.
+* **Diff** mode = `file_rows` exactly as today — and for a file nobody
+  changed, `AppView::surface` folds Diff into File, so a clean `.rs` shows its
+  source and a clean `README.md` its rendered document instead of empty hunks.
 * **File** mode = the same row machinery over `FileView::Text` rows: same
   gutters, same `LINE_CHROME_EXTRAS`, same `SelectableText` per line and
   `document_order`, `' '` rows untinted, `+`/`-` rows tinted 0.12. `Missing` /
   `Binary` / `TooLarge` fall back to Diff mode with the existing notice style
   (`empty()` / `hunk_header` band).
+* **Images.** `src/ui/markdown.rs` takes over the *block* holding an image (a
+  paragraph, or a raw HTML block with `<img>`) and renders it here: the prose
+  through the same Markdown view, the picture through `img(PathBuf)`
+  (`Resource::Path`), resolved against the document's own directory. Without it
+  every image went to `ImageSource::Resource(Resource::Uri)` — the app's
+  **http** client, which cannot read a file — so a README's screenshots rendered
+  as nothing. An image *file* selected in the tree is drawn the same way
+  (`FileView::Image`, fitted with `Contain`) instead of banding "binary". A
+  block plugin is the only hook this text view offers (inline custom nodes are
+  unsupported), which is why a paragraph is the unit and its formatting is
+  re-rendered as a nested view rather than edited in place.
 * The rendered document = `TextView::markdown(id, text)`, in File mode
   (`gpui-component-0.6.0/src/text/compat.rs:42`) inside the pane's scroll
   container, `.selectable(true).scrollable(true)`, styled through `TextViewStyle`.
@@ -230,7 +259,8 @@ snapshot (render-time cost = visible rows only).
 | not a repository | "Not a git repository — no file tree." |
 | loading / error | `diff_error` else "Loading files…" |
 | no selection | "Select a file in the tree." (unchanged) |
-| no changes at all | tree still renders; strip reads `All n · Changed 0` |
+| no changes at all | tree still renders (root listing, folded); the strip's figures disappear rather than reading `+0 −0` |
+| image selected | drawn fitted to the pane (`Contain`), no band |
 
 ## 6. State & persistence
 
@@ -240,27 +270,30 @@ New `AppView` fields:
 pub(crate) snapshot: Option<crate::diff::Snapshot>,   // replaces `diff: Option<GitDiff>`
 pub(crate) file_view: Option<(String, u64, crate::diff::view::FileView)>, // path, seq, view
 pub(crate) view_mode: ViewMode,                       // Diff | File
-pub(crate) tree_filter: TreeFilter,                   // All | Changed
-pub(crate) tree_seeded: bool,                         // default-collapse rule ran for this session
+pub(crate) diff_tree_open: HashSet<String>,           // expanded dirs (the layer is lazy)
+pub(crate) repo: Option<(PathBuf, Rc<Repository>)>,   // for the tree's listings
+pub(crate) tree_seeded: bool,                         // default-expansion rule ran for this session
 ```
 
-`SavedSession` gains `view_mode: Option<String>` and `tree_filter: Option<String>`
-(`#[serde(default, skip_serializing_if = "Option::is_none")]`, so old
-`state.json` files load unchanged). `selected_file`, `closed_dirs`,
-`tree_height` keep their fields but now describe the file tree; `selected_file`
-may name a **clean** file, so `apply_diff`'s re-pin must search the full tree
-(today it searches `diff.files` only — a stale selection would be dropped).
-`diff_tree_closed` keeps holding collapsed dirs (now including clean ones), and
-is persisted per session as today (`persist()` reads it into the session slot).
+`SavedSession` carries `view_mode: Option<String>` and `open_dirs: Vec<String>`
+(`#[serde(default, skip_serializing_if = …)]`, so old `state.json` files load
+unchanged — the pre-lazy `closed_dirs` and `tree_filter` keys are simply
+ignored). `selected_file` may name a **clean** file: `apply_snapshot` keeps the
+selection when the path is in the diff or still on disk, since the tree no
+longer holds a list to look it up in.
 
 ## 7. Performance
 
-* One `git2` pass per 3 s poll; `snapshot` (diff + index union + tree build) runs
-  on `cx.background_spawn`, guarded by `diff_seq` as today.
-* Render cost is O(visible rows): the tree is flattened from the prebuilt
-  `FileTree` (no path splitting, no `tree_stats` recursion — rollups are computed
-  once in the snapshot).
-* `FileView` is built lazily, once per (path, snapshot seq), on demand.
+* One `git2` walk per 3 s poll; `snapshot` (the diff, and nothing else) runs on
+  `cx.background_spawn`, guarded by `diff_seq` as today. Measured at 40k files:
+  57 ms, of which ~29 ms is libgit2's workdir scan.
+* Render cost is O(visible rows): the index lists the expanded directories only
+  (measured: 31 directory listings and 71 rows for a repository whose 1 200
+  files sit behind unopened folders), and the per-directory queries are binary
+  searches over the diff's own records.
+* `FileView` is built lazily, once per (path, snapshot seq), on demand — and
+  only for the **surface** the pane is showing (a clean file's Diff mode is the
+  file's own view; an image needs a build for its kind alone).
 * The default-collapse rule bounds the initial visible rows to the changed
   subtrees; a user who opens a 20k-file folder pays for those rows only.
   Escape hatch if that still bites: `component::list::{List, ListDelegate,
@@ -331,14 +364,16 @@ audit — `DESIGN.md` §13 mandates the check) and turning style ranges into
 | Row-index contract breaks (search jumps to the wrong row, drag selection copies garbage) | The merged row stream reuses `rows()`'s definitional identity; a test pins indices against rendered child order (as `match_rows` already does) |
 | Deletion anchoring subtleties in the merge (EOF deletions, multiple delete runs) | Explicit algorithm step + tests for each shape |
 | Markdown re-parse per frame | Stable element id + gpui element-state cache, `TextViewState` as the documented fallback; the pane is a cached child view, so parsing only happens on notify |
-| Markdown images (README screenshots) | `TextView` renders inline images; verify local relative paths during P4, otherwise document the gap rather than faking it |
+| Markdown images (README screenshots) | Landed as a block plugin (`src/ui/markdown.rs`): local paths resolve to `Resource::Path`, remote URLs keep gpui's loader, a missing local file shows its alt text |
 | Selection/persistence drift (`selected_file` was diff-only) | Re-pin against the full tree in `apply_diff`; `tree_filter`/`view_mode` default when absent |
 | Grammar features pulled in for highlighting | Deferred entirely (§8.4); no `tree-sitter-*` feature enabled in this plan |
 
 ## 11. Decisions taken (open to challenge)
 
 1. **Cutover, not coexistence**: the tree replaces `diff_tree`; there is no
-   second "changed only" pane — the filter covers that use.
+   second "changed only" pane — the default expansion covers that use, and the
+   `All / Changed` filter was dropped rather than kept beside a lazy listing
+   that cannot count what it has not read.
 2. Clean directories start collapsed; changed subtrees start open.
 3. File mode is the merged, whole-file view; Diff mode stays byte-identical to
    today so nothing regresses while the new mode beds in.

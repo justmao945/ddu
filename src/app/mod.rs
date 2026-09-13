@@ -7,6 +7,7 @@
 //! Right: the project's git diff (HEAD→workdir, polled).
 
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::base::input;
@@ -21,7 +22,7 @@ use crate::session::{AgentStatus, Project, initial_projects};
 use crate::terminal::{TermEvent, TermSession};
 use crate::ui;
 use crate::ui::diff_panel::ViewMode;
-use crate::ui::diff_tree::{TreeFilter, tree_max_h, tree_min_h};
+use crate::ui::diff_tree::{tree_max_h, tree_min_h};
 
 // Global keyboard actions: new session, dock toggles, close session.
 gpui_kit::actions!(
@@ -46,7 +47,6 @@ gpui_kit::actions!(
         DiffSearchNext,
         DiffSearchPrev,
         ToggleViewMode,
-        ToggleTreeFilter,
         TermSearch,
         TermSearchNext,
         TermSearchPrev,
@@ -114,10 +114,17 @@ pub struct AppView {
     /// Whether the diff file tree layer is shown under the project
     /// tree in the sidebar.
     pub(crate) show_diff_tree: bool,
-    pub(crate) diff_tree_closed: std::collections::HashSet<String>,
-    /// The tree's flattened rows + totals, rebuilt when the diff or the
-    /// collapsed set changes (never per frame — see `build_index`).
+    /// Directories expanded in the file tree: the layer is lazy, so this
+    /// is the *only* reason a directory is ever listed (the root aside).
+    pub(crate) diff_tree_open: std::collections::HashSet<String>,
+    /// The tree's rows + totals, rebuilt when the diff, the expansion or
+    /// the listing changes (never per frame — see `build_index`).
     pub(crate) tree_index: Option<crate::ui::diff_tree::TreeIndex>,
+    /// The project's repository, opened once and kept for the tree's
+    /// listings (`list_dir` needs git's own ignore rules). Keyed by the
+    /// directory it was discovered from: a session switch to another
+    /// project re-discovers.
+    pub(crate) repo: Option<(std::path::PathBuf, Rc<git2::Repository>)>,
     pub(crate) hovered_project: Option<usize>,
     /// Project whose `...` menu is open: keeps the row's buttons mounted
     /// while the mouse travels into the popup (the popup occludes the
@@ -167,9 +174,6 @@ pub struct AppView {
     /// listing, always written together (one poll, one snapshot — the
     /// tree and the pane can never disagree about what changed).
     pub(crate) snapshot: Option<Snapshot>,
-    /// Which files the sidebar's tree lists: everything in the working
-    /// tree, or only the changes (per session, persisted).
-    pub(crate) tree_filter: TreeFilter,
     /// Whether the clean directories have been folded away for the
     /// current session yet — the default-collapse rule runs once per
     /// session, on the first snapshot that carries a tree, and never
@@ -294,14 +298,6 @@ pub(crate) const FIND_ACCEL: &str = if cfg!(target_os = "macos") {
     "ctrl-shift-f"
 };
 
-/// The file tree's All/Changed filter. On Linux `⌃⇧F` is the terminal's
-/// find, so the filter takes `⌃⇧A` there.
-pub(crate) const TREE_FILTER_ACCEL: &str = if cfg!(target_os = "macos") {
-    "cmd-shift-f"
-} else {
-    "ctrl-shift-a"
-};
-
 /// Shortcut label for user-facing text (`⌘N` on macOS, `Ctrl+N` elsewhere).
 pub(crate) fn accel_hint(key: &str) -> String {
     if cfg!(target_os = "macos") {
@@ -339,9 +335,6 @@ fn key_bindings() -> Vec<KeyBinding> {
         // Cycle the right pane's surface: diff hunks → whole file →
         // rendered Markdown (Markdown files only).
         KeyBinding::new("secondary-shift-m", ToggleViewMode, None),
-        // The file tree's All/Changed filter (the strip's two toggles
-        // drive the same action).
-        KeyBinding::new(TREE_FILTER_ACCEL, ToggleTreeFilter, None),
         // Secondary +/− (with their shifted variants) zoom the
         // terminal font size; persisted like the settings field.
         KeyBinding::new("secondary-=", FontLarger, None),
@@ -556,8 +549,9 @@ impl AppView {
             sessions_scroll: ScrollHandle::new(),
             sidebar_split_state: cx.new(|_| ResizableState::default()),
             show_diff_tree: state.show_diff_tree,
-            diff_tree_closed: HashSet::new(),
+            diff_tree_open: HashSet::new(),
             tree_index: None,
+            repo: None,
             hovered_project: None,
             hovered_session: None,
             menu_project: None,
@@ -572,7 +566,6 @@ impl AppView {
             healed_panes_at: px(0.),
             suppress_resize_records: 0,
             snapshot: None,
-            tree_filter: TreeFilter::default(),
             tree_seeded: false,
             diff_error: None,
             diff_search: diff::DiffSearch::new(window, cx),
@@ -737,7 +730,7 @@ impl AppView {
         let (seed, closed, height, mode) = match this.current_session() {
             Some(s) => (
                 s.diff_selected.clone(),
-                s.diff_closed.clone(),
+                s.diff_open.clone(),
                 s.diff_tree_height,
                 s.view_mode.as_deref().and_then(ViewMode::parse),
             ),
@@ -746,7 +739,7 @@ impl AppView {
         this.diff_seed_path = seed;
         // The pane's mode is per session and restored with the row.
         this.view_mode = mode.unwrap_or_default();
-        this.diff_tree_closed = closed;
+        this.diff_tree_open = closed;
         this.diff_tree_height_seed = height
             .map(gpui::px)
             .filter(|h| h.as_f32() >= tree_min_h() && h.as_f32() <= tree_max_h());
@@ -1015,9 +1008,6 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleDiffTree, _, cx| this.toggle_diff_tree(cx)))
             .on_action(cx.listener(|this, _: &ToggleViewMode, _, cx| this.toggle_view_mode(cx)))
-            .on_action(cx.listener(|this, _: &ToggleTreeFilter, _, cx| {
-                this.toggle_tree_filter(cx)
-            }))
             // The diff pane's find bar. ⌘G/⌘⇧G resolve only while the
             // bar's input holds focus (the "DiffSearch" key context);
             // the handlers live here, not on the bar, so they keep
@@ -1659,7 +1649,7 @@ mod panel_cache_tests {
     /// a diff is normal (the pane shows the file itself).
     #[test]
     fn select_path_pins_clean_and_changed_files_alike() {
-        use crate::diff::{tree::build as build_tree, DiffFile, GitDiff, Snapshot};
+        use crate::diff::{DiffFile, GitDiff, Snapshot};
         gpui::run_test_once(
             0,
             Box::new(|dispatcher| {
@@ -1680,16 +1670,11 @@ mod panel_cache_tests {
                             removed: 1,
                             ..Default::default()
                         }];
-                        let tree = build_tree(
-                            vec!["changed.txt".to_owned(), "clean.txt".to_owned()],
-                            &files,
-                        );
                         v.snapshot = Some(Snapshot {
                             diff: GitDiff {
                                 branch: None,
                                 files,
                             },
-                            tree,
                         });
                         v.select_path("clean.txt".to_owned());
                         assert_eq!(v.current_diff_path(), Some("clean.txt"));
@@ -1730,7 +1715,7 @@ mod panel_cache_tests {
     /// diff had not moved an inch.
     #[test]
     fn an_idle_poll_moves_nothing() {
-        use crate::diff::{tree::build as build_tree, DiffFile, GitDiff, Snapshot};
+        use crate::diff::{DiffFile, GitDiff, Snapshot};
         gpui::run_test_once(
             0,
             Box::new(|dispatcher| {
@@ -1754,7 +1739,6 @@ mod panel_cache_tests {
                                 ..Default::default()
                             }],
                         },
-                        tree: build_tree(vec!["a.txt".to_owned()], &[]),
                     };
                     let first = view.update(cx, |v, cx| {
                         v.apply_snapshot(Ok(snapshot.clone()), cx)

@@ -260,8 +260,6 @@ pub(crate) fn is_markdown(path: &str) -> bool {
 }
 
 const NOTE_READING: &str = "Reading the file…";
-/// Diff mode on a file nobody changed: there are no hunks to show.
-const NOTE_UNCHANGED: &str = "No changes in this file — ⌘⇧M shows the whole file.";
 
 /// The mode's row stream for the selected file, plus the reason the
 /// requested mode could not be shown (the pane renders the diff's hunks
@@ -285,20 +283,25 @@ pub(crate) fn pane_rows(this: &AppView) -> (Option<RowStream<'_>>, Option<&'stat
                 Some(refusal.map_or(NOTE_READING, |r| r.note())),
             ),
         },
-        // A clean file has no hunks to show: Diff mode says so instead of
-        // rendering an empty pane.
+        // Diff mode is only reached with a diff to show (a file nobody
+        // changed renders as the file itself — see `AppView::surface`),
+        // so there are no "no hunks" rows to fall back to here.
         Surface::Diff => match file {
             Some(file) => (Some(RowStream::diff(file)), None),
-            None => (None, Some(NOTE_UNCHANGED)),
+            None => (this.file_rows(None), None),
         },
-        Surface::File => (
-            this.file_rows(file),
-            match this.cached_file_view() {
-                Some(FileView::Text(_)) => None,
-                Some(view) => Some(view.refusal().map_or(NOTE_READING, |r| r.note())),
-                None => Some(NOTE_READING),
-            },
-        ),
+        Surface::File => match this.cached_file_view() {
+            // An image is drawn by the pane's body, not streamed as
+            // rows — and it has no note, because it is not standing in
+            // for anything.
+            Some(FileView::Image) => (None, None),
+            Some(FileView::Text(_)) => (this.file_rows(file), None),
+            Some(view) => (
+                this.file_rows(file),
+                Some(view.refusal().map_or(NOTE_READING, |r| r.note())),
+            ),
+            None => (this.file_rows(file), Some(NOTE_READING)),
+        },
     }
 }
 
@@ -317,6 +320,13 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
     // click picks a file.
     if this.current_diff_path().is_none() {
         return empty("Select a file in the tree.", cx).into_any_element();
+    }
+    // An image file is drawn as it is: File mode (or Diff mode on a
+    // file nobody changed, which the surface rule folds into it).
+    if this.surface() == Surface::File
+        && matches!(this.cached_file_view(), Some(FileView::Image))
+    {
+        return image_body(this, cx).into_any_element();
     }
     // The rendered document replaces the rows only when its source is
     // actually there: a document that could not be read falls through to
@@ -417,11 +427,17 @@ fn notice_band(text: &str, cx: &Context<AppView>) -> impl IntoElement {
 /// File mode, so a runaway document cannot stall a frame.
 fn preview_body(this: &AppView) -> impl IntoElement {
     let text = this.cached_preview().map(|text| text.to_owned()).unwrap_or_default();
+    // Images in the document resolve against the *document's* directory.
+    let base = this.preview_base();
     div()
         .flex_1()
         .min_h_0()
         .min_w_0()
         .overflow_hidden()
+        // Prose needs margins: the rows carry their own `p_2`, and a
+        // document rendered flush against the pane's edges reads as
+        // clipped text rather than a page.
+        .p_3()
         .child(
             TextView::markdown(
                 SharedString::from(format!(
@@ -430,9 +446,30 @@ fn preview_body(this: &AppView) -> impl IntoElement {
                 )),
                 text,
             )
-                .selectable(true)
-                .scrollable(true),
+            .selectable(true)
+            .scrollable(true)
+            .plugin(crate::ui::markdown::LocalImages::new(base)),
         )
+        .into_any_element()
+}
+
+/// An image file, fitted to the pane: `Contain`, so it is never
+/// distorted, centred in whatever space is left over.
+fn image_body(this: &AppView, _cx: &mut Context<AppView>) -> impl IntoElement {
+    let path = this
+        .current_diff_path()
+        .map(|path| this.diff_root().join(path))
+        .unwrap_or_default();
+    div()
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p_2()
+        .child(img(path).max_w_full().max_h_full().object_fit(ObjectFit::Contain))
         .into_any_element()
 }
 
@@ -1235,7 +1272,7 @@ mod tests {
                                 branch: None,
                                 files,
                             },
-                            tree: crate::diff::tree::build(vec!["README.md".to_owned()], &[]),
+                            
                         });
                         cx.notify();
                     });
@@ -1325,7 +1362,7 @@ mod tests {
                                 branch: None,
                                 files,
                             },
-                            tree: crate::diff::tree::build(vec!["notes.md".to_owned()], &[]),
+                            
                         });
                         // The file is Markdown: File mode renders it.
                         v.view_mode = super::ViewMode::File;
@@ -1382,8 +1419,10 @@ mod tests {
                 assert_eq!((stream, note), (None, None));
                 assert!(read);
 
-                // A clean file: the tree lists it, so the pane has a
-                // strip for it — Diff mode says there is nothing to show.
+                // A clean file: the tree lists it, so it is selectable —
+                // and Diff mode shows the file itself, not an empty hunks
+                // pane (the surface folds a file with no diff into File
+                // mode; here the file's own view is still being read).
                 vcx.update(|_, cx| {
                     view.update(cx, |v, cx| {
                         v.view_mode = super::ViewMode::Diff;
@@ -1396,21 +1435,17 @@ mod tests {
                                 branch: None,
                                 files: Vec::new(),
                             },
-                            tree: crate::diff::tree::build(
-                                vec!["clean.md".to_owned()],
-                                &[],
-                            ),
-                        });
+                                                    });
                         cx.notify();
                     });
                 });
-                let (stream, note) = vcx.update(|_, cx| {
+                let (surface, note) = vcx.update(|_, cx| {
                     let v = view.read(cx);
-                    let (rows, note) = super::pane_rows(v);
-                    (rows.map(|s| s.rows()), note)
+                    let (_, note) = super::pane_rows(v);
+                    (v.surface(), note)
                 });
-                assert_eq!(stream, None);
-                assert_eq!(note, Some(super::NOTE_UNCHANGED));
+                assert_eq!(surface, super::Surface::Preview, "a clean .md document");
+                assert_eq!(note, Some(super::NOTE_READING));
 
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();

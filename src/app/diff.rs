@@ -1,6 +1,7 @@
 //! Diff data flow: the periodic working-tree poll, stale-result
 //! guarding and selection re-pinning.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::component::input::InputState;
@@ -49,7 +50,7 @@ impl AppView {
         self.file_view_key = None;
         self.preview = None;
         self.tree_index = None;
-        self.diff_tree_closed.clear();
+        self.diff_tree_open.clear();
         self.diff_search.matches.clear();
         self.diff_tree_scroll.set_offset(point(px(0.), px(0.)));
         self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
@@ -170,9 +171,18 @@ impl AppView {
                 // The selection is a path in the *tree*, so a clean file
                 // stays selected across polls; only a path that left the
                 // working tree clears the pane.
+                // The selection is a path in the tree: a file on disk,
+                // or one the diff still knows (a file deleted in the
+                // workdir stays readable through its hunks).
+                let root = self.current_session_cwd();
                 let next = selected
                     .as_ref()
-                    .filter(|path| snapshot.tree.get(path).is_some())
+                    .filter(|path| {
+                        snapshot.diff.files.iter().any(|f| f.path == path.as_str())
+                            || root
+                                .as_ref()
+                                .is_some_and(|root| root.join(path).is_file())
+                    })
                     .map(|path| crate::app::Selection {
                         path: path.clone(),
                         changed: snapshot.diff.files.iter().position(|f| &f.path == path),
@@ -229,35 +239,59 @@ impl AppView {
         true
     }
 
-    /// Rebuild the sidebar tree's row list (a new snapshot, a filter
-    /// switch, or a directory toggle). One O(files) pass, off the render
-    /// path; the first snapshot of a session also folds the clean
-    /// directories away (see `seed_clean_dirs`).
+    /// Rebuild the sidebar tree's rows (a new snapshot, a directory
+    /// toggle). The listing is lazy — the root plus every *expanded*
+    /// directory, nothing else — so this costs the visible tree, not the
+    /// repository (`FILE_TREE.md` §4.1). The first snapshot of a session
+    /// also opens the changes' ancestors (`seed_open`).
     pub(crate) fn rebuild_tree_index(&mut self) {
-        self.tree_index = self.snapshot.as_ref().map(|snapshot| {
-            if !self.tree_seeded {
-                self.tree_seeded = true;
-                crate::ui::diff_tree::seed_clean_dirs(
-                    &snapshot.tree,
-                    &mut self.diff_tree_closed,
-                );
-            }
-            crate::ui::diff_tree::build_index(
-                &snapshot.tree,
-                self.tree_filter,
-                &self.diff_tree_closed,
-            )
+        let root = self.current_session_cwd();
+        let Some(root) = root else {
+            self.tree_index = None;
+            return;
+        };
+        let Some(repo) = self.repo_for(&root) else {
+            self.tree_index = None;
+            return;
+        };
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            self.tree_index = None;
+            return;
+        };
+        let changes = crate::diff::tree::Changes::of(&snapshot.diff.files);
+        if !self.tree_seeded {
+            self.tree_seeded = true;
+            crate::ui::diff_tree::seed_open(&mut self.diff_tree_open, &changes);
+        }
+        // Field-level borrows: the listing closure reads the repo and the
+        // diff while the rows land in `tree_index`.
+        let open = &self.diff_tree_open;
+        let mut index = crate::ui::diff_tree::build_index(open, |dir| {
+            crate::diff::tree::list_dir(&repo, dir, &changes)
         });
+        let (added, removed) = changes.totals();
+        index.added = added;
+        index.removed = removed;
+        self.tree_index = Some(index);
+    }
+
+    /// The project's repository handle, discovered once per directory and
+    /// kept for the tree's listings. `None` when the path is not in a
+    /// repository — the tree then shows the poll's error, as before.
+    pub(crate) fn repo_for(&mut self, root: &std::path::Path) -> Option<Rc<git2::Repository>> {
+        if let Some((key, repo)) = &self.repo {
+            if key == root {
+                return Some(repo.clone());
+            }
+        }
+        let repo = Rc::new(git2::Repository::discover(root).ok()?);
+        self.repo = Some((root.to_path_buf(), repo.clone()));
+        Some(repo)
     }
 
     /// The project's diff, if a poll has landed.
     pub(crate) fn diff(&self) -> Option<&crate::diff::GitDiff> {
         self.snapshot.as_ref().map(|s| &s.diff)
-    }
-
-    /// The full working-tree listing, if a poll has landed.
-    pub(crate) fn tree(&self) -> Option<&crate::diff::tree::FileTree> {
-        self.snapshot.as_ref().map(|s| &s.tree)
     }
 
     /// The selection's diff record, when the selected file has one.
@@ -300,18 +334,33 @@ impl AppView {
         self.selection = Some(crate::app::Selection { path, changed });
     }
 
-    /// ⌘⇧F / the strip's toggles: All ⇄ Changed.
-    pub(crate) fn toggle_tree_filter(&mut self, cx: &mut Context<Self>) {
-        self.tree_filter = self.tree_filter.next();
-        self.rebuild_tree_index();
-        self.persist(cx);
-        cx.notify();
-    }
-
     /// What the pane renders right now: the mode, and the Markdown
     /// question answered by the file itself (`docs/FILE_TREE.md` §4.2).
     pub(crate) fn surface(&self) -> crate::ui::diff_panel::Surface {
-        crate::ui::diff_panel::surface_of(self.view_mode, self.current_diff_path())
+        // A file nobody changed has nothing to diff: Diff mode shows the
+        // file itself (the rendered document, for Markdown) rather than
+        // the empty hunks pane that would hide it.
+        let mode = if self.view_mode == ViewMode::Diff && self.selected_diff_file().is_none() {
+            ViewMode::File
+        } else {
+            self.view_mode
+        };
+        crate::ui::diff_panel::surface_of(mode, self.current_diff_path())
+    }
+
+    /// The directory the selected file lives in — what a Markdown
+    /// document's relative image URLs resolve against.
+    pub(crate) fn preview_base(&self) -> std::path::PathBuf {
+        let root = self.diff_root();
+        match self.current_diff_path() {
+            Some(path) => root.join(path).parent().map(|p| p.to_path_buf()).unwrap_or(root),
+            None => root,
+        }
+    }
+
+    /// The working tree the diff's paths are relative to.
+    pub(crate) fn diff_root(&self) -> std::path::PathBuf {
+        self.current_session_cwd().unwrap_or_default()
     }
 
     /// Whether a cached build (or in-flight refusal) is still about the
@@ -392,13 +441,18 @@ impl AppView {
         let file = self.selected_diff_file().cloned();
         let generation = self.diff_gen;
         let key = (path.clone(), generation);
+        // Keyed on the *surface*, not the mode: a file nobody changed
+        // renders through File mode whatever the mode says (see
+        // `surface`), and an image needs its view built for the same
+        // reason a text file does.
+        use crate::ui::diff_panel::Surface;
+        let surface = self.surface();
         let want_view =
-            self.view_mode == ViewMode::File && self.file_view_key.as_ref() != Some(&key);
-        // A Markdown file in File mode needs both: the document is what
-        // renders, the rows are what a refused source falls back to.
-        let want_preview = self.view_mode == ViewMode::File
-            && crate::ui::diff_panel::is_markdown(&path)
-            && self.preview.as_ref().map(|b| &b.key) != Some(&key);
+            surface == Surface::File && self.file_view_key.as_ref() != Some(&key);
+        // A rendered document needs both: the document is what shows, the
+        // rows are what a refused source falls back to.
+        let want_preview =
+            surface == Surface::Preview && self.preview.as_ref().map(|b| &b.key) != Some(&key);
         if !want_view && !want_preview {
             return;
         }

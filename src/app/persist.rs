@@ -16,7 +16,6 @@ impl AppView {
         let live_h = self.live_tree_height(cx);
         // Read before the session slot is borrowed mutably.
         let selected_path = self.current_diff_path().map(str::to_owned);
-        let tree_filter = Some(self.tree_filter.as_str().to_owned());
         let has_snapshot = self.snapshot.is_some();
         if let Some(s) = self
             .projects
@@ -35,9 +34,8 @@ impl AppView {
             if selected_path.is_some() || has_snapshot {
                 s.diff_selected = selected_path;
             }
-            s.diff_closed = self.diff_tree_closed.clone();
+            s.diff_open = self.diff_tree_open.clone();
             s.view_mode = Some(self.view_mode.as_str().to_owned());
-            s.tree_filter = tree_filter;
             // Hidden layer reports no live height — keep the stored one.
             if let Some(h) = live_h {
                 s.diff_tree_height = Some(h);
@@ -105,10 +103,9 @@ impl AppView {
                             },
                             live: Some(s.status.is_running() || s.was_live),
                             selected_file: s.diff_selected.clone(),
-                            closed_dirs: s.diff_closed.iter().cloned().collect(),
+                            open_dirs: s.diff_open.iter().cloned().collect(),
                             tree_height: s.diff_tree_height,
                             view_mode: s.view_mode.clone(),
-                            tree_filter: s.tree_filter.clone(),
                         })
                         .collect(),
                 })
@@ -152,8 +149,8 @@ impl AppView {
                 let now = std::time::Instant::now();
                 let cwd = self.projects[ix].path.clone();
                 let selected = s.selected_file.clone();
-                let closed: std::collections::HashSet<String> =
-                    s.closed_dirs.iter().cloned().collect();
+                let open: std::collections::HashSet<String> =
+                    s.open_dirs.iter().cloned().collect();
                 let tree_height = s
                     .tree_height
                     .filter(|h| *h >= tree_min_h() && *h <= tree_max_h());
@@ -192,10 +189,9 @@ impl AppView {
                         term,
                         cwd,
                         diff_selected: selected,
-                        diff_closed: closed,
+                        diff_open: open,
                         diff_tree_height: tree_height,
                         view_mode: s.view_mode.clone(),
-                        tree_filter: s.tree_filter.clone(),
                     });
             }
         }
@@ -278,10 +274,9 @@ mod tests {
             resume: resume.map(String::from),
             live: Some(live),
             selected_file: None,
-            closed_dirs: vec![],
+            open_dirs: vec![],
             tree_height: None,
             view_mode: None,
-            tree_filter: None,
 }
     }
 
@@ -350,10 +345,9 @@ mod tests {
             resume: Some(agent_id.into()),
             live: Some(false),
             selected_file: None,
-            closed_dirs: vec![],
+            open_dirs: vec![],
             tree_height: None,
             view_mode: None,
-            tree_filter: None,
 };
         // A shell in a project the window does NOT open on: the old
         // restore left those as `Done` rows, which is exactly the
@@ -364,10 +358,9 @@ mod tests {
             resume: None,
             live: Some(true),
             selected_file: None,
-            closed_dirs: vec![],
+            open_dirs: vec![],
             tree_height: None,
             view_mode: None,
-            tree_filter: None,
 };
         gpui::run_test_once(
             0,
@@ -469,10 +462,9 @@ mod tests {
             resume: None,
             live: Some(false),
             selected_file: None,
-            closed_dirs: vec![],
+            open_dirs: vec![],
             tree_height: None,
             view_mode: None,
-            tree_filter: None,
 };
         gpui::run_test_once(
             0,

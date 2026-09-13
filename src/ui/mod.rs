@@ -7,6 +7,7 @@ use gpui_kit::component::*;
 use gpui_kit::*;
 
 pub(crate) mod diff_panel;
+pub(crate) mod markdown;
 pub(crate) mod diff_tree;
 pub(crate) mod session_panel;
 pub(crate) mod settings;

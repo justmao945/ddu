@@ -262,9 +262,10 @@ pub struct SavedSession {
     /// re-pinned to an index on load).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_file: Option<String>,
-    /// Directories collapsed in this session's diff tree.
+    /// Directories expanded in this session's diff tree (the layer is
+    /// lazy: everything else is listed on demand).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub closed_dirs: Vec<String>,
+    pub open_dirs: Vec<String>,
     /// Sidebar splitter height for this session's diff tree (px);
     /// clamped to the layer's min/max on restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -274,10 +275,6 @@ pub struct SavedSession {
     /// in files written before the view panel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_mode: Option<String>,
-    /// Which files the sidebar's tree lists: `all` (the default) or
-    /// `changed`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tree_filter: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -618,10 +615,9 @@ mod tests {
                 resume: Some("id-1".into()),
                 live: Some(true),
                 selected_file: None,
-                closed_dirs: vec![],
+                open_dirs: vec![],
                 tree_height: Some(260.),
                 view_mode: None,
-                tree_filter: None,
 }],
         }]);
         let saved = serde_json::to_string(&state).unwrap();

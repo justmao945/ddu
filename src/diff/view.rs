@@ -68,6 +68,8 @@ pub struct PreviewBuild {
 /// The File-mode view of one selected file.
 pub enum FileView {
     Text(TextFileView),
+    /// An image, decoded and drawn by the pane ([`is_image`]).
+    Image,
     /// NUL byte in the first [`BINARY_SNIFF_BYTES`].
     Binary,
     /// Over [`MAX_VIEW_BYTES`] or [`MAX_VIEW_LINES`].
@@ -80,12 +82,24 @@ impl FileView {
     /// The refusal behind this view, for the pane's note.
     pub fn refusal(&self) -> Option<Unreadable> {
         match self {
-            FileView::Text(_) => None,
+            FileView::Text(_) | FileView::Image => None,
             FileView::Binary => Some(Unreadable::Binary),
             FileView::TooLarge => Some(Unreadable::TooLarge),
             FileView::Missing => Some(Unreadable::Missing),
         }
     }
+}
+
+/// Whether a path is an image the pane draws instead of reading: the
+/// formats gpui's own image loader decodes (SVG included). Anything else
+/// binary goes through the reading policy like any other file.
+pub fn is_image(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".svg",
+    ]
+    .iter()
+    .any(|ext| lower.ends_with(ext))
 }
 
 /// One row of the whole-file stream: a hunk header band or a line.
@@ -114,6 +128,16 @@ impl FileView {
     /// longer lines up with the file) still yields a complete view, just
     /// without tints.
     pub fn build(root: &Path, path: &str, diff: Option<&DiffFile>) -> FileView {
+        // An image is content, not a file to read: it has no lines to
+        // number and no tint to merge — the pane draws it (the size caps
+        // below are about *text*, and a 4 MB PNG has three lines' worth
+        // of nothing to show).
+        if is_image(path) {
+            return match std::fs::metadata(root.join(path)) {
+                Ok(meta) if meta.is_file() => FileView::Image,
+                _ => FileView::Missing,
+            };
+        }
         let text = match read_text(root, path) {
             Ok(text) => text,
             Err(Unreadable::Binary) => return FileView::Binary,

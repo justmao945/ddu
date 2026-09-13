@@ -1,183 +1,203 @@
-//! The working tree as the sidebar lists it: **every** tracked and
-//! untracked file (`.gitignore` respected), with the poll's diff folded
-//! in as per-file stats — `docs/FILE_TREE.md` §4.1.
+//! The sidebar's file tree: the working tree listed **lazily**, one
+//! directory at a time (`docs/FILE_TREE.md` §4.1).
 //!
-//! Built once per poll from the in-memory index plus the diff deltas the
-//! poll already computes: no second workdir walk, no subprocess. The
-//! nodes hold *indices* into [`FileTree::entries`], never copies of a
-//! path, so the UI can flatten rows without re-splitting anything.
+//! Nothing here reads the whole repository. [`Changes`] answers "is this
+//! one file changed" and "how many changed files are under this
+//! directory" off the poll's own diff (path-sorted, so both are a binary
+//! search), and [`list_dir`] reads a single directory from the
+//! filesystem when the UI expands it. A 40k-file repository therefore
+//! draws its few hundred visible rows without ever touching the other
+//! 39k — the eager `FileTree` this replaced rebuilt every node, rollup
+//! and row list on every 3 s poll (measured: 18 ms of a 47 ms poll at
+//! 40k files, and ~5 MB of strings held for the frame).
 
-use std::cmp::Ordering;
+use std::path::Path;
+
+use git2::Repository;
 
 use super::DiffFile;
 
-/// One file of the working tree. `changed` marks the ones the poll's
-/// diff found — they carry the stats; a clean file has none.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TreeEntry {
-    pub path: String,
-    pub added: usize,
-    pub removed: usize,
-    pub changed: bool,
+/// The poll's changed files, queried by path and by directory.
+///
+/// Sorted indices rather than a sorted copy: the diff's records carry
+/// hunks, and copying them (`TreeEntry` held a path plus stats per file)
+/// was most of the memory the eager tree cost.
+pub struct Changes<'a> {
+    files: &'a [DiffFile],
+    /// Indices into `files`, sorted by path.
+    order: Vec<u32>,
 }
 
-/// One directory level: the files directly in it (indices into
-/// [`FileTree::entries`], path-sorted), its subdirectories, and the
-/// rollups its row and the ancestors' badges read.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct DirNode {
-    pub files: Vec<usize>,
-    /// Subdirectory name → its subtree. The name is the last path
-    /// component; the node's full path is implied by the walk.
-    pub dirs: Vec<(String, DirNode)>,
-    /// Files anywhere under this subtree.
-    pub files_total: usize,
-    /// How many of them the diff found.
-    pub changed_total: usize,
-    pub added: usize,
-    pub removed: usize,
-}
-
-/// The whole working tree.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct FileTree {
-    /// Every file, path-sorted — the tree's rows index into this.
-    pub entries: Vec<TreeEntry>,
-    pub root: DirNode,
-}
-
-impl FileTree {
-    pub fn files(&self) -> usize {
-        self.entries.len()
+impl<'a> Changes<'a> {
+    pub fn of(files: &'a [DiffFile]) -> Self {
+        // git2 hands the diff over in its own order; the per-directory
+        // queries below need path order, and sorting indices keeps the
+        // diff itself untouched.
+        let mut order: Vec<u32> = (0..files.len() as u32).collect();
+        order.sort_unstable_by(|a, b| files[*a as usize].path.cmp(&files[*b as usize].path));
+        Self { files, order }
     }
 
-    pub fn changed(&self) -> usize {
-        self.root.changed_total
+    fn path(&self, ix: u32) -> &'a str {
+        self.files[ix as usize].path.as_str()
     }
 
-    pub fn added(&self) -> usize {
-        self.root.added
+    /// The half-open range of `order` holding the paths under `dir`
+    /// (`""` = the whole tree). Path order puts a directory's files
+    /// together with their `dir/` prefix, so one binary search finds the
+    /// start and the run after it is the directory.
+    fn range(&self, dir: &str) -> (usize, usize) {
+        if dir.is_empty() {
+            return (0, self.order.len());
+        }
+        let prefix = format!("{dir}/");
+        let start = self
+            .order
+            .partition_point(|ix| self.path(*ix) < prefix.as_str());
+        let end = start
+            + self.order[start..]
+                .iter()
+                .take_while(|ix| self.path(**ix).starts_with(&prefix))
+                .count();
+        (start, end)
     }
 
-    pub fn removed(&self) -> usize {
-        self.root.removed
-    }
-
-    /// The entry for a repo-relative path, if the tree lists it.
-    pub fn get(&self, path: &str) -> Option<&TreeEntry> {
+    /// The diff's record for a path, if the poll found it changed. An
+    /// exact lookup — a path that merely *prefixes* other paths (`src`
+    /// against `src/main.rs`) is not a file.
+    pub fn get(&self, path: &str) -> Option<&'a DiffFile> {
         let ix = self
-            .entries
-            .binary_search_by(|e| e.path.as_str().cmp(path))
-            .ok()?;
-        self.entries.get(ix)
+            .order
+            .partition_point(|ix| self.path(*ix) < path);
+        let ix = *self.order.get(ix)?;
+        (self.path(ix) == path).then(|| &self.files[ix as usize])
+    }
+
+    /// How many changed files are under `dir` — the directory row's
+    /// badge. Only directories are asked; a file's own path has no
+    /// directory range and answers 0.
+    pub fn count_under(&self, dir: &str) -> usize {
+        let (start, end) = self.range(dir);
+        end - start
+    }
+
+    /// Every changed path, and every directory on the way to one — what
+    /// the tree opens on (`seed_open`).
+    pub fn paths(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.order.iter().map(|ix| self.path(*ix))
+    }
+
+    /// The whole diff's `+/−`, for the sidebar's summary strip.
+    pub fn totals(&self) -> (usize, usize) {
+        self.files
+            .iter()
+            .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed))
     }
 }
 
-/// Build the tree from the index's paths (sorted, as git stores them)
-/// and the poll's diff. The union is a merge of two sorted runs: a path
-/// in both is a changed file, a diff-only path is untracked, an
-/// index-only path is clean. A file deleted in the workdir is still in
-/// the index, which is exactly right — it belongs in the tree, carrying
-/// its removed lines.
-pub fn build(index: Vec<String>, diff: &[DiffFile]) -> FileTree {
-    let mut found: Vec<&DiffFile> = diff.iter().collect();
-    found.sort_by(|a, b| a.path.cmp(&b.path));
+/// One entry of a directory's listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Child {
+    File {
+        name: String,
+        added: usize,
+        removed: usize,
+        /// The poll found this file changed — the row tints and carries
+        /// its figures (a binary or empty change has none).
+        changed: bool,
+    },
+    Dir {
+        name: String,
+        /// Changed files anywhere under it.
+        changed: usize,
+    },
+}
 
-    // The merge below needs both runs sorted. git's index is, by
-    // construction — but an unsorted run would not fail loudly, it would
-    // silently duplicate entries (one per `Equal` missed), so the
-    // contract is checked here rather than trusted: one pass of string
-    // compares, and a sort only if a caller ever breaks it.
-    let mut clean: Vec<String> = index;
-    if !clean.windows(2).all(|pair| pair[0] <= pair[1]) {
-        clean.sort_unstable();
-    }
-
-    let mut entries = Vec::with_capacity(clean.len() + found.len());
-    let mut clean = clean.into_iter().peekable();
-    let mut changed = found.into_iter().peekable();
-    loop {
-        match (clean.peek(), changed.peek()) {
-            (Some(path), Some(file)) => match path.as_str().cmp(file.path.as_str()) {
-                Ordering::Less => entries.push(clean_entry(clean.next().expect("peeked"))),
-                Ordering::Equal => {
-                    let path = clean.next().expect("peeked");
-                    let file = changed.next().expect("peeked");
-                    entries.push(changed_entry(path, file));
-                }
-                Ordering::Greater => {
-                    let file = changed.next().expect("peeked");
-                    entries.push(changed_entry(file.path.clone(), file));
-                }
-            },
-            (Some(_), None) => entries.push(clean_entry(clean.next().expect("peeked"))),
-            (None, Some(_)) => {
-                let file = changed.next().expect("peeked");
-                entries.push(changed_entry(file.path.clone(), file));
-            }
-            (None, None) => break,
+impl Child {
+    pub fn name(&self) -> &str {
+        match self {
+            Child::File { name, .. } | Child::Dir { name, .. } => name,
         }
     }
+}
 
-    let mut root = DirNode::default();
-    // Sorted entries mean a directory's files are contiguous and each
-    // level's children arrive in order, so one pass builds the tree:
-    // walk the path components, take the child named after each (dirs at
-    // one level have unique names), and drop the file index in its level.
-    for (ix, entry) in entries.iter().enumerate() {
-        let mut node = &mut root;
-        let mut parts = entry.path.split('/').peekable();
-        while let Some(part) = parts.next() {
-            if parts.peek().is_none() {
-                break;
-            }
-            let pos = match node.dirs.iter().position(|(name, _)| name == part) {
-                Some(pos) => pos,
-                None => {
-                    node.dirs.push((part.to_owned(), DirNode::default()));
-                    node.dirs.len() - 1
-                }
-            };
-            node = &mut node.dirs[pos].1;
+/// One directory's direct children, read from the filesystem — the only
+/// IO the tree does, and only for a directory the UI is showing.
+///
+/// `.gitignore` is honored through libgit2 (`status_should_ignore`), so
+/// the listing agrees with the diff's untracked scan instead of growing
+/// a second ignore implementation. A **tracked** file is listed whatever
+/// the rules say, which is what git itself does; a submodule (a gitlink
+/// in the index) is skipped, as the eager tree skipped it.
+pub fn list_dir(repo: &Repository, dir: &str, changes: &Changes<'_>) -> Vec<Child> {
+    let Some(root) = repo.workdir() else {
+        return Vec::new();
+    };
+    let abs = if dir.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(dir)
+    };
+    let Ok(entries) = std::fs::read_dir(&abs) else {
+        return Vec::new();
+    };
+    // One index handle for the whole directory: `get_path` is a binary
+    // search into it, and only the *untracked* entries need an ignore
+    // check at all.
+    let index = repo.index().ok();
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == ".git" {
+            continue;
         }
-        node.files.push(ix);
+        let rel = if dir.is_empty() {
+            name.clone()
+        } else {
+            format!("{dir}/{name}")
+        };
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            let gitlink = index
+                .as_ref()
+                .and_then(|ix| ix.get_path(Path::new(&rel), 0))
+                .is_some_and(|e| e.mode == 0o160000);
+            if gitlink {
+                continue;
+            }
+            if repo.status_should_ignore(Path::new(&rel)).unwrap_or(false) {
+                continue;
+            }
+            dirs.push(Child::Dir {
+                name,
+                changed: changes.count_under(&rel),
+            });
+        } else if meta.is_file() {
+            let tracked = index
+                .as_ref()
+                .and_then(|ix| ix.get_path(Path::new(&rel), 0))
+                .is_some();
+            if !tracked && repo.status_should_ignore(Path::new(&rel)).unwrap_or(false) {
+                continue;
+            }
+            let file = changes.get(&rel);
+            files.push(Child::File {
+                name,
+                added: file.map_or(0, |f| f.added),
+                removed: file.map_or(0, |f| f.removed),
+                changed: file.is_some(),
+            });
+        }
     }
-    rollup(&mut root, &entries);
-    FileTree { entries, root }
-}
-
-fn clean_entry(path: String) -> TreeEntry {
-    TreeEntry {
-        path,
-        added: 0,
-        removed: 0,
-        changed: false,
-    }
-}
-
-fn changed_entry(path: String, file: &DiffFile) -> TreeEntry {
-    TreeEntry {
-        path,
-        added: file.added,
-        removed: file.removed,
-        changed: true,
-    }
-}
-
-/// Post-order pass: a directory's totals are its own files plus every
-/// subtree's. Depth is the path depth, so this cannot recurse far.
-fn rollup(node: &mut DirNode, entries: &[TreeEntry]) {
-    node.files_total = node.files.len();
-    node.changed_total = node.files.iter().filter(|ix| entries[**ix].changed).count();
-    node.added = node.files.iter().map(|ix| entries[*ix].added).sum();
-    node.removed = node.files.iter().map(|ix| entries[*ix].removed).sum();
-    for (_, sub) in &mut node.dirs {
-        rollup(sub, entries);
-        node.files_total += sub.files_total;
-        node.changed_total += sub.changed_total;
-        node.added += sub.added;
-        node.removed += sub.removed;
-    }
+    // Files first, then directories, each name-sorted: the order the
+    // tree has always drawn, and the only one its tests pin.
+    files.sort_unstable_by(|a, b| a.name().cmp(b.name()));
+    dirs.sort_unstable_by(|a, b| a.name().cmp(b.name()));
+    files.extend(dirs);
+    files
 }
 
 #[cfg(test)]
@@ -193,111 +213,131 @@ mod tests {
         }
     }
 
-    fn paths(tree: &FileTree) -> Vec<&str> {
-        tree.entries.iter().map(|e| e.path.as_str()).collect()
+    /// Query by path and by directory off one path-sorted index: exact
+    /// lookups, prefix counts, and the sibling-prefix trap (`src` must
+    /// not answer with `src-gen/b.rs`, nor `src/a.rs` with `src`).
+    #[test]
+    fn changes_answer_by_path_and_by_directory() {
+        // Deliberately unsorted: `Changes` sorts its own indices.
+        let files = vec![
+            changed("src/main.rs", 3, 1),
+            changed("README.md", 1, 0),
+            changed("src-gen/b.rs", 9, 9),
+            changed("src/ui/mod.rs", 0, 4),
+        ];
+        let changes = Changes::of(&files);
+
+        assert_eq!(changes.get("README.md").map(|f| (f.added, f.removed)), Some((1, 0)));
+        assert_eq!(changes.get("src/main.rs").map(|f| f.added), Some(3));
+        assert!(changes.get("src").is_none(), "a directory is not a file");
+        assert!(changes.get("src/none.rs").is_none());
+        assert!(changes.get("src-gen").is_none());
+
+        assert_eq!(changes.count_under(""), 4);
+        assert_eq!(changes.count_under("src"), 2);
+        assert_eq!(changes.count_under("src/ui"), 1);
+        assert_eq!(changes.count_under("src-gen"), 1);
+        assert_eq!(changes.count_under("docs"), 0);
+
+        assert_eq!(changes.totals(), (13, 14));
+        let paths: Vec<&str> = changes.paths().collect();
+        assert_eq!(paths, ["README.md", "src-gen/b.rs", "src/main.rs", "src/ui/mod.rs"]);
     }
 
-    /// The union: tracked, untracked and deleted all land in the tree,
-    /// each with the right kind, and the ignored never do (the caller
-    /// never hands them over — the index and the diff both skip them).
+    /// The listing is the filesystem's, with git's own ignore rules:
+    /// tracked files show however the rules read, ignored ones do not,
+    /// and a directory's badge counts what changed under it.
     #[test]
-    fn index_and_diff_merge_into_one_sorted_tree() {
-        let index = vec![
-            "README.md".to_owned(),
-            "docs/a.md".to_owned(),
-            "docs/gone.md".to_owned(),
-            "src/main.rs".to_owned(),
-        ];
-        let diff = vec![
-            changed("README.md", 3, 1),
-            changed("docs/gone.md", 0, 7),
-            changed("new.txt", 5, 0),
-        ];
-        let tree = build(index, &diff);
+    fn list_dir_reads_one_directory_through_the_ignore_rules() {
+        let root = std::env::temp_dir().join(format!("ddu-tree-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/ui")).expect("mkdir");
+        std::fs::create_dir_all(root.join("target/debug")).expect("mkdir");
+        std::fs::write(root.join("README.md"), "hi\n").expect("write");
+        std::fs::write(root.join("untracked.rs"), "x\n").expect("write");
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write");
+        std::fs::write(root.join("src/ui/mod.rs"), "\n").expect("write");
+        std::fs::write(root.join("target/debug/junk"), "x\n").expect("write");
+        std::fs::write(root.join(".gitignore"), "target/\n*.log\n").expect("write");
+        std::fs::write(root.join("ignored.log"), "x\n").expect("write");
 
+        let repo = Repository::init(&root).expect("init");
+        let mut index = repo.index().expect("index");
+        // README.md and src/ are tracked; `target/` holds only ignored
+        // files and `untracked.rs` is not in the index at all.
+        index.add_path(Path::new("README.md")).expect("add");
+        index.add_path(Path::new("src/main.rs")).expect("add");
+        index.add_path(Path::new("src/ui/mod.rs")).expect("add");
+        index.write().expect("write index");
+
+        let files = vec![changed("src/main.rs", 2, 1), changed("untracked.rs", 1, 0)];
+        let changes = Changes::of(&files);
+
+        let names: Vec<String> = list_dir(&repo, "", &changes)
+            .iter()
+            .map(|c| {
+                let kind = match c {
+                    Child::File { .. } => "f",
+                    Child::Dir { .. } => "d",
+                };
+                format!("{kind}:{}", c.name())
+            })
+            .collect();
+        // Files first (name-sorted), then directories; `.gitignore` and
+        // the ignored file are gone, `target/` (ignored, no tracked
+        // content) is gone with them.
         assert_eq!(
-            paths(&tree),
-            [
-                "README.md",
-                "docs/a.md",
-                "docs/gone.md",
-                "new.txt",
-                "src/main.rs"
-            ]
+            names,
+            ["f:.gitignore", "f:README.md", "f:untracked.rs", "d:src"],
+            "listing of the repository root"
         );
-        assert_eq!(tree.files(), 5);
-        assert_eq!(tree.changed(), 3);
-        assert_eq!((tree.added(), tree.removed()), (8, 8));
 
-        // Clean file: listed, muted, no figures.
-        let readme = tree.get("README.md").expect("README.md");
-        assert!(readme.changed);
-        assert_eq!((readme.added, readme.removed), (3, 1));
-        let clean = tree.get("docs/a.md").expect("docs/a.md");
-        assert!(!clean.changed);
-        assert_eq!((clean.added, clean.removed), (0, 0));
-        // Untracked: in the tree, changed, outside the index.
-        assert!(tree.get("new.txt").expect("new.txt").changed);
-        assert!(tree.get("nope.txt").is_none());
+        let root_children = list_dir(&repo, "", &changes);
+        let src = root_children
+            .iter()
+            .find(|c| c.name() == "src")
+            .expect("src/");
+        assert_eq!(
+            *src,
+            Child::Dir {
+                name: "src".to_owned(),
+                changed: 1
+            }
+        );
+        let untracked = root_children
+            .iter()
+            .find(|c| c.name() == "untracked.rs")
+            .expect("untracked.rs");
+        assert_eq!(
+            *untracked,
+            Child::File {
+                name: "untracked.rs".to_owned(),
+                added: 1,
+                removed: 0,
+                changed: true,
+            }
+        );
+        let readme = root_children
+            .iter()
+            .find(|c| c.name() == "README.md")
+            .expect("README.md");
+        assert_eq!(
+            *readme,
+            Child::File {
+                name: "README.md".to_owned(),
+                added: 0,
+                removed: 0,
+                changed: false,
+            }
+        );
 
-        // Rollups: `docs/` sums its own files, the root sums everything.
-        let (name, docs) = &tree.root.dirs[0];
-        assert_eq!(name, "docs");
-        assert_eq!(docs.files_total, 2);
-        assert_eq!(docs.changed_total, 1);
-        assert_eq!(docs.removed, 7);
-        assert_eq!(tree.root.files_total, 5);
-        assert_eq!(tree.root.files.len(), 2, "root files: README.md, new.txt");
+        // The nested listing is its own call, and only its own files.
+        let inner: Vec<String> = list_dir(&repo, "src", &changes)
+            .iter()
+            .map(|c| c.name().to_owned())
+            .collect();
+        assert_eq!(inner, ["main.rs", "ui"]);
 
-        // Subdirectories keep the sorted order, and nesting is by level.
-        let (name, src) = &tree.root.dirs[1];
-        assert_eq!(name, "src");
-        assert_eq!(src.files_total, 1);
-        assert_eq!(src.files.len(), 1);
-        assert!(src.dirs.is_empty());
-    }
-
-    /// A clean tree is not an empty tree: that is the whole point of the
-    /// listing — no diff, every file still there.
-    #[test]
-    fn a_clean_tree_lists_every_file_with_no_changes() {
-        let index = vec![
-            "a.txt".to_owned(),
-            "deep/nest/one.rs".to_owned(),
-            "deep/nest/two.rs".to_owned(),
-        ];
-        let tree = build(index, &[]);
-
-        assert_eq!(paths(&tree), ["a.txt", "deep/nest/one.rs", "deep/nest/two.rs"]);
-        assert_eq!((tree.files(), tree.changed()), (3, 0));
-        assert_eq!((tree.added(), tree.removed()), (0, 0));
-        assert_eq!(tree.root.changed_total, 0);
-        let (name, deep) = &tree.root.dirs[0];
-        assert_eq!(name, "deep");
-        assert!(deep.files.is_empty(), "deep/ holds no files directly");
-        assert_eq!(deep.dirs.len(), 1);
-        assert_eq!(deep.dirs[0].0, "nest");
-        assert_eq!(deep.dirs[0].1.files_total, 2);
-    }
-
-    /// Two sibling directories whose names share a prefix must not be
-    /// confused with each other, and `get` must find deep paths. The
-    /// path order is git's (byte order): `-` sorts before `/`, so
-    /// `src-gen/…` comes before `src/…`.
-    #[test]
-    fn sibling_directories_stay_distinct() {
-        let index = vec![
-            "src-gen/b.rs".to_owned(),
-            "src-gen/c.rs".to_owned(),
-            "src/a.rs".to_owned(),
-        ];
-        let tree = build(index, &[]);
-        assert_eq!(tree.root.dirs.len(), 2);
-        assert_eq!(tree.root.dirs[0].0, "src-gen");
-        assert_eq!(tree.root.dirs[1].0, "src");
-        assert_eq!(tree.root.dirs[0].1.files_total, 2, "src-gen/ holds two");
-        assert_eq!(tree.root.dirs[1].1.files_total, 1, "src/ holds one");
-        assert!(tree.get("src-gen/c.rs").is_some());
-        assert!(tree.get("src-gen/missing.rs").is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

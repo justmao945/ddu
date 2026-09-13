@@ -4,37 +4,21 @@
 use std::cell::RefCell;
 use std::path::Path;
 
-use super::{tree::FileTree, DiffFile, DiffHunk, DiffLine, GitDiff, Snapshot, MAX_LINES_PER_FILE};
+use super::{DiffFile, DiffHunk, DiffLine, GitDiff, Snapshot, MAX_LINES_PER_FILE};
 use git2::{DiffDelta, Repository};
 
 /// One poll: the project's diff against HEAD (staged + unstaged +
-/// untracked) **and** the full working-tree listing, from one `git2`
-/// pass over the same repository — no second workdir walk, no
-/// subprocess (`docs/FILE_TREE.md` §4.1).
+/// untracked), from one `git2` walk of the workdir — no subprocess, and
+/// no working-tree listing (the sidebar lists what it shows; see
+/// [`super::tree`]).
 pub fn snapshot(
     path: &Path,
     limits: &std::collections::HashMap<String, usize>,
 ) -> anyhow::Result<Snapshot> {
     let repo = Repository::discover(path)?;
-    let diff = head_diff_in(&repo, limits)?;
-    let tree = worktree_tree(&repo, &diff.files)?;
-    Ok(Snapshot { diff, tree })
-}
-
-/// The tracked files, as git stores them: the index, minus submodule
-/// gitlinks (not files — v1 lists them nowhere). The index is sorted, and
-/// so is [`tree::build`]'s other input, which is what lets the two merge
-/// without a sort of every path in the repository.
-fn worktree_tree(repo: &Repository, diff: &[DiffFile]) -> anyhow::Result<FileTree> {
-    let index = repo.index()?;
-    let mut tracked = Vec::with_capacity(index.len());
-    for entry in index.iter() {
-        if entry.mode == 0o160000 {
-            continue;
-        }
-        tracked.push(String::from_utf8_lossy(&entry.path).into_owned());
-    }
-    Ok(super::tree::build(tracked, diff))
+    Ok(Snapshot {
+        diff: head_diff_in(&repo, limits)?,
+    })
 }
 
 /// Diff the project against HEAD (staged + unstaged + untracked).
@@ -226,16 +210,17 @@ mod tests {
             .unwrap();
         assert!(!large.truncated);
         assert_eq!(large.lines_total, MAX_LINES_PER_FILE + 10);
-        // The same pass lists the working tree: tracked, untracked and
-        // the file deleted in the workdir, with the diff's stats folded
-        // in.
+        // The tree reads the same diff: every changed path is one of the
+        // diff's records, and a clean file is in none of them.
         let snap = snapshot(&dir, &Default::default()).unwrap();
-        assert!(snap.tree.get("hello.txt").expect("hello.txt").changed);
-        assert!(snap.tree.get("new.txt").expect("new.txt").changed);
-        assert!(snap.tree.get("large.txt").expect("large.txt").changed);
-        assert!(!snap.tree.get("README.md").is_some());
-        assert_eq!(snap.tree.changed(), snap.diff.files.len());
+        let changes = crate::diff::tree::Changes::of(&snap.diff.files);
+        assert!(changes.get("hello.txt").is_some());
+        assert!(changes.get("new.txt").is_some());
+        assert!(changes.get("large.txt").is_some());
+        assert!(changes.get("README.md").is_none());
+        assert_eq!(changes.count_under(""), snap.diff.files.len());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+

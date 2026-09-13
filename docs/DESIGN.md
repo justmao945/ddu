@@ -187,13 +187,14 @@ Agent CLIs (claude/codex/omp) daily need streaming output, ANSI colors, line-wra
 
 * Data: `Repository::discover(project.path)` → `diff_tree_to_workdir_with_index(head, opts)` with `include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true)` — staged, unstaged and untracked in one pass, no subprocess. Refreshed by the 3 s poll (every session switch reloads immediately); there is **no** `notify`-crate `.git` watcher and no manual refresh control.
 * Truncation: a file's collected lines are capped at `MAX_LINES_PER_FILE` (5 000) with the stat counts still counted in full; the pane renders a cap note and reaching it grows that file's budget ×4 up to `EXPAND_MAX_LINES` (200 000).
-* View: the file list is the sidebar's **file tree** (`ui/diff_tree.rs`) — **every** file in the working tree (tracked + untracked, `.gitignore` respected, submodule gitlinks skipped), changes carrying `+a/−b` and clean files listed muted. Its rows come from a **`TreeIndex`** built once per snapshot (and per filter/collapse toggle) into `AppView::tree_index`, over the `FileTree` the poll builds (`diff/tree.rs`: the index's paths merged with the diff's records, nested with per-directory rollups) — flatten and rollups are O(files) off the render path — and a `v_virtual_list` builds only the visible slice, so a 3 000-file tree renders like a 30-file one.
-  * **All / Changed** (`⌘⇧F`, `⌃⇧A` on Linux — `⌃⇧F` is the terminal's find): the strip's two toggles. `Changed` is the changed-only tree of old; `All` is the default now that the listing exists, and a clean repository still shows its tree (`Changed 0`).
-  * **Default collapse**: on the first snapshot of a session, every directory with no changed descendant is folded into the collapsed set, so a large repository opens on its changes and their ancestors. Explicit toggles win from then on, and a file changing later only moves badges — never the collapse state, so the tree does not jump under the user.
-  * **Selection is a path** (`AppView::selection`), not an index into the diff: a clean file is a normal selection — the record is looked up by index when the poll found one, a path that never appears in the tree clears the pane, Diff mode bands "No changes in this file — ⌘⇧M shows the whole file.", the whole-file surface shows it untinted with `unchanged` in the header, and the header ellipsizes the *directory* before the file's name.
+* View: the file list is the sidebar's **file tree** (`ui/diff_tree.rs`), read **lazily**: `TreeIndex` (`AppView::tree_index`) is the root plus the directories the user has expanded, and each of those is listed on demand (`diff/tree.rs::list_dir` — one `read_dir`, gitignore through libgit2, one diff lookup per entry) with the poll's changes merged in as it is read. Nothing else is read, so a 40k-file repository draws a few hundred rows; a `v_virtual_list` then builds only the visible slice.
+  * **Default expansion**: on the first snapshot of a session, `seed_open` expands every directory on the way to a changed file, so a large repository opens on its changes and their ancestors. Explicit toggles win from then on, and a file changing later only moves badges — never the expansion state, so the tree does not jump under the user.
+  * **Figures**: changed rows carry `+a/−b` and a bright name, clean rows a muted one; **a zero side is never printed** (`+8`, not `+8 −0`, nothing at all for a binary change), and a directory's badge is `● n` changed descendants — never a file total. One tree, no All/Changed filter and no counts: what the layer has not read it cannot count.
+  * **Selection is a path** (`AppView::selection`), not an index into the diff: a clean file is a normal selection — the record is looked up by index when the poll found one, and the selection survives a poll while the path is in the diff or still on disk. A file nobody changed renders as the file itself: `AppView::surface` folds Diff into File, so a clean `README.md` shows its rendered document rather than an empty hunks pane.
 * Pane modes: the hunk area (`ui/diff_panel.rs`) shows the selected file in one of two modes, toggled by `⌘⇧M` or the header's far-right icon button (per session, persisted):
   * **Diff** — hunks only: two number gutters (measured per file) + a sign column, green `+` / red `-` / untinted context rows, `@@` header bands.
   * **File** — the whole file with the changes merged in (`diff/view.rs`): every workdir line once, deletions spliced above the line that replaced them, hunk headers kept as bands, `+`/`-` rows tinted in place. Built off the UI thread once per `(path, diff generation)`; a stale diff (the file moved under the 3 s poll) degrades to untinted context instead of splicing at the wrong line, and a capped diff tints only its prefix (the cap note then grows the file's budget as in Diff mode). Refuses what it cannot show — binary (NUL in the first 8 KiB), over `MAX_VIEW_BYTES` (8 MiB) / `MAX_VIEW_LINES` (200 000), or gone from disk — and bands the reason above the hunks.
+  * **Images**: an image file (`png`/`jpg`/`jpeg`/`gif`/`webp`/`bmp`/`ico`/`svg`) is drawn by the pane (`FileView::Image`, fitted with `Contain`) instead of banding "binary", and images *inside* a rendered document go through the plugin in `ui/markdown.rs` — gpui's text view hands `![]()`/`<img>` to the app's http client, which cannot read a path, so the block holding an image is rendered here through `img(Resource::Path)` against the document's directory.
   * **Markdown** is not a third mode: File mode *is* the rendered document for `.md`/`.markdown`/`.mdx` (a `TextView::markdown`), which is why the toggle is a plain two-state switch. The library's own scrollable text view virtualizes the document by Markdown block (it builds a `gpui::list` over the parsed blocks and measures them all so the thumb does not jitter), so a long document paints its visible blocks. The find bar has no match list over a rendered document: ⌘F switches to Diff, whose rows it can match.
   * **One read policy for both surfaces** (`diff/view.rs`): the merged view and the Markdown source refuse for the same reasons — binary (NUL in the first 8 KiB), over the byte/line cap, or gone from disk — and a refused document renders the rows it falls back to with the same one-line band File mode shows. A refusal is stored with the `(path, generation)` it was read for, so the pane can tell "still reading" from "cannot read" instead of banding the reading note forever.
   Both modes are one **`RowStream`** (`diff/mod.rs`): a row's item index *is* its search index, so the find bar, `scroll_to_item` and drag selection are mode-agnostic; the pane's `v_virtual_list` builds only the visible slice of either. Plain lines are `SelectableText` participants ordered by `document_order` (drag selection copies them joined by newlines).
@@ -205,10 +206,11 @@ Agent CLIs (claude/codex/omp) daily need streaming output, ANSI colors, line-wra
 * The left pane is the project tree (projects → their sessions) plus, as its
   lower splitter slot, the **diff file tree layer** (§7): today it lists the
   changed files as a directory tree, toggled with ⌘T and resizable per session.
-* A full working-tree file tree (`walkdir`/`ignore`-backed, lazily expanded,
-  `.gitignore` respected) is designed in `FILE_TREE.md`, which replaces that
-  layer's changed-only build rather than adding a second pane beside it. The
-  earlier `explorer.rs` sketch in this document is superseded by that plan.
+* The layer now lists the whole working tree, lazily expanded and
+  `.gitignore`-respecting (`FILE_TREE.md`), rather than only the changed files:
+  it replaces the changed-only build instead of sitting beside it. No `walkdir`
+  or `ignore` crate was needed — the listing is `read_dir` plus libgit2's own
+  ignore rules. The earlier `explorer.rs` sketch in this document is superseded.
 
 ## 9. Agent Backend Abstraction
 
@@ -252,8 +254,7 @@ struct AgentCmd { program: String, args: Vec<String> }
 * Shortcuts, all `secondary-` (⌘ on macOS, ⌃ elsewhere): ⌘N new session, ⌘O add
   project, ⌘1…⌘9 select the Nth session, ⌘T toggle the diff file tree, ⌘B toggle
   the sidebar, ⌘R toggle the changes pane, ⌘⇧M toggle the pane's surface
-  (hunks ⇄ whole file; a Markdown file renders), ⌘⇧F toggle the tree's
-  All/Changed filter (⌃⇧A on Linux),
+  (hunks ⇄ whole file; a Markdown file renders),
   ⌘W close session, ⌘, settings, ⌘Q quit, ⌘+/⌘− terminal font zoom. Copy/paste/find are `secondary-` on macOS and
   `⌃⇧C` / `⌃⇧V` / `⌃⇧F` on Linux, so the terminal keeps `Ctrl+C` for SIGINT. A
   chord the app binds is never forwarded to the shell — on Linux `⌃N/O/T/B/R/W`
@@ -332,8 +333,8 @@ struct AgentCmd { program: String, args: Vec<String> }
 * ~~M4 Session management~~ ✅ shipped: open / kill / restart / exit status / confirmations / **persistence** — `state.json` restores projects, layout and per-session state, and rows that were still running come back running, agents resumed from their captured id.
 * M5 File tree + worktree + polish — partly shipped:
   * ✅ the view panel: the whole-file surface (diff merged in, `diff/view.rs`), Markdown rendering and the `⌘⇧M` / icon-button switch, all on a virtualized row stream;
-  * ✅ virtualization: the tree renders from a per-poll `TreeIndex` through `v_virtual_list`, so changed-only trees of thousands of rows are cheap;
-  * open: the **full working-tree listing** (every file, `.gitignore` respected, `All n · Changed m` filter) and its default-collapse seeding — designed in `FILE_TREE.md`;
+  * ✅ the file tree: every file in the working tree, `.gitignore` respected, listed **lazily** (one directory at a time, on expansion) with the diff merged in — no filter, no counts, `TreeIndex` + `v_virtual_list`, defaulting to the changes and their ancestors;
+  * ✅ the pane's surfaces: Diff ⇄ whole file (⌘⇧M / the header's far-right icon button), Markdown rendered as the document, images drawn (document images through `ui/markdown.rs`, image files fitted to the pane);
   * open: per-session worktrees (one branch + one directory per session) — sessions share the project diff today;
   * open: syntax highlighting in the file view — deferred (`FILE_TREE.md` §8.4).
 * Desktop notifications ✅ shipped: `terminal/attention.rs` decodes the agent's own hand-back markers (`BEL` / `OSC 9` / `OSC 777`) off the PTY stream, `AppView` posts one `show_system_notification` per row unless that terminal is the one on screen; Settings → General toggles it.

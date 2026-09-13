@@ -85,13 +85,13 @@ pub struct GitDiff {
     pub files: Vec<DiffFile>,
 }
 
-/// One poll's view of the project: the diff and the **full** working-tree
-/// listing, read together so the tree's badges and the pane's rows can
-/// never disagree about which files changed (`docs/FILE_TREE.md` §4.1).
+/// One poll's view of the project: the diff, and through it everything
+/// the tree needs (`docs/FILE_TREE.md` §4.1). There is no working-tree
+/// listing here: the sidebar lists the directories it is *showing*, on
+/// demand ([`tree::list_dir`]), so a poll never walks a repository.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Snapshot {
     pub diff: GitDiff,
-    pub tree: tree::FileTree,
 }
 
 /// One row of a pane row stream.

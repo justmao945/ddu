@@ -579,10 +579,9 @@ mod tests {
                 resume: None,
                 live: Some(false),
                 selected_file: None,
-                closed_dirs: vec![],
+                open_dirs: vec![],
                 tree_height: None,
                 view_mode: None,
-                tree_filter: None,
 }
         }
 
