@@ -520,7 +520,7 @@ fn file_row(
             // Selecting a file IS opening the right pane: a closed
             // pane springs open on the first click.
             this.select_path(path.clone());
-            // File/Preview mode: start reading the newly selected file
+            // Whole-file surface: start reading the newly selected file
             // (no-op in Diff mode, and cheap when the cache still holds).
             this.ensure_file_content(cx);
             // An open find bar re-anchors to the newly shown file

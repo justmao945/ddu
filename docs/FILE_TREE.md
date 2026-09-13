@@ -2,19 +2,19 @@
 
 > Upgrade plan for M5/§8 of `DESIGN.md`: turn the changed-files diff tree into a
 > **complete file tree** with the diff folded into it, and turn the diff pane into
-> a **view panel** that shows a whole file with its diff merged in, plus a
-> **Markdown preview** mode.
+> a **view panel** that shows a whole file with its diff merged in (Markdown
+> files rendered).
 >
 > **Landed (2026-09-13, `DESIGN.md` §7/§12):** §4.1's **index union** — the
 > sidebar lists the whole working tree (tracked + untracked, `.gitignore`
 > respected), with §5.1's `All n · Changed m` strip, the default-collapse rule
 > and the `● n` changed-descendant badge; §4.2's merged row stream
-> (`src/diff/view.rs`); the pane's **File** and **Preview** modes with the
-> `⌘⇧M` switch (per session, persisted); and the virtualization §7 asked for —
-> the pane renders a mode-independent `RowStream` through `v_virtual_list`, and
-> the tree renders a per-poll `TreeIndex` the same way. Preview is virtualized
-> too, by gpui-base's own per-block list; a Markdown source that cannot be read
-> falls back to rows with the same band File mode shows. **Not landed:** the
+> (`src/diff/view.rs`); the pane's **whole-file** surface with the `⌘⇧M` /
+> far-right icon-button switch (per session, persisted); and the virtualization
+> §7 asked for — the pane renders a mode-independent `RowStream` through
+> `v_virtual_list`, and the tree renders a per-poll `TreeIndex` the same way.
+> A Markdown file renders in File mode through gpui-base's own per-block list;
+> a source that cannot be read falls back to rows with the same band. **Not landed:** the
 > tree filter's shortcut on Linux diverges (`⌃⇧A`; `⌘⇧F` is free on macOS but
 > `⌃⇧F` is the terminal's find), `R`/column tuning of the strip, and §8's
 > deferred items (syntax highlighting, worktrees). Caps came out at
@@ -29,11 +29,11 @@
 * Changed files carry their `+a/−b` figures and tint **inside that same tree**;
   unchanged files are listed, muted, and selectable. One tree, no separate
   "changes" list.
-* Right pane becomes a view panel with three modes for the selected file:
+* Right pane becomes a view panel with two modes for the selected file:
   1. **Diff** — today's hunks-only view (kept verbatim),
   2. **File** — the whole file, with added/removed lines tinted in place and the
-     deletions spliced back in (a unified, context-complete view),
-  3. **Preview** — rendered Markdown (`*.md` / `*.markdown` / `*.mdx`).
+     deletions spliced back in (a unified, context-complete view). A Markdown
+     file (`*.md` / `*.markdown` / `*.mdx`) renders as its document here.
 * Selection, per-session memory, search, horizontal scrolling and the 3 s
   freshness guarantee all keep working exactly as today.
 
@@ -204,20 +204,19 @@ snapshot (render-time cost = visible rows only).
   `document_order`, `' '` rows untinted, `+`/`-` rows tinted 0.12. `Missing` /
   `Binary` / `TooLarge` fall back to Diff mode with the existing notice style
   (`empty()` / `hunk_header` band).
-* **Preview** mode = `TextView::markdown(id, text)`
+* The rendered document = `TextView::markdown(id, text)`, in File mode
   (`gpui-component-0.6.0/src/text/compat.rs:42`) inside the pane's scroll
   container, `.selectable(true).scrollable(true)`, styled through `TextViewStyle`.
   Parsing is `markdown` 1.0 / mdast (a `gpui-component` dependency), so the GFM
   constructs (tables, strikethrough, task lists) come from the parser's defaults;
   `MarkdownExtensions` (`gpui-base-0.6.0/src/text/markdown_ext.rs:177`) is only
   for MDX and custom block nodes and is not needed here. Offered only
-  for `md`/`markdown`/`mdx`; selecting another file while Preview is active
-  silently renders File mode (the mode survives, so coming back to a `.md` file
-  returns to the preview). The find bar is **hidden** in Preview (no match API on
-  a rendered document) — ⌘F in Preview reopens in File mode instead.
-* Keyboard: ⌘⇧M cycles Diff → File → Preview (bound in `key_bindings()`,
-  `src/app/mod.rs`); ⇧⌘F toggles the tree filter. Both get a routing assertion in
-  the existing key-binding test.
+  for `md`/`markdown`/`mdx`. The find bar has no match API over a rendered
+  document, so ⌘F over one switches to Diff, whose rows it can match.
+* Keyboard: ⌘⇧M toggles Diff ⇄ File (bound in `key_bindings()`,
+  `src/app/mod.rs`), and the strip's far-right icon button is the same toggle;
+  ⇧⌘F toggles the tree filter. Both get a routing assertion in the existing
+  key-binding test.
 * Cached-panel discipline is preserved: mode changes mutate `AppView` and
   `cx.notify()` (fan-out through `notify_panels`), so the Markdown parse/screen
   layout runs only when the pane is notified — the stream path still touches the
@@ -240,7 +239,7 @@ New `AppView` fields:
 ```rust
 pub(crate) snapshot: Option<crate::diff::Snapshot>,   // replaces `diff: Option<GitDiff>`
 pub(crate) file_view: Option<(String, u64, crate::diff::view::FileView)>, // path, seq, view
-pub(crate) view_mode: ViewMode,                       // Diff | File | Preview
+pub(crate) view_mode: ViewMode,                       // Diff | File
 pub(crate) tree_filter: TreeFilter,                   // All | Changed
 pub(crate) tree_seeded: bool,                         // default-collapse rule ran for this session
 ```
@@ -280,8 +279,8 @@ is persisted per session as today (`persist()` reads it into the session slot).
 | --- | --- | --- |
 | P1 data | `src/diff/git.rs`, `src/diff/tree.rs` (new), `src/diff/mod.rs` | `snapshot()` = diff + index union + prebuilt `FileTree`; `Snapshot`/`TreeEntry`/`EntryKind`; hermetic tests (§9) |
 | P2 tree UI | `src/ui/diff_tree.rs`, `src/app/mod.rs`, `src/app/diff.rs` | flatten the prebuilt tree; badges; filter strip ⇧⌘F; default-collapse seeding; selection re-pin against the full tree |
-| P3 view | `src/diff/view.rs` (new), `src/ui/diff_panel.rs`, `src/app/diff.rs` | `build_view`, mode toggle + ⌘⇧M, File mode rows, `match_rows` over the merged rows, find bar scoping, `file_view` cache |
-| P4 preview | `src/ui/diff_panel.rs` | `TextView::markdown` path, `Preview` mode + extension gate, empty-state fallbacks |
+| P3 view | `src/diff/view.rs` (new), `src/ui/diff_panel.rs`, `src/app/diff.rs` | `build_view`, the mode switch + ⌘⇧M, whole-file rows, `match_rows` over the merged rows, find bar scoping, `file_view` cache |
+| P4 preview | `src/ui/diff_panel.rs` | `TextView::markdown` path, the Markdown gate on File mode, empty-state fallbacks |
 | P5 cleanup | `AGENTS.md`, `docs/DESIGN.md`, `src/diff/mod.rs` | source map + §7/§8 rewritten; delete what the cutover obsoletes (`build_tree`/`tree_stats` in the UI layer, any Diff-mode-only helper, stale comments about "changed files only") |
 
 ### 8.4 Syntax highlighting (explicitly deferred)
@@ -321,7 +320,7 @@ audit — `DESIGN.md` §13 mandates the check) and turning style ranges into
   (`hyprctl clients -j` for geometry, `grim -g "<x>,<y> <w>x<h>"` for pixels,
   `DDU_STATE_PATH` for what persisted) — `VERIFICATION.md`.
 * Live acceptance: edit a tracked file in a real session → the tree's badge and
-  the pane's rows update within ~3 s; open a `README.md` → Preview renders
+  the pane's rows update within ~3 s; open a `README.md` → File mode renders
   headings, lists, a fenced block and a table.
 
 ## 10. Risks
@@ -343,6 +342,8 @@ audit — `DESIGN.md` §13 mandates the check) and turning style ranges into
 2. Clean directories start collapsed; changed subtrees start open.
 3. File mode is the merged, whole-file view; Diff mode stays byte-identical to
    today so nothing regresses while the new mode beds in.
-4. Preview is Markdown-only and disables the find bar in that mode.
+4. Markdown rendering is not a mode: File mode renders those files, and the
+   find bar leaves File mode for Diff rather than matching a rendered
+   document.
 5. No syntax highlighting, no virtualization, no `notify`-crate file watching in
    v1: the 3 s poll already meets the freshness bar.

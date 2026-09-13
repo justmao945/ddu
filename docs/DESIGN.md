@@ -190,16 +190,15 @@ Agent CLIs (claude/codex/omp) daily need streaming output, ANSI colors, line-wra
 * View: the file list is the sidebar's **file tree** (`ui/diff_tree.rs`) — **every** file in the working tree (tracked + untracked, `.gitignore` respected, submodule gitlinks skipped), changes carrying `+a/−b` and clean files listed muted. Its rows come from a **`TreeIndex`** built once per snapshot (and per filter/collapse toggle) into `AppView::tree_index`, over the `FileTree` the poll builds (`diff/tree.rs`: the index's paths merged with the diff's records, nested with per-directory rollups) — flatten and rollups are O(files) off the render path — and a `v_virtual_list` builds only the visible slice, so a 3 000-file tree renders like a 30-file one.
   * **All / Changed** (`⌘⇧F`, `⌃⇧A` on Linux — `⌃⇧F` is the terminal's find): the strip's two toggles. `Changed` is the changed-only tree of old; `All` is the default now that the listing exists, and a clean repository still shows its tree (`Changed 0`).
   * **Default collapse**: on the first snapshot of a session, every directory with no changed descendant is folded into the collapsed set, so a large repository opens on its changes and their ancestors. Explicit toggles win from then on, and a file changing later only moves badges — never the collapse state, so the tree does not jump under the user.
-  * **Selection is a path** (`AppView::selection`): a clean file is selectable, its diff record is looked up by index when the poll found one, and a path that never appears in the tree clears the pane.
-  * The selection is a **path in the tree**, so an unchanged file is a normal selection: Diff mode bands "No changes in this file — try File or Preview (⌘⇧M).", File mode shows the file untinted with `unchanged` in the header, and the header ellipsizes the *directory* before the file's name.
-* Pane modes: the hunk area (`ui/diff_panel.rs`) shows the selected file in one of three modes, `⌘⇧M` cycles (per session, persisted):
+  * **Selection is a path** (`AppView::selection`), not an index into the diff: a clean file is a normal selection — the record is looked up by index when the poll found one, a path that never appears in the tree clears the pane, Diff mode bands "No changes in this file — ⌘⇧M shows the whole file.", the whole-file surface shows it untinted with `unchanged` in the header, and the header ellipsizes the *directory* before the file's name.
+* Pane modes: the hunk area (`ui/diff_panel.rs`) shows the selected file in one of two modes, toggled by `⌘⇧M` or the header's far-right icon button (per session, persisted):
   * **Diff** — hunks only: two number gutters (measured per file) + a sign column, green `+` / red `-` / untinted context rows, `@@` header bands.
   * **File** — the whole file with the changes merged in (`diff/view.rs`): every workdir line once, deletions spliced above the line that replaced them, hunk headers kept as bands, `+`/`-` rows tinted in place. Built off the UI thread once per `(path, diff generation)`; a stale diff (the file moved under the 3 s poll) degrades to untinted context instead of splicing at the wrong line, and a capped diff tints only its prefix (the cap note then grows the file's budget as in Diff mode). Refuses what it cannot show — binary (NUL in the first 8 KiB), over `MAX_VIEW_BYTES` (8 MiB) / `MAX_VIEW_LINES` (200 000), or gone from disk — and bands the reason above the hunks.
-  * **Preview** — rendered Markdown (`TextView::markdown`, `.md`/`.markdown`/`.mdx` only; the toggle disables itself elsewhere and a non-Markdown selection renders File while the mode survives). The library's own scrollable text view virtualizes the document by Markdown block (it builds a `gpui::list` over the parsed blocks and measures them all so the thumb does not jitter), so a long document paints its visible blocks. The find bar has no match list here: ⌘F switches back to File.
-  * **One read policy for both surfaces** (`diff/view.rs`): the merged view and the Markdown source refuse for the same reasons — binary (NUL in the first 8 KiB), over the byte/line cap, or gone from disk — and a refused Preview renders the rows it falls back to with the same one-line band File mode shows. A refusal is stored with the `(path, generation)` it was read for, so the pane can tell "still reading" from "cannot read" instead of banding the reading note forever.
+  * **Markdown** is not a third mode: File mode *is* the rendered document for `.md`/`.markdown`/`.mdx` (a `TextView::markdown`), which is why the toggle is a plain two-state switch. The library's own scrollable text view virtualizes the document by Markdown block (it builds a `gpui::list` over the parsed blocks and measures them all so the thumb does not jitter), so a long document paints its visible blocks. The find bar has no match list over a rendered document: ⌘F switches to Diff, whose rows it can match.
+  * **One read policy for both surfaces** (`diff/view.rs`): the merged view and the Markdown source refuse for the same reasons — binary (NUL in the first 8 KiB), over the byte/line cap, or gone from disk — and a refused document renders the rows it falls back to with the same one-line band File mode shows. A refusal is stored with the `(path, generation)` it was read for, so the pane can tell "still reading" from "cannot read" instead of banding the reading note forever.
   Both modes are one **`RowStream`** (`diff/mod.rs`): a row's item index *is* its search index, so the find bar, `scroll_to_item` and drag selection are mode-agnostic; the pane's `v_virtual_list` builds only the visible slice of either. Plain lines are `SelectableText` participants ordered by `document_order` (drag selection copies them joined by newlines).
 * Scope: project-level HEAD→workdir diff by default; per-session scope (branch/worktree) comes later — with multiple sessions in one repo they share the project diff. The branch is captured on `GitDiff` but has no display yet.
-* The full working-tree listing and the pane's File/Preview modes are designed in `FILE_TREE.md` (not implemented).
+* The full working-tree listing and the pane's whole-file surface are designed in `FILE_TREE.md`.
 
 ## 8. Left Pane and File Tree
 
@@ -252,8 +251,9 @@ struct AgentCmd { program: String, args: Vec<String> }
   temp file and are renamed over the target.
 * Shortcuts, all `secondary-` (⌘ on macOS, ⌃ elsewhere): ⌘N new session, ⌘O add
   project, ⌘1…⌘9 select the Nth session, ⌘T toggle the diff file tree, ⌘B toggle
-  the sidebar, ⌘R toggle the changes pane, ⌘⇧M cycle the pane's mode (Diff →
-  File → Preview), ⌘⇧F toggle the tree's All/Changed filter (⌃⇧A on Linux),
+  the sidebar, ⌘R toggle the changes pane, ⌘⇧M toggle the pane's surface
+  (hunks ⇄ whole file; a Markdown file renders), ⌘⇧F toggle the tree's
+  All/Changed filter (⌃⇧A on Linux),
   ⌘W close session, ⌘, settings, ⌘Q quit, ⌘+/⌘− terminal font zoom. Copy/paste/find are `secondary-` on macOS and
   `⌃⇧C` / `⌃⇧V` / `⌃⇧F` on Linux, so the terminal keeps `Ctrl+C` for SIGINT. A
   chord the app binds is never forwarded to the shell — on Linux `⌃N/O/T/B/R/W`
@@ -302,7 +302,7 @@ struct AgentCmd { program: String, args: Vec<String> }
 * The 3 s poll is inert when nothing moved: `apply_snapshot` compares the new
   snapshot with the last and returns "nothing changed" — no repaint, no cache
   invalidation, no tree rebuild. (An idle tick used to bump the generation the
-  pane's caches compare against, which blanked File/Preview to a "Reading the
+  pane's caches compare against, which blanked the whole-file surface to a "Reading the
   file…" band and rebuilt the view every 3 s: a visible flash over a diff that
   had not changed.) While a *real* change rebuilds a cache, the previous view
   keeps rendering — the generation check is a lower bound, not equality.
@@ -317,7 +317,7 @@ struct AgentCmd { program: String, args: Vec<String> }
   or re-flattens the tree.
 * Every scrolling surface is a virtual list, one way or another: Diff rows and
   File rows through the pane's `v_virtual_list`, the tree through the same over
-  its index, Preview through gpui-base's per-block `gpui::list`. The sidebar's
+  its index, the rendered document through gpui-base's per-block `gpui::list`. The sidebar's
   project/session tree is the exception and stays a plain `v_flex` — it is
   bounded by how many sessions a person keeps, not by a repo.
 * `render` stays declarative: read state, compose elements; parsing/mutation go in
@@ -331,7 +331,7 @@ struct AgentCmd { program: String, args: Vec<String> }
 * ~~M3 Real diff~~ ✅ shipped: `diff/` queries HEAD→workdir (staged + unstaged + untracked) via git2; 3 s poll; stat counts with directory roll-ups; per-file line cap with a growing budget (§7).
 * ~~M4 Session management~~ ✅ shipped: open / kill / restart / exit status / confirmations / **persistence** — `state.json` restores projects, layout and per-session state, and rows that were still running come back running, agents resumed from their captured id.
 * M5 File tree + worktree + polish — partly shipped:
-  * ✅ the view panel: File mode (whole file, diff merged in, `diff/view.rs`), Preview mode (rendered Markdown) and the `⌘⇧M` mode switch, all on a virtualized row stream;
+  * ✅ the view panel: the whole-file surface (diff merged in, `diff/view.rs`), Markdown rendering and the `⌘⇧M` / icon-button switch, all on a virtualized row stream;
   * ✅ virtualization: the tree renders from a per-poll `TreeIndex` through `v_virtual_list`, so changed-only trees of thousands of rows are cheap;
   * open: the **full working-tree listing** (every file, `.gitignore` respected, `All n · Changed m` filter) and its default-collapse seeding — designed in `FILE_TREE.md`;
   * open: per-session worktrees (one branch + one directory per session) — sessions share the project diff today;

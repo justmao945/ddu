@@ -45,7 +45,7 @@ gpui_kit::actions!(
         DiffSearch,
         DiffSearchNext,
         DiffSearchPrev,
-        CycleViewMode,
+        ToggleViewMode,
         ToggleTreeFilter,
         TermSearch,
         TermSearchNext,
@@ -182,7 +182,7 @@ pub struct AppView {
     pub(crate) diff_search: diff::DiffSearch,
     /// Guards against stale poll results overwriting newer ones.
     diff_seq: u64,
-    /// Which surface the right pane shows (⌘⇧M cycles it); per session,
+    /// Which surface the right pane shows (⌘⇧M toggles it); per session,
     /// persisted like the selection.
     pub(crate) view_mode: ViewMode,
     /// Cached whole-file view for File mode (read off the UI thread),
@@ -190,8 +190,8 @@ pub struct AppView {
     /// renders it while both still match.
     pub(crate) file_view: Option<std::rc::Rc<crate::diff::view::FileView>>,
     pub(crate) file_view_key: Option<(String, u64)>,
-    /// Preview mode's Markdown source — or the reason it could not be
-    /// read — for the `(path, generation)` it was read for. One field for
+    /// The rendered document's Markdown source — or the reason it could
+    /// not be read.    /// read — for the `(path, generation)` it was read for. One field for
     /// both outcomes: a refusal has to be as keyed as a success, or the
     /// pane would band "reading the file" forever on a file it can never
     /// read.
@@ -257,8 +257,12 @@ fn diff_min() -> f32 {
     ui::scaled(200.)
 }
 /// The terminal pane never shrinks below this while dragging a divider.
+/// Keep it honest: at a large text scale this scales up with the fonts, and
+/// whatever it takes, the diff pane cannot be dragged past
+/// `container - center_min`, so a generous value here is what makes the
+/// right divider feel stuck near the default width.
 fn center_min() -> f32 {
-    ui::scaled(400.)
+    ui::scaled(280.)
 }
 /// Window minimum: all three panes at min plus two resize handles.
 pub(crate) fn window_min_width() -> f32 {
@@ -334,7 +338,7 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-w", CloseSession, None),
         // Cycle the right pane's surface: diff hunks → whole file →
         // rendered Markdown (Markdown files only).
-        KeyBinding::new("secondary-shift-m", CycleViewMode, None),
+        KeyBinding::new("secondary-shift-m", ToggleViewMode, None),
         // The file tree's All/Changed filter (the strip's two toggles
         // drive the same action).
         KeyBinding::new(TREE_FILTER_ACCEL, ToggleTreeFilter, None),
@@ -783,50 +787,45 @@ impl AppView {
     /// at — the divider that sometimes refuses to be dragged. Window
     /// bounds change for reasons a drag cannot, which is exactly the
     /// trigger this healing wants.
-    fn heal_splitter_widths(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn heal_splitter_widths(&mut self, cx: &mut Context<Self>) {
         // A drag redistributes within one container: it never changes
         // this, which is what keeps the healing from fighting one.
         let shell_container = self.shell_state.read(cx).container_size();
-        if self.show_sessions && shell_container != self.healed_shell_at {
-            self.healed_shell_at = shell_container;
-            let sidebar_w = self.last_sidebar_w();
-            let panes_min =
-                center_min() + if self.show_diff { diff_min() } else { 0. } + ui::scaled(8.);
-            let fits =
-                sidebar_w + px(panes_min + 12.) <= self.shell_state.read(cx).container_size();
-            if fits
-                && self
-                    .shell_state
-                    .read(cx)
-                    .sizes()
-                    .first()
-                    .is_some_and(|cur| (*cur - sidebar_w).abs() > px(1.))
-            {
-                self.suppress_resize_records += 1;
-                self.shell_state.update(cx, |state, cx| {
-                    state.resize_panel(0, sidebar_w, window, cx);
-                });
-            }
-        }
         let panes_container = self.panes_state.read(cx).container_size();
-        if self.show_diff && panes_container != self.healed_panes_at {
-            self.healed_panes_at = panes_container;
-            let diff_w = self.last_diff_w();
-            let fits = diff_w + px(center_min() + 12.) <= panes_container;
-            if fits
-                && self
-                    .panes_state
-                    .read(cx)
-                    .sizes()
-                    .last()
-                    .is_some_and(|cur| (*cur - diff_w).abs() > px(1.))
-            {
-                self.suppress_resize_records += 1;
-                self.panes_state.update(cx, |state, cx| {
-                    state.resize_panel(1, diff_w, window, cx);
-                });
-            }
+        // Re-measured rather than nudged. gpui-base pins a slot at its
+        // *first* measured bounds, and a slot measured while the group had
+        // another shape — the center alone, before the diff pane existed,
+        // where it measures the whole container — keeps that number for
+        // good. A drag reads the pair as its starting widths and hands the
+        // changed space to the sibling, so a pair that is stale (or that no
+        // longer sums to the container) puts the divider wherever that
+        // arithmetic lands, not at the pointer. Dropping the state re-pins
+        // both slots against a layout with the current shape, and the sized
+        // panel re-asserts its recorded width as its initial size.
+        if shell_container > px(0.)
+            && (shell_container != self.healed_shell_at
+                || self.shell_state.read(cx).sizes().len() != self.shell_len())
+        {
+            self.healed_shell_at = shell_container;
+            self.shell_state.update(cx, |state, _| state.clear());
         }
+        if panes_container > px(0.)
+            && (panes_container != self.healed_panes_at
+                || self.panes_state.read(cx).sizes().len() != self.panes_len())
+        {
+            self.healed_panes_at = panes_container;
+            self.panes_state.update(cx, |state, _| state.clear());
+        }
+    }
+
+    /// How many slots a splitter has this frame — what its state is
+    /// re-measured for when the two disagree.
+    fn shell_len(&self) -> usize {
+        if self.show_sessions { 2 } else { 1 }
+    }
+
+    fn panes_len(&self) -> usize {
+        if self.show_diff { 2 } else { 1 }
     }
 
     /// `None` once the user removed the last project (empty workspace).
@@ -1015,7 +1014,7 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &ToggleSessions, _, cx| this.toggle_sessions(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleDiffTree, _, cx| this.toggle_diff_tree(cx)))
-            .on_action(cx.listener(|this, _: &CycleViewMode, _, cx| this.cycle_view_mode(cx)))
+            .on_action(cx.listener(|this, _: &ToggleViewMode, _, cx| this.toggle_view_mode(cx)))
             .on_action(cx.listener(|this, _: &ToggleTreeFilter, _, cx| {
                 this.toggle_tree_filter(cx)
             }))
@@ -1087,7 +1086,7 @@ impl Render for AppView {
                 // widths, once per container size. A drag cannot trigger
                 // it — a drag leaves the container alone — which is what
                 // keeps a mid-drag frame from yanking the divider back.
-                self.heal_splitter_widths(window, cx);
+                self.heal_splitter_widths(cx);
                 let mut shell = h_resizable("shell").with_state(&self.shell_state);
                 if self.show_sessions {
                     shell = shell.child(
@@ -1122,23 +1121,46 @@ impl Render for AppView {
                         .size_range(px(center_min())..px(f32::MAX))
                         .child(
                             div()
-                                .size_full()
+                                .debug_selector(|| "pane-center".into())
+                                .h_full()
+                                .flex_1()
                                 .min_w_0()
                                 .overflow_hidden()
                                 .child(self.terminal_pane.clone().cached(ui::terminal::root_style())),
                         ),
                 );
                 if self.show_diff {
-                    // No `.flex_none()`: the pane grows/shrinks with
-                    // the window (the sidebar stays pinned by its own
-                    // flex_none), with the drag cap tracking the
-                    // viewport width.
+                    // `.flex_none()`, like the sidebar: this is the sized
+                    // pane, and an unsized flex sibling (the center) gets a
+                    // flex *base* of the whole container — so leaving this
+                    // one growable made the two shrink against each other
+                    // and the divider land wherever that math put it
+                    // instead of at the pointer (and the recorded width
+                    // never matched the laid-out one). Held at its recorded
+                    // width, the center absorbs the window delta.
+                    //
+                    // That width is the recorded one capped to what the
+                    // container can hold beside the terminal's minimum: the
+                    // record keeps the preference, so a wider window restores
+                    // it. This is the panel's *initial* size, which is what
+                    // the layout reads right after the state in
+                    // `heal_splitter_widths` is dropped (a container resize,
+                    // a pane toggle) — the steady state reads the record.
+                    let room =
+                        self.panes_state.read(cx).container_size() - px(center_min() + ui::scaled(8.));
+                    let diff_w = if room > px(0.) {
+                        self.last_diff_w().min(room)
+                    } else {
+                        self.last_diff_w()
+                    };
                     panes = panes.child(
                         resizable_panel()
-                            .size(self.last_diff_w())
+                            .size(diff_w)
+                            .flex_none()
                             .size_range(px(diff_min())..px(diff_max))
                             .child(
                                 div()
+                                    .debug_selector(|| "pane-diff".into())
                                     .size_full()
                                     .min_w_0()
                                     .overflow_hidden()
@@ -1231,7 +1253,7 @@ mod panel_cache_tests {
     use crate::config::{Config, LoadWarnings, ProjectConfig, ShellConfig, State};
     use gpui_kit::{
         AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-        StyleRefinement, Styled as _, TestAppContext, Window, div, gpui,
+        StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, gpui,
     };
     use std::cell::Cell;
     use std::rc::Rc;
@@ -1504,6 +1526,134 @@ mod panel_cache_tests {
         );
     }
 
+    /// The pane divider must land where the pointer is, from the first
+    /// move of the first drag.
+    ///
+    /// Regression, three parts of one bug. The right pane is the *sized*
+    /// panel of its group, so it needs `.flex_none()`: an unsized flex
+    /// sibling (the center) gets a flex base of the whole container, and
+    /// leaving both flexible made them shrink against each other — the pane
+    /// never got the width it asked for. gpui-base then pins each slot at
+    /// its first measured bounds, and a slot measured while the group had
+    /// another shape (the center alone, before the diff pane existed, where
+    /// it measures the whole container) kept that number, so the drag's
+    /// starting pair was stale and the changed space went to the wrong
+    /// sibling. Both are needed for the divider to track the pointer.
+    #[test]
+    fn the_diff_divider_tracks_the_pointer() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 = TestAppContext::build(dispatcher, Some("diff_divider_tracks"));
+                let cx = &mut cx0;
+                cx.update(gpui_kit::init);
+                cx.update(|cx| {
+                    cx.set_app_identity("dev.just.ddu", "Day Day Up");
+                    cx.set_global(Config {
+                        shell: ShellConfig {
+                            program: "/bin/cat".into(),
+                        },
+                        ..Default::default()
+                    });
+                    cx.set_global(LoadWarnings(vec![]));
+                    cx.set_global(State {
+                        projects: Some(vec![ProjectConfig {
+                            name: "proj".into(),
+                            path: std::env::temp_dir(),
+                            expanded: true,
+                            sessions: vec![],
+                        }]),
+                        ..Default::default()
+                    });
+                });
+                let (view, mut vcx) = cx.add_window_view(|window, cx| AppView::new(window, cx));
+                let draw = |vcx: &mut VisualTestContext| {
+                    vcx.update(|window, cx| {
+                        view.update(cx, |_, cx| cx.notify());
+                        let _ = window.draw(cx);
+                    });
+                };
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        v.show_sessions = true;
+                        v.show_diff = true;
+                        cx.notify();
+                    });
+                    let _ = window.draw(cx);
+                });
+                draw(&mut vcx);
+                draw(&mut vcx);
+                // The recorded pair describes the layout on screen: a stale
+                // one (the center measuring the whole container) is what
+                // sends the drag's space to the wrong sibling.
+                let (first, last, container) = vcx.update(|_, cx| {
+                    let state = view.read(cx).panes_state.read(cx);
+                    (
+                        state.sizes()[0],
+                        state.sizes()[1],
+                        state.container_size(),
+                    )
+                });
+                let diff_box = vcx.debug_bounds("pane-diff").expect("the diff pane");
+                assert_eq!(last, diff_box.size.width, "the record is the laid-out width");
+                assert_eq!(
+                    first + last,
+                    container,
+                    "and the pair adds up to the container"
+                );
+                let left = diff_box.origin.x;
+                let y = gpui_kit::px(50.);
+                vcx.simulate_mouse_down(
+                    gpui_kit::point(left - gpui_kit::px(1.), y),
+                    gpui_kit::MouseButton::Left,
+                    gpui_kit::Modifiers::default(),
+                );
+                // The first move only starts the drag (gpui's threshold).
+                vcx.simulate_mouse_move(
+                    gpui_kit::point(left + gpui_kit::px(6.), y),
+                    Some(gpui_kit::MouseButton::Left),
+                    gpui_kit::Modifiers::default(),
+                );
+                for delta in [40., 100., -60.] {
+                    let pointer = left + gpui_kit::px(delta);
+                    vcx.simulate_mouse_move(
+                        gpui_kit::point(pointer, y),
+                        Some(gpui_kit::MouseButton::Left),
+                        gpui_kit::Modifiers::default(),
+                    );
+                    draw(&mut vcx);
+                    let box_ = vcx.debug_bounds("pane-diff").expect("the diff pane");
+                    assert_eq!(
+                        box_.origin.x, pointer,
+                        "the divider is where the pointer is ({delta:+})"
+                    );
+                }
+                // Dragged past its minimum the pane stops at the minimum:
+                // the divider is at the pane's own edge, not off to the
+                // right of the window.
+                let pointer = left + gpui_kit::px(600.);
+                vcx.simulate_mouse_move(
+                    gpui_kit::point(pointer, y),
+                    Some(gpui_kit::MouseButton::Left),
+                    gpui_kit::Modifiers::default(),
+                );
+                draw(&mut vcx);
+                let box_ = vcx.debug_bounds("pane-diff").expect("the diff pane");
+                let min = crate::ui::scaled(200.);
+                assert!(
+                    (box_.size.width.as_f32() - min).abs() <= 1.,
+                    "the pane stops at its minimum width, got {:?}",
+                    box_.size.width
+                );
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
     /// Selecting a row pins the path, and the diff record only when the
     /// poll found one: the tree lists clean files, so a selection without
     /// a diff is normal (the pane shows the file itself).
@@ -1576,7 +1726,7 @@ mod panel_cache_tests {
     /// An idle poll changes nothing: no repaint, no cache invalidation, no
     /// tree rebuild. Regression for the periodic flash — every 3 s tick
     /// used to bump the generation the pane's caches compare against, so
-    /// File/Preview blanked to "Reading the file…" and rebuilt while the
+    /// File mode blanked to "Reading the file…" and rebuilt while the
     /// diff had not moved an inch.
     #[test]
     fn an_idle_poll_moves_nothing() {
@@ -1721,6 +1871,34 @@ mod panel_cache_tests {
                 );
                 let after = vcx.update(|_, cx| view.read(cx).shell_state.read(cx).sizes()[0]);
                 assert_eq!(after, dragged, "and the release leaves it there");
+                // The same drag after a window resize: the recorded pair
+                // has to be re-measured against the new container, or the
+                // stale sibling width makes the splitter's arithmetic cap
+                // the sidebar short of the pointer.
+                vcx.simulate_resize(gpui_kit::size(gpui_kit::px(760.), gpui_kit::px(800.)));
+                vcx.update(|window, cx| {
+                    view.update(cx, |_, cx| cx.notify());
+                    let _ = window.draw(cx);
+                });
+                let boundary = vcx.update(|_, cx| view.read(cx).shell_state.read(cx).sizes()[0]);
+                let dragged = boundary - gpui_kit::px(30.);
+                vcx.simulate_mouse_down(
+                    gpui_kit::point(boundary - gpui_kit::px(1.), gpui_kit::px(50.)),
+                    gpui_kit::MouseButton::Left,
+                    gpui_kit::Modifiers::default(),
+                );
+                vcx.simulate_mouse_move(
+                    gpui_kit::point(boundary - gpui_kit::px(10.), gpui_kit::px(50.)),
+                    Some(gpui_kit::MouseButton::Left),
+                    gpui_kit::Modifiers::default(),
+                );
+                vcx.simulate_mouse_move(
+                    gpui_kit::point(dragged, gpui_kit::px(50.)),
+                    Some(gpui_kit::MouseButton::Left),
+                    gpui_kit::Modifiers::default(),
+                );
+                let after = vcx.update(|_, cx| view.read(cx).shell_state.read(cx).sizes()[0]);
+                assert_eq!(after, dragged, "and it still tracks after a resize");
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();
                     cx.quit();

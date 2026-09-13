@@ -270,7 +270,8 @@ pub struct SavedSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree_height: Option<f32>,
     /// Which surface this row's right pane was showing (`diff` / `file`
-    /// / `preview`); absent in files written before the view panel.
+    /// / `file`; the pre-merge `preview` still parses as `file`); absent
+    /// in files written before the view panel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_mode: Option<String>,
     /// Which files the sidebar's tree lists: `all` (the default) or

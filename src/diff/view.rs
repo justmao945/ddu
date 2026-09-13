@@ -33,7 +33,8 @@ const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 const WIDTH_HINTS: usize = 32;
 
 /// Why a file could not be shown as text. One policy, two surfaces: the
-/// merged File-mode view and Preview's Markdown source refuse for the
+/// merged whole-file view and the rendered document's Markdown source
+/// refuse for the
 /// same reasons and band the same note.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Unreadable {
@@ -56,7 +57,8 @@ impl Unreadable {
     }
 }
 
-/// Preview's built source, with the `(path, diff generation)` it belongs
+/// The rendered document's built source, with the `(path, diff
+/// generation)` it belongs
 /// to (same keying as `file_view_key`/`file_view`).
 pub struct PreviewBuild {
     pub key: (String, u64),
@@ -175,7 +177,8 @@ impl TextFileView {
     }
 }
 
-/// A Markdown file's source for Preview mode (off the UI thread), or why
+/// A Markdown file's source for its rendered document (off the UI
+/// thread), or why
 /// it cannot be shown — the same refusals File mode bands.
 pub fn read_source(root: &Path, path: &str) -> Result<String, Unreadable> {
     read_text(root, path)
@@ -656,7 +659,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Preview reads through the same policy as File mode: it refuses a
+    /// The rendered document reads through the same policy as File mode: it refuses a
     /// file the merged view refuses, for the same reason, so the pane
     /// bands one note whichever mode asked.
     #[test]

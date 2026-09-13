@@ -30,14 +30,41 @@ clipped instead of scrolling.
 
 ## Splitter widths
 
-Panel widths come from two sources that must not fight: the drag (live, several
-updates a second) and the persisted record (which catches up a tick later,
-through the `ResizablePanelEvent` subscription). Anything that re-asserts a
-recorded width therefore has to be keyed to something a drag cannot produce —
-here, **the container size**: the drift it heals (a resize that landed while
-every slot was still pinned) always changes the container, and a drag never
-does. Correcting on every render instead reverts whatever the pointer just did,
-which reads as a divider that refuses to be dragged.
+`shell_state` / `panes_state` (`src/app/mod.rs`) are gpui-base
+`ResizableState`s with three quirks that all have to be handled together.
+
+**The sized panel is `flex_none`.** An unsized flex sibling takes a flex
+*base* of the whole container (the panel element itself is `size_full`), so a
+pane left growable shrinks against that sibling instead of holding the width
+it was given — the laid-out width then disagrees with the record the drag's
+arithmetic reads.
+
+**The record is re-measured, not nudged.** gpui-base pins a slot at its
+*first* measured bounds, and a slot measured while the group had another shape
+— the center alone, before the diff pane existed, where it measures the whole
+container — keeps that number for good. A drag reads the pair as its starting
+widths and hands the changed space to the sibling, so a pair that is stale (or
+no longer sums to the container) puts the divider wherever that arithmetic
+lands, not at the pointer. `heal_splitter_widths` therefore drops each
+splitter's state (`clear`) when its container *or* its slot count changes; the
+next layout re-pins both slots against the current shape, with the sized panel
+re-asserting its recorded width as its initial size.
+
+**The trigger must be something a drag cannot produce.** A drag redistributes
+within one container and never changes the container, which is exactly what
+keeps this correction out of a live drag's way: correcting on every render
+would revert whatever the pointer just did (the divider that refuses to be
+dragged), and correcting against a stale pair caps the divider short of the
+pointer (the one that stops following it). Both are pinned by
+`a_dragged_splitter_is_not_reverted_by_a_render` and
+`the_diff_divider_tracks_the_pointer`, the second driven by real pointer
+events on the handle.
+
+Keep the flex slots unpinned besides (`reset_panel` on the region and the
+center pane): once every slot is pinned, `adjust_to_container_size`
+proportionally *rewrites* every recorded width on each window resize. And when
+the window is too narrow to honor a width, the clamped layout is correct —
+retrying there would emit `Resized` every frame.
 
 Related: a render is not a repaint. `AppView::apply_snapshot` returns whether
 the poll actually moved anything, and the 3 s tick only notifies when it did —
@@ -94,21 +121,6 @@ and its replayed content lands wherever the parent centers that empty box
 (which is how the title bar's breadcrumb ended up against the bar's bottom
 border). Every panel states a size (`size_full` / `h_full`), and each panel
 states `root_style()` once so the mount and the panel's root element agree.
-
-## Splitter widths
-
-`shell_state` / `panes_state` (`src/app/mod.rs`): gpui-base pins every slot at
-its first measured bounds (`update_panel_size`), and once all slots are pinned
-`adjust_to_container_size` proportionally *rewrites* every recorded width on
-each window resize. Render therefore keeps the flex slots unpinned
-(`reset_panel` on the region and the center pane — the adjust then bails) and
-re-asserts the recorded sidebar/diff widths when a resize already drifted them
-(`resize_panel`, flagged via `suppress_resize_records` so the drag-persist
-subscription ignores the synthetic event).
-
-Never let a render-time correction fire unconditionally: when the window is
-too narrow to honor a width, the clamped layout is correct and retrying would
-emit Resized every frame.
 
 ## Repaint scope and pacing
 

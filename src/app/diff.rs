@@ -58,10 +58,10 @@ impl AppView {
     /// Open the find bar (or refocus it when already open); the whole
     /// query is selected so typing replaces it.
     pub(crate) fn open_diff_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // A rendered document has no row list to match against: ⌘F in
-        // Preview reopens in File mode.
-        if self.view_mode == ViewMode::Preview {
-            self.set_view_mode(ViewMode::File, cx);
+        // A rendered document has no row list to match against: ⌘F over
+        // one leaves File mode for the hunks, which are rows.
+        if self.surface() == crate::ui::diff_panel::Surface::Preview {
+            self.set_view_mode(ViewMode::Diff, cx);
         }
         self.diff_search.open = true;
         self.diff_search.input.update(cx, |input, cx| {
@@ -308,14 +308,10 @@ impl AppView {
         cx.notify();
     }
 
-    /// The mode the pane actually renders. Preview is Markdown-only, so
-    /// a non-Markdown selection falls back to File while the mode itself
-    /// survives — returning to a `.md` file returns to the preview.
-    pub(crate) fn effective_view_mode(&self) -> ViewMode {
-        match self.current_diff_path() {
-            Some(path) if self.view_mode.available(path) => self.view_mode,
-            _ => ViewMode::File,
-        }
+    /// What the pane renders right now: the mode, and the Markdown
+    /// question answered by the file itself (`docs/FILE_TREE.md` §4.2).
+    pub(crate) fn surface(&self) -> crate::ui::diff_panel::Surface {
+        crate::ui::diff_panel::surface_of(self.view_mode, self.current_diff_path())
     }
 
     /// Whether a cached build (or in-flight refusal) is still about the
@@ -336,7 +332,7 @@ impl AppView {
             .flatten()
     }
 
-    /// Preview mode's Markdown source for the selected file, same keying
+    /// The rendered document's Markdown source, same keying
     /// as [`Self::cached_file_view`]. `None` while it is still being
     /// read — or forever, when [`Self::preview_refusal`] holds the
     /// reason.
@@ -348,7 +344,7 @@ impl AppView {
         Some(text.as_ref())
     }
 
-    /// Why Preview cannot show the selected file (too large, binary, or
+    /// Why the rendered document cannot show the selected file (too large, binary, or
     /// gone): the pane bands this above the rows it falls back to,
     /// exactly as File mode does.
     pub(crate) fn preview_refusal(&self) -> Option<crate::diff::view::Unreadable> {
@@ -358,15 +354,7 @@ impl AppView {
 
     /// Switch the pane's surface. Per session: persisted with the row.
     pub(crate) fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
-        let Some(path) = self.current_diff_path().map(str::to_owned) else {
-            return;
-        };
-        let mode = if mode.available(&path) {
-            mode
-        } else {
-            ViewMode::File
-        };
-        if self.view_mode == mode {
+        if self.current_diff_path().is_none() || self.view_mode == mode {
             return;
         }
         self.view_mode = mode;
@@ -379,16 +367,14 @@ impl AppView {
         cx.notify();
     }
 
-    /// ⌘⇧M: Diff → File → Preview (Markdown only) → Diff.
-    pub(crate) fn cycle_view_mode(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.current_diff_path().map(str::to_owned) else {
-            return;
-        };
-        let next = self.view_mode.next(&path);
+    /// ⌘⇧M and the header's button: the hunks ⇄ the whole file (which a
+    /// Markdown file renders).
+    pub(crate) fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
+        let next = self.view_mode.next();
         self.set_view_mode(next, cx);
     }
 
-    /// Start the background read behind File/Preview mode when the cache
+    /// Start the background read behind the whole-file surface when the cache
     /// no longer matches the selection. An 8 MiB file is milliseconds of
     /// IO plus a full line split, so it never runs on the UI thread; the
     /// pane shows the previous content (or a "Reading the file…" band)
@@ -408,7 +394,10 @@ impl AppView {
         let key = (path.clone(), generation);
         let want_view =
             self.view_mode == ViewMode::File && self.file_view_key.as_ref() != Some(&key);
-        let want_preview = self.view_mode == ViewMode::Preview
+        // A Markdown file in File mode needs both: the document is what
+        // renders, the rows are what a refused source falls back to.
+        let want_preview = self.view_mode == ViewMode::File
+            && crate::ui::diff_panel::is_markdown(&path)
             && self.preview.as_ref().map(|b| &b.key) != Some(&key);
         if !want_view && !want_preview {
             return;

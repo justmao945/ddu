@@ -139,7 +139,7 @@ pub struct AgentSession {
     /// This session's sidebar splitter height (diff tree layer, px) —
     /// per-session layout, restored when the session is selected.
     pub diff_tree_height: Option<f32>,
-    /// The row's persisted right-pane mode (`diff` / `file` / `preview`),
+    /// The row's persisted right-pane mode (`diff` / `file`),
     /// written on save and adopted on switch.
     pub view_mode: Option<String>,
     /// The row's persisted file-tree filter (`all` / `changed`).

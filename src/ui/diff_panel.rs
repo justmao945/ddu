@@ -16,7 +16,7 @@ use crate::diff::{
     DiffLine, NoteKind, PaneRow, RowStream, EXPAND_MAX_LINES, MAX_LINES_PER_FILE,
 };
 use gpui_kit::base::SelectableText;
-use gpui_kit::component::button::{Button, ButtonVariants as _, Toggle, ToggleVariant, ToggleVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{self, Input};
@@ -124,7 +124,10 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                         .child(name.to_string()),
                 ),
         )
-        .child(mode_toggle(this, path, cx))
+        // The figures, then the view switch last: the button that changes
+        // what the pane shows belongs at the far right, past the file's
+        // numbers.
+        //
         // No line-count chip: at the pane's default width the strip is
         // already at capacity, and a header that ellipsizes the file's
         // name to print its length has its priorities backwards (File
@@ -140,44 +143,46 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                 .into_any_element(),
             Some(f) => plus_minus(f.added, f.removed, cx).into_any_element(),
         })
+        .child(mode_button(this, cx))
 }
 
-/// The mode switch: one `Toggle` per surface (`⌘⇧M` cycles the same
-/// three). Standalone toggles rather than a `ToggleGroup`: the group
-/// takes over its children's clicks and keyboard activation never
-/// reaches its callback, so the keyboard-switchable control has to own
-/// each item's click itself.
-fn mode_toggle(this: &AppView, path: &str, cx: &mut Context<AppView>) -> impl IntoElement {
-    let active = this.effective_view_mode();
-    h_flex()
-        .flex_shrink_0()
-        .gap_1()
-        .children([ViewMode::Diff, ViewMode::File, ViewMode::Preview].map(|mode| {
-            Toggle::new(SharedString::from(format!("view-mode-{}", mode.as_str())))
-                .label(match mode {
-                    ViewMode::Diff => "Diff",
-                    ViewMode::File => "File",
-                    ViewMode::Preview => "Preview",
-                })
-                .checked(active == mode)
-                .with_variant(ToggleVariant::Ghost)
-                .with_size(gpui_kit::component::Size::XSmall)
-                .disabled(!mode.available(path))
-                .tooltip(match mode {
-                    ViewMode::Diff => "Show the diff hunks",
-                    ViewMode::File => "Show the whole file with changes tinted",
-                    ViewMode::Preview => "Render the Markdown",
-                })
-                .on_click(cx.listener(move |this, _: &bool, _, cx| {
-                    this.set_view_mode(mode, cx);
-                }))
-        }))
+/// The view switch: one icon button, at the far right of the strip. It
+/// wears the surface it switches *to* — a document for the whole file, the
+/// two-versions glyph for the hunks — so the pane says what pressing it
+/// gets you, and `⌘⇧M` drives the same toggle. Labeled text buttons were
+/// the wrong trade at this width: "Diff File Preview" cost the file path
+/// its room to print its own name.
+fn mode_button(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    let (icon, label) = match this.view_mode.next() {
+        ViewMode::File => (
+            IconName::FileText,
+            "Show the whole file".to_string(),
+        ),
+        _ => (IconName::Replace, "Show the diff".to_string()),
+    };
+    let hint = format!("{label} ({})", crate::app::accel_hint("M"));
+    // The Button itself takes no debug selector (its interactivity is
+    // applied to an inner element), so the box carries it for tests.
+    div()
+        .debug_selector(|| "view-mode-toggle-box".into())
+        .child(
+            Button::new("view-mode-toggle")
+                .tab_stop(false)
+                .icon(icon)
+                .ghost()
+                .small()
+                .tooltip(hint.clone())
+                .accessibility_label(hint)
+                .on_click(
+                    cx.listener(|this, _: &gpui::ClickEvent, _, cx| this.toggle_view_mode(cx)),
+                ),
+        )
 }
 
-/// Which surface the right pane shows for the selected file. The mode
-/// is per session (persisted) and every mode reads the same
-/// [`RowStream`] contract, so the find bar, `scroll_to_item` and the
-/// drag selection behave identically in all of them.
+/// What the user picks: the file's hunks, or the file itself. The mode
+/// is per session (persisted) and both read the same [`RowStream`]
+/// contract, so the find bar, `scroll_to_item` and the drag selection
+/// behave identically in either.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum ViewMode {
     /// The file's hunks — the original pane, unchanged.
@@ -185,8 +190,6 @@ pub(crate) enum ViewMode {
     Diff,
     /// The whole file with the diff's changes tinted in place.
     File,
-    /// Rendered Markdown (`.md` / `.markdown` / `.mdx` only).
-    Preview,
 }
 
 impl ViewMode {
@@ -194,35 +197,61 @@ impl ViewMode {
         match self {
             Self::Diff => "diff",
             Self::File => "file",
-            Self::Preview => "preview",
         }
     }
 
+    /// `preview` is the pre-merge spelling of `file`: a `.md` file used
+    /// to need a mode of its own, and state written back then still
+    /// restores — as the whole-file mode that renders it.
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "diff" => Some(Self::Diff),
-            "file" => Some(Self::File),
-            "preview" => Some(Self::Preview),
+            "file" | "preview" => Some(Self::File),
             _ => None,
         }
     }
 
-    /// Whether the mode can render this file: Preview is Markdown-only.
-    pub(crate) fn available(self, path: &str) -> bool {
-        self != Self::Preview || is_markdown(path)
-    }
-
-    /// Where `⌘⇧M` goes from here.
-    pub(crate) fn next(self, path: &str) -> Self {
+    /// Where the pane's view button (and `⌘⇧M`) goes from here.
+    pub(crate) fn next(self) -> Self {
         match self {
             Self::Diff => Self::File,
-            Self::File if is_markdown(path) => Self::Preview,
-            Self::File | Self::Preview => Self::Diff,
+            Self::File => Self::Diff,
         }
     }
 }
 
-/// Preview's extension gate.
+/// What the pane actually renders for the current selection. Markdown is
+/// not a mode the user picks: a `.md` file *is* its rendered document in
+/// File mode, and its source is what the toggle would show if it could
+/// get at it (an unreadable one falls back to the rows, banded).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Surface {
+    Diff,
+    File,
+    Preview,
+}
+
+impl Surface {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Diff => "diff",
+            Self::File => "file",
+            Self::Preview => "preview",
+        }
+    }
+}
+
+/// Which of the three the pane renders: the mode, and — for File mode —
+/// whether the file is a rendered document.
+pub(crate) fn surface_of(mode: ViewMode, path: Option<&str>) -> Surface {
+    match mode {
+        ViewMode::Diff => Surface::Diff,
+        ViewMode::File if path.is_some_and(is_markdown) => Surface::Preview,
+        ViewMode::File => Surface::File,
+    }
+}
+
+/// The rendered-document gate.
 pub(crate) fn is_markdown(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     [".md", ".markdown", ".mdx"]
@@ -232,24 +261,24 @@ pub(crate) fn is_markdown(path: &str) -> bool {
 
 const NOTE_READING: &str = "Reading the file…";
 /// Diff mode on a file nobody changed: there are no hunks to show.
-const NOTE_UNCHANGED: &str = "No changes in this file — try File or Preview (⌘⇧M).";
+const NOTE_UNCHANGED: &str = "No changes in this file — ⌘⇧M shows the whole file.";
 
 /// The mode's row stream for the selected file, plus the reason the
 /// requested mode could not be shown (the pane renders the diff's hunks
 /// and bands the reason above them). `None` rows mean the pane has
-/// nothing of its own to render — Preview hands the body to the
-/// Markdown view instead.
+/// nothing of its own to render — the rendered document takes the body
+/// instead.
 pub(crate) fn pane_rows(this: &AppView) -> (Option<RowStream<'_>>, Option<&'static str>) {
     if this.current_diff_path().is_none() {
         return (None, None);
     }
     let file = this.selected_diff_file();
-    match this.effective_view_mode() {
-        // Preview's body is the rendered document, not rows — but a
-        // source that cannot be read renders rows like File mode does,
-        // banding the same reason. `None` rows here mean the Markdown
-        // view takes the body; the pane's `body` asks this first.
-        ViewMode::Preview => match (this.cached_preview(), this.preview_refusal()) {
+    match this.surface() {
+        // The rendered document's body is not rows — but a source that
+        // cannot be read renders rows like File mode does, banding the
+        // same reason. `None` rows here mean the Markdown view takes the
+        // body; the pane's `body` asks this first.
+        Surface::Preview => match (this.cached_preview(), this.preview_refusal()) {
             (Some(_), _) => (None, None),
             (None, refusal) => (
                 this.file_rows(file),
@@ -258,11 +287,11 @@ pub(crate) fn pane_rows(this: &AppView) -> (Option<RowStream<'_>>, Option<&'stat
         },
         // A clean file has no hunks to show: Diff mode says so instead of
         // rendering an empty pane.
-        ViewMode::Diff => match file {
+        Surface::Diff => match file {
             Some(file) => (Some(RowStream::diff(file)), None),
             None => (None, Some(NOTE_UNCHANGED)),
         },
-        ViewMode::File => (
+        Surface::File => (
             this.file_rows(file),
             match this.cached_file_view() {
                 Some(FileView::Text(_)) => None,
@@ -290,9 +319,9 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
         return empty("Select a file in the tree.", cx).into_any_element();
     }
     // The rendered document replaces the rows only when its source is
-    // actually there: a Preview that could not be read falls through to
+    // actually there: a document that could not be read falls through to
     // `pane_rows`, which shows the file's rows and bands the reason.
-    if this.effective_view_mode() == ViewMode::Preview && this.cached_preview().is_some() {
+    if this.surface() == Surface::Preview && this.cached_preview().is_some() {
         return preview_body(this).into_any_element();
     }
     let selected_path = this.current_diff_path().unwrap_or_default().to_owned();
@@ -306,7 +335,7 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
     let content_w = measure_content_width(&stream, gutter_w, window, cx);
     let heights = RowHeights::new(window);
     let sizes = Rc::new(row_sizes(&stream, heights));
-    let mode = this.effective_view_mode();
+    let surface = this.surface();
 
     v_flex()
         .flex_1()
@@ -329,11 +358,11 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
                     // in every mode.
                     v_virtual_list(
                         cx.entity(),
-                        SharedString::from(format!("diff-rows-{}", mode.as_str())),
+                        SharedString::from(format!("diff-rows-{}", surface.as_str())),
                         sizes,
                         move |this, range, window, cx| {
                             render_rows(
-                                this, mode, range, content_w, gutter_w, heights, window, cx,
+                                this, range, content_w, gutter_w, heights, window, cx,
                             )
                         },
                     )
@@ -382,7 +411,7 @@ fn notice_band(text: &str, cx: &Context<AppView>) -> impl IntoElement {
         .child(text.to_string())
 }
 
-/// The Preview mode body: the file's Markdown source, rendered by
+/// The rendered document's body: the file's Markdown source, rendered by
 /// gpui-component's own text view (its parser handles the GFM set —
 /// tables, task lists, strikethrough). Kept to the same size cap as
 /// File mode, so a runaway document cannot stall a frame.
@@ -544,12 +573,12 @@ fn file_text(this: &AppView) -> String {
         .unwrap_or_default()
 }
 
-/// Builds the rows of one visible slice, in the mode's stream order. A
-/// row's item index IS its search index in every mode, so the find bar's
-/// `scroll_to_item` and the highlight set need no mode-specific logic.
+/// Builds the rows of one visible slice. A row's item index IS its
+/// search index, whichever surface produced the stream, so the find
+/// bar's `scroll_to_item` and the highlight set need no mode-specific
+/// logic.
 fn render_rows(
     this: &AppView,
-    mode: ViewMode,
     range: std::ops::Range<usize>,
     content_w: Pixels,
     gutter_w: Pixels,
@@ -592,7 +621,6 @@ fn render_rows(
     // The rendered slice reached the cap note: grow this file's budget
     // and reload (next frame — this closure runs mid-layout, the entity
     // is on the stack).
-    let _ = mode;
     if let Some(note_ix) = stream.note_ix() {
         if range.start <= note_ix && note_ix < range.end && note_expandable(this, &stream) {
             if let Some(path) = this.current_diff_path().map(str::to_owned) {
@@ -1133,6 +1161,118 @@ mod tests {
         );
     }
 
+    /// The mode is what the user picks, the surface is what it renders:
+    /// Markdown is not a third mode, it is what File mode *is* for a `.md`
+    /// file.
+    #[test]
+    fn file_mode_renders_markdown_and_preview_parses_as_file() {
+        use super::{Surface, ViewMode, surface_of};
+        assert_eq!(surface_of(ViewMode::Diff, Some("README.md")), Surface::Diff);
+        assert_eq!(
+            surface_of(ViewMode::File, Some("README.md")),
+            Surface::Preview
+        );
+        assert_eq!(
+            surface_of(ViewMode::File, Some("docs/Notes.MDX")),
+            Surface::Preview
+        );
+        assert_eq!(surface_of(ViewMode::File, Some("src/main.rs")), Surface::File);
+        assert_eq!(surface_of(ViewMode::File, None), Surface::File);
+        // No selection, or a state file written before the merge: both
+        // land on a surface that can render something.
+        assert_eq!(surface_of(ViewMode::Diff, None), Surface::Diff);
+        assert_eq!(ViewMode::parse("preview"), Some(ViewMode::File));
+        assert_eq!(ViewMode::parse("file"), Some(ViewMode::File));
+        assert_eq!(ViewMode::parse("nonsense"), None);
+    }
+
+    /// The mode switch is one toggle, wherever it is driven from: the
+    /// header's far-right icon button and `⌘⇧M` call the same method, and
+    /// a Markdown file renders as its document in File mode.
+    #[test]
+    fn the_view_toggle_switches_surface_on_a_markdown_file() {
+        use crate::app::{AppView, ToggleViewMode};
+        use crate::config::{Config, ShellConfig, State};
+        use crate::diff::{DiffFile, GitDiff};
+        use gpui::Entity;
+
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 = TestAppContext::build(dispatcher, Some("view_toggle"));
+                let cx = &mut cx0;
+                cx.update(gpui_kit::init);
+                cx.update(|cx| {
+                    // A silent shell: the test drives the render tree, and
+                    // a prompt arriving on the PTY thread mid-frame trips
+                    // the test scheduler.
+                    cx.set_global(Config {
+                        shell: ShellConfig {
+                            program: "/bin/cat".into(),
+                        },
+                        ..Default::default()
+                    });
+                    cx.set_global(crate::config::LoadWarnings(vec![]));
+                    cx.set_global(State::default());
+                });
+                let (view, mut vcx): (Entity<AppView>, _) =
+                    cx.add_window_view(|window, cx| AppView::new(window, cx));
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        let files = vec![DiffFile {
+                            path: "README.md".into(),
+                            added: 1,
+                            removed: 0,
+                            ..Default::default()
+                        }];
+                        v.show_diff = true;
+                        v.selection = Some(crate::app::Selection {
+                            path: files[0].path.clone(),
+                            changed: Some(0),
+                        });
+                        v.snapshot = Some(crate::diff::Snapshot {
+                            diff: GitDiff {
+                                branch: None,
+                                files,
+                            },
+                            tree: crate::diff::tree::build(vec!["README.md".to_owned()], &[]),
+                        });
+                        cx.notify();
+                    });
+                    let _ = window.draw(cx);
+                });
+                let mode =
+                    |vcx: &mut gpui::VisualTestContext| vcx.update(|_, cx| view.read(cx).view_mode);
+                let surface =
+                    |vcx: &mut gpui::VisualTestContext| vcx.update(|_, cx| view.read(cx).surface());
+                assert_eq!(mode(&mut vcx), super::ViewMode::Diff);
+                assert_eq!(surface(&mut vcx), super::Surface::Diff);
+                vcx.dispatch_action(ToggleViewMode);
+                assert_eq!(
+                    mode(&mut vcx),
+                    super::ViewMode::File,
+                    "⌘⇧M switches to the whole file"
+                );
+                assert_eq!(
+                    surface(&mut vcx),
+                    super::Surface::Preview,
+                    "and a Markdown file renders there"
+                );
+                vcx.dispatch_action(ToggleViewMode);
+                assert_eq!(
+                    mode(&mut vcx),
+                    super::ViewMode::Diff,
+                    "and back to the hunks"
+                );
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
     /// Preview's decision table, which is what the pane renders by: the
     /// Markdown view when the source is there, the file's own rows with
     /// the reason when it is not, and the reading note while the read is
@@ -1187,7 +1327,8 @@ mod tests {
                             },
                             tree: crate::diff::tree::build(vec!["notes.md".to_owned()], &[]),
                         });
-                        v.view_mode = super::ViewMode::Preview;
+                        // The file is Markdown: File mode renders it.
+                        v.view_mode = super::ViewMode::File;
                         cx.notify();
                     });
                 });
