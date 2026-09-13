@@ -3,72 +3,22 @@
 //! grid↔panel resize handshake.
 
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::theme::{Theme, ThemeMode};
+
 use gpui_kit::*;
 
 use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::term::RenderableContent;
 use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::vte::ansi::{Color as TermColor, CursorShape, NamedColor};
+use alacritty_terminal::vte::ansi::CursorShape;
 
+use super::palette::TerminalPalette;
+use super::scrollbar::scrollbar_geometry;
 use super::{TermMatch, TermSession};
 
 /// Line height as a factor of the mono font size.
 pub(crate) const LINE_HEIGHT_FACTOR: f32 = 1.45;
 /// Grid inset inside the panel, all sides.
 pub(crate) const PAD: f32 = 10.;
-/// Right-edge scrollbar strip width — the mouse hit zone only; the
-/// thumb is drawn centered in the 16px bar zone the Base scrollbars
-/// (diff panes) use, so both look identical side by side.
-pub(crate) const SCROLLBAR_W: f32 = 6.;
-/// Minimum thumb height so short scrollback stays grabbable (Base's
-/// `MIN_THUMB_SIZE`).
-const THUMB_MIN: f32 = 48.;
-/// Thumb width at rest / while hovered or dragged, with the
-/// right-edge insets that keep it centered in the 16px bar zone.
-const THUMB_W: f32 = 6.;
-const THUMB_W_ACTIVE: f32 = 8.;
-const THUMB_EDGE_INSET: f32 = 5.;
-const THUMB_EDGE_INSET_ACTIVE: f32 = 4.;
-
-/// Scrollbar track + thumb rects for the grid area, or None when there
-/// is no scrollback. `engaged` (hover or drag) widens the thumb from
-/// 6px to 8px like the Base scrollbar; `display_offset` 0 pins it to
-/// the bottom (live), `history` to the top.
-pub(crate) fn scrollbar_geometry(
-    area: Bounds<Pixels>,
-    screen_lines: usize,
-    history: usize,
-    display_offset: usize,
-    engaged: bool,
-) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
-    if history == 0 {
-        return None;
-    }
-    let track = Bounds {
-        origin: point(
-            area.origin.x + area.size.width - px(SCROLLBAR_W),
-            area.origin.y,
-        ),
-        size: size(px(SCROLLBAR_W), area.size.height),
-    };
-    let thumb_h = (f32::from(track.size.height) * screen_lines as f32
-        / (screen_lines + history) as f32)
-        .max(THUMB_MIN);
-    let travel = (f32::from(track.size.height) - thumb_h).max(0.);
-    let frac = display_offset.min(history) as f32 / history as f32;
-    let top = track.origin.y + px(travel * (1. - frac));
-    let (w, inset) = if engaged {
-        (THUMB_W_ACTIVE, THUMB_EDGE_INSET_ACTIVE)
-    } else {
-        (THUMB_W, THUMB_EDGE_INSET)
-    };
-    let thumb = Bounds {
-        origin: point(area.origin.x + area.size.width - px(inset + w), top),
-        size: size(px(w), px(thumb_h)),
-    };
-    Some((track, thumb))
-}
 
 pub(crate) struct TerminalElement {
     session: WeakEntity<TermSession>,
@@ -765,196 +715,5 @@ impl StyleKey {
             }),
             strikethrough: None,
         }
-    }
-}
-/// Maps alacritty cell colors onto a fixed terminal palette.
-///
-/// Terminals need stable, saturated ANSI colors — theme-derived tints
-/// wash out agent CLIs' output. Both palettes are Zed's official
-/// "One Dark" / "One Light" terminal ANSI ramps
-/// (zed-industries/zed `assets/themes/one/one.json`).
-struct TerminalPalette {
-    fg: Hsla,
-    bg: Hsla,
-    /// Block cursor fill / unfocused outline.
-    cursor: Hsla,
-    /// Selection wash — opaque, contrasts with `bg` in both modes
-    /// (VSCode dark / macOS light selection blues).
-    selection: Hsla,
-    base: [Hsla; 16],
-}
-
-impl TerminalPalette {
-    fn new(theme: &Theme) -> Self {
-        match theme.mode {
-            ThemeMode::Dark => Self {
-                fg: rgb(0xabb2bf).into(),
-                bg: rgb(0x282c34).into(),
-                cursor: rgb(0x61afef).into(),
-                selection: rgb(0x264f78).into(),
-                base: one_dark_palette(),
-            },
-            ThemeMode::Light => Self {
-                fg: rgb(0x2a2c33).into(),
-                bg: rgb(0xfafafa).into(),
-                cursor: rgb(0x2f5af3).into(),
-                selection: rgb(0xb3d7ff).into(),
-                base: one_light_palette(),
-            },
-        }
-    }
-}
-
-/// Zed "One Dark" terminal ANSI colors: dim row 0-7, bright row 8-15.
-const ONE_DARK: [u32; 16] = [
-    0x282c34, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf, //
-    0x636d83, 0xEA858B, 0xAAD581, 0xFFD885, 0x85C1FF, 0xD398EB, 0x6ED5DE, 0xfafafa,
-];
-
-/// Zed "One Light" terminal ANSI colors: dim row 0-7, bright row 8-15.
-const ONE_LIGHT: [u32; 16] = [
-    0x000000, 0xde3e35, 0x3f953a, 0xd2b67c, 0x2f5af3, 0x950095, 0x0997b3, 0xbbbbbb, //
-    0x555555, 0xde3e35, 0x3f953a, 0xd2b67c, 0x2f5af3, 0xa00095, 0x0bbcd6, 0xffffff,
-];
-
-fn one_dark_palette() -> [Hsla; 16] {
-    ONE_DARK.map(|c| rgb(c).into())
-}
-
-fn one_light_palette() -> [Hsla; 16] {
-    ONE_LIGHT.map(|c| rgb(c).into())
-}
-
-impl TerminalPalette {
-    fn color(&self, c: TermColor) -> Hsla {
-        match c {
-            TermColor::Named(NamedColor::Foreground) => self.fg,
-            TermColor::Named(NamedColor::Background) => self.bg,
-            TermColor::Named(NamedColor::Cursor) => self.fg,
-            TermColor::Named(named) => self.base[dimmed_index(named)],
-            TermColor::Indexed(i) => match i {
-                0..=15 => self.base[i as usize],
-                16..=231 => {
-                    let i = i - 16;
-                    let (r, g, b) = (i / 36, (i % 36) / 6, i % 6);
-                    let v = |x: u8| if x == 0 { 0 } else { 55 + 40 * x };
-                    rgb_u24(v(r), v(g), v(b)).into()
-                }
-                gray => {
-                    let g = 8 + 10 * (gray.saturating_sub(232));
-                    rgb_u24(g, g, g).into()
-                }
-            },
-            TermColor::Spec(rgb) => rgb_u24(rgb.r, rgb.g, rgb.b).into(),
-        }
-    }
-}
-
-fn dimmed_index(named: NamedColor) -> usize {
-    match named {
-        NamedColor::Black => 0,
-        NamedColor::Red => 1,
-        NamedColor::Green => 2,
-        NamedColor::Yellow => 3,
-        NamedColor::Blue => 4,
-        NamedColor::Magenta => 5,
-        NamedColor::Cyan => 6,
-        NamedColor::White => 7,
-        NamedColor::BrightBlack => 8,
-        NamedColor::BrightRed => 9,
-        NamedColor::BrightGreen => 10,
-        NamedColor::BrightYellow => 11,
-        NamedColor::BrightBlue => 12,
-        NamedColor::BrightMagenta => 13,
-        NamedColor::BrightCyan => 14,
-        NamedColor::BrightWhite => 15,
-        NamedColor::DimBlack => 0,
-        NamedColor::DimRed => 1,
-        NamedColor::DimGreen => 2,
-        NamedColor::DimYellow => 3,
-        NamedColor::DimBlue => 4,
-        NamedColor::DimMagenta => 5,
-        NamedColor::DimCyan => 6,
-        NamedColor::DimWhite => 7,
-        _ => 7,
-    }
-}
-
-fn rgb_u24(r: u8, g: u8, b: u8) -> Rgba {
-    rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32)
-}
-
-#[cfg(test)]
-mod palette_tests {
-    use super::{NamedColor, dimmed_index};
-    #[test]
-    fn standard_ansi_colors_do_not_fall_back_to_white() {
-        for (color, expected) in [
-            NamedColor::Black,
-            NamedColor::Red,
-            NamedColor::Green,
-            NamedColor::Yellow,
-            NamedColor::Blue,
-            NamedColor::Magenta,
-            NamedColor::Cyan,
-            NamedColor::White,
-        ]
-        .into_iter()
-        .zip(0..8)
-        {
-            assert_eq!(dimmed_index(color), expected);
-        }
-        assert_eq!(dimmed_index(NamedColor::BrightRed), 9);
-        assert_eq!(dimmed_index(NamedColor::DimRed), 1);
-    }
-}
-
-#[cfg(test)]
-mod scrollbar_tests {
-    use super::{SCROLLBAR_W, scrollbar_geometry};
-    use gpui_kit::{Bounds, point, px, size};
-
-    fn area() -> Bounds<gpui_kit::Pixels> {
-        Bounds {
-            origin: point(px(10.), px(10.)),
-            size: size(px(500.), px(240.)),
-        }
-    }
-
-    #[test]
-    fn no_scrollback_no_scrollbar() {
-        assert!(scrollbar_geometry(area(), 24, 0, 0, false).is_none());
-    }
-
-    #[test]
-    fn thumb_tracks_the_scroll_fraction() {
-        // 24 rows visible, 60 in scrollback: thumb = 240·24/84 ≈ 68.6px
-        // (history small enough to stay above the 48px minimum).
-        let (track, bottom) = scrollbar_geometry(area(), 24, 60, 0, false).unwrap();
-        let (_, top) = scrollbar_geometry(area(), 24, 60, 60, false).unwrap();
-        let thumb_h = f32::from(bottom.size.height);
-        assert!((thumb_h - 240. * 24. / 84.).abs() < 0.5);
-        // Live bottom (offset 0) pins the thumb to the track bottom...
-        assert!((f32::from(bottom.origin.y) - (10. + 240. - thumb_h)).abs() < 0.5);
-        // ...and full history (offset == history) to the track top.
-        assert!((f32::from(top.origin.y) - 10.).abs() < 0.01);
-        // The hit-test strip hugs the area's right edge...
-        assert!((f32::from(track.origin.x) - (10. + 500. - SCROLLBAR_W)).abs() < 0.01);
-        // ...while the resting thumb is centered in the 16px bar zone
-        // (6px wide, 5px off the edge).
-        assert!((f32::from(bottom.origin.x) - (10. + 500. - 5. - 6.)).abs() < 0.01);
-    }
-
-    #[test]
-    fn engaged_thumb_widens_toward_the_edge() {
-        let (_, engaged) = scrollbar_geometry(area(), 24, 100, 0, true).unwrap();
-        assert!((f32::from(engaged.size.width) - 8.).abs() < 0.01);
-        assert!((f32::from(engaged.origin.x) - (10. + 500. - 4. - 8.)).abs() < 0.01);
-    }
-
-    #[test]
-    fn huge_scrollback_keeps_grabbable_thumb() {
-        let (_, thumb) = scrollbar_geometry(area(), 24, 100_000, 50_000, false).unwrap();
-        assert_eq!(f32::from(thumb.size.height), 48.);
     }
 }

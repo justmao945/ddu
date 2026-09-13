@@ -3,18 +3,21 @@
 //! status→color mapping live here.
 
 use gpui::SharedString;
+
+use crate::app::AppView;
 use gpui_kit::component::*;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 pub(crate) mod code_text;
 pub(crate) mod diff_panel;
+pub(crate) mod file_tree;
 pub(crate) mod markdown;
-pub(crate) mod diff_tree;
 pub(crate) mod palette;
 pub(crate) mod session_panel;
 pub(crate) mod settings;
 pub(crate) mod status_bar;
-pub(crate) mod terminal;
+pub(crate) mod terminal_panel;
 pub(crate) mod title_bar;
 
 /// Shell geometry follows the desktop text scale: the text inside these
@@ -304,7 +307,7 @@ pub(crate) fn selection_hover_bg(cx: &App) -> Hsla {
 /// focus — and replays it until the view is notified, so the panels stop
 /// paying for frames they have nothing to do with.
 ///
-/// Contract, both halves enforced by tests in `src/app/mod.rs`:
+/// Contract, both halves enforced by tests in `src/app/panels.rs` `panel_cache_tests`:
 /// * a stream wakeup notifies the terminal pane alone (see
 ///   `AppView::subscribe_term`) — the panels must not re-render;
 /// * any other app-level notify fans out to every panel
@@ -351,3 +354,57 @@ macro_rules! panel_view {
     };
 }
 pub(crate) use panel_view;
+
+/// Right-aligned tabular `+N −N` figures in a fixed track: the counts
+/// align vertically across rows, GitHub-style.
+///
+/// A zero side is left out entirely (`+8` rather than `+8 −0`, nothing at
+/// all for a binary change): a figure of zero is not information, and a
+/// row of `+0 −0` reads as though something happened.
+pub(crate) fn plus_minus(
+    added: usize,
+    removed: usize,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let mono = cx.theme().mono_font_family.clone();
+
+    div()
+        .flex_shrink_0()
+        .flex()
+        .justify_end()
+        .text_sm()
+        .font_family(mono)
+        .when(added > 0, |el| {
+            el.child(
+                div()
+                    .min_w(px(scaled(34.)))
+                    .text_right()
+                    .text_color(cx.theme().green)
+                    .child(format!("+{added}")),
+            )
+        })
+        .when(removed > 0, |el| {
+            el.child(
+                div()
+                    .min_w(px(scaled(34.)))
+                    .text_right()
+                    .text_color(cx.theme().red)
+                    .child(format!("−{removed}")),
+            )
+        })
+}
+/// The same figures as text, for a row's accessibility label (and the
+/// tile's tooltip).
+pub(crate) fn figures(added: usize, removed: usize, sep: char) -> String {
+    let mut out = String::new();
+    if added > 0 {
+        out.push_str(&format!("+{added}"));
+    }
+    if removed > 0 {
+        if !out.is_empty() {
+            out.push(sep);
+        }
+        out.push_str(&format!("−{removed}"));
+    }
+    out
+}

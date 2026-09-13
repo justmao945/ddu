@@ -120,14 +120,14 @@ pub(crate) fn render(
                     resizable_panel()
                         .size(
                             this.diff_tree_height_seed
-                                .unwrap_or(px(super::diff_tree::tree_default_h())),
+                                .unwrap_or(px(super::file_tree::tree_default_h())),
                         )
                         .size_range(
-                            px(super::diff_tree::tree_min_h())..px(super::diff_tree::tree_max_h()),
+                            px(super::file_tree::tree_min_h())..px(super::file_tree::tree_max_h()),
                         )
                         .flex_none()
                         .visible(this.show_diff_tree)
-                        .child(super::diff_tree::render(this, cx).into_any_element()),
+                        .child(super::file_tree::render(this, cx).into_any_element()),
                 ),
         )
         .into_any_element()

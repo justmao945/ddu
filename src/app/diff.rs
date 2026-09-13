@@ -1,311 +1,13 @@
 //! Diff data flow: the periodic working-tree poll, stale-result
-//! guarding and selection re-pinning.
+//! guarding, the selection re-pin, and the file tree's row index.
 
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui_kit::component::input::InputState;
-
 use super::*;
 use crate::diff::git;
 
-/// How many quick-open hits are kept: past this the list is a scroll
-/// rather than an answer, and the user is expected to type one more
-/// character.
-pub(crate) const FILE_SEARCH_MAX: usize = 200;
-
-/// State behind the diff pane's find bar (⌘F). `open` folds the bar's
-/// whole lifecycle: closed → hidden, matches stay empty.
-pub(crate) struct DiffSearch {
-    pub input: Entity<InputState>,
-    pub open: bool,
-    /// Child-row indices into the pane's scroll container (see
-    /// [`crate::diff::match_rows`]); one entry per occurrence, so the
-    /// highlight set dedupes while the counter counts.
-    pub matches: Vec<usize>,
-    /// Index into `matches` the counter shows and the scroll targets.
-    pub current: usize,
-}
-
-impl DiffSearch {
-    pub fn new(window: &mut Window, cx: &mut Context<AppView>) -> Self {
-        let input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx);
-            input.set_placeholder("Find in diff", window, cx);
-            input
-        });
-        Self {
-            input,
-            open: false,
-            matches: Vec::new(),
-            current: 0,
-        }
-    }
-}
-
-
-/// The file tree's quick open (⌘P): the input, the working tree's
-/// searchable paths, and the ranked matches against the input's value.
-/// `open` folds the bar's whole lifecycle, as it does for the find bar:
-/// closed → not rendered, matches empty.
-pub(crate) struct FileSearch {
-    pub input: Entity<InputState>,
-    pub open: bool,
-    /// The hit list's scroll position: a palette is narrow and shows a
-    /// window of the hits, so the cursor is what scrolls it. A virtual
-    /// list's handle, because that is what the hits are — the list is
-    /// capped (`FILE_SEARCH_MAX`), not short.
-    pub scroll: VirtualListScrollHandle,
-    /// Every path the search can reach: the index's tracked files plus
-    /// whatever the poll found untracked — the same universe the tree
-    /// lists, and no walk to get it (the index is already in memory).
-    /// Built when the bar opens.
-    pub paths: Vec<String>,
-    /// Indices into `paths`, best match first.
-    pub matches: Vec<usize>,
-    /// Index into `matches`: what Enter opens, what the counter shows.
-    pub current: usize,
-}
-
-impl FileSearch {
-    pub fn new(window: &mut Window, cx: &mut Context<AppView>) -> Self {
-        let input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx);
-            input.set_placeholder("Find file", window, cx);
-            input
-        });
-        Self {
-            input,
-            open: false,
-            scroll: VirtualListScrollHandle::new(),
-            paths: Vec::new(),
-            matches: Vec::new(),
-            current: 0,
-        }
-    }
-
-    /// The path under the cursor, if the query has an answer.
-    pub fn current_path(&self) -> Option<&str> {
-        self.paths.get(*self.matches.get(self.current)?).map(String::as_str)
-    }
-}
-
 impl AppView {
-    /// Open the quick open (or refocus it when already open). The
-    /// palette floats over the workspace, so the panels stay as they
-    /// are — nothing is revealed, and nothing is hidden. The whole query
-    /// is selected, so typing replaces it.
-    pub(crate) fn open_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // No session, no working tree to search.
-        if self.current_session().is_none() {
-            return;
-        }
-        self.file_search.open = true;
-        self.file_search.scroll.set_offset(point(px(0.), px(0.)));
-        self.refresh_file_paths();
-        self.file_search.input.update(cx, |input, cx| {
-            input.focus(window, cx);
-            input.select_all(window, cx);
-        });
-        self.refresh_file_search(cx);
-    }
-
-    pub(crate) fn close_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.file_search.open = false;
-        self.file_search.matches.clear();
-        self.file_search.current = 0;
-        // Hand focus back to the window fallback: the strip unmounts
-        // with the bar, and a handle left on a removed input would keep
-        // eating keystrokes.
-        self.window_focus.focus(window, cx);
-        cx.notify();
-    }
-
-    /// Rebuild the searchable path list from the session's working tree:
-    /// the index (tracked files) plus the poll's untracked ones. Sorted
-    /// and deduplicated; a non-UTF-8 path is left out rather than
-    /// lossily compared.
-    pub(crate) fn refresh_file_paths(&mut self) {
-        let mut paths: Vec<String> = Vec::new();
-        if let Some(root) = self.current_session_cwd() {
-            if let Some(repo) = self.repo_for(&root) {
-                if let Ok(index) = repo.index() {
-                    paths.extend(
-                        index
-                            .iter()
-                            .filter_map(|entry| String::from_utf8(entry.path.clone()).ok()),
-                    );
-                }
-            }
-        }
-        if let Some(diff) = self.diff() {
-            paths.extend(diff.files.iter().map(|file| file.path.clone()));
-        }
-        paths.sort_unstable();
-        paths.dedup();
-        self.file_search.paths = paths;
-    }
-
-    /// Re-rank the matches against the input's current value. Called on
-    /// keystrokes and when the bar opens; the list re-ranks per
-    /// keystroke, so the cursor goes back to the best match.
-    pub(crate) fn refresh_file_search(&mut self, cx: &mut Context<Self>) {
-        let query = self.file_search.input.read(cx).value().to_string();
-        self.file_search.matches =
-            crate::diff::tree::search(&self.file_search.paths, &query, FILE_SEARCH_MAX);
-        self.file_search.current = 0;
-        // A new ranking is read from its top: keeping the old offset
-        // would open the list part-way down an answer the user has not
-        // seen yet.
-        self.file_search.scroll.set_offset(point(px(0.), px(0.)));
-        cx.notify();
-    }
-
-    /// Step through the hits, wrapping at both ends.
-    pub(crate) fn file_search_step(&mut self, back: bool, cx: &mut Context<Self>) {
-        let len = self.file_search.matches.len();
-        if len == 0 {
-            return;
-        }
-        self.file_search.current = if back {
-            (self.file_search.current + len - 1) % len
-        } else {
-            (self.file_search.current + 1) % len
-        };
-        // The cursor is the way the list scrolls: the palette shows a
-        // window of the hits, and stepping past its edge has to bring
-        // the next row into it.
-        self.file_search
-            .scroll
-            .scroll_to_item(self.file_search.current, ScrollStrategy::Nearest);
-        cx.notify();
-    }
-
-    /// Open the match under the cursor: the tree opens the path's
-    /// ancestors so the file is where the search left it, the pane takes
-    /// the selection, and the bar closes.
-    pub(crate) fn commit_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.file_search.current_path().map(str::to_owned) else {
-            return;
-        };
-        let mut rest = path.as_str();
-        while let Some(cut) = rest.rfind('/') {
-            rest = &rest[..cut];
-            self.diff_tree_open.insert(rest.to_owned());
-        }
-        self.select_path(path);
-        self.rebuild_tree_index();
-        self.ensure_file_content(cx);
-        self.refresh_diff_search(cx);
-        self.close_file_search(window, cx);
-        if !self.show_diff {
-            self.set_diff(true, window, cx);
-        }
-    }
-
-    /// Remember where the file being left was scrolled, and put the
-    /// newly selected one back where it was left. Both are keyed by
-    /// `(working tree, path, mode)`: a file reads the same way in every
-    /// session of a project, and switching files is the thing this
-    /// makes cheap — a re-rendered stream puts a file back at the top
-    /// unless its own position is remembered.
-    fn remember_scroll(&mut self) {
-        // A restore still waiting for its rows means the offset on the
-        // handle belongs to the *previous* file (or to a clamped
-        // fallback): the remembered value is the truth, so leave it.
-        if self
-            .pending_scroll
-            .as_ref()
-            .is_some_and(|(path, mode, _)| {
-                Some(path.as_str()) == self.current_diff_path() && *mode == self.view_mode
-            })
-        {
-            return;
-        }
-        let (Some(root), Some(path)) = (self.current_session_cwd(), self.current_diff_path()) else {
-            return;
-        };
-        let key = (root, path.to_owned(), self.view_mode);
-        let offset = self.diff_hunks_scroll.offset();
-        // The top is the default anyway: keeping it would only grow the
-        // map.
-        if offset == point(px(0.), px(0.)) {
-            self.file_positions.remove(&key);
-        } else {
-            self.file_positions.insert(key, offset);
-        }
-    }
-
-    /// Where `path` was left in the current working tree and mode — the
-    /// top-left corner of its rows, or the top when it was never
-    /// scrolled. One small allocation per file switch buys the map a
-    /// borrowable key; nothing here runs per frame.
-    fn saved_scroll(&self, path: &str) -> Point<Pixels> {
-        let top = point(px(0.), px(0.));
-        let Some(root) = self.current_session_cwd() else {
-            return top;
-        };
-        self.file_positions
-            .get(&(root, path.to_owned(), self.view_mode))
-            .copied()
-            .unwrap_or(top)
-    }
-
-    /// Put the selection's remembered position back — or defer it until
-    /// the rows it belongs to are on screen.
-    ///
-    /// The deferral is the whole point: the rows mount in stages (a
-    /// changed file first shows the poll's hunks as a fallback, then its
-    /// whole-file view lands a moment later), and the virtual list clamps
-    /// an offset to whatever content is *currently* mounted. Applied too
-    /// early, a deep position is clamped against the fallback's few rows
-    /// and the clamp outlives the content that caused it — the file then
-    /// opens nowhere near where it was left.
-    fn restore_scroll(&mut self) {
-        self.pending_scroll = None;
-        let Some(path) = self.current_diff_path().map(str::to_owned) else {
-            return;
-        };
-        let offset = self.saved_scroll(&path);
-        if offset == point(px(0.), px(0.)) {
-            self.diff_hunks_scroll.set_offset(offset);
-        } else if self.stream_is_final() {
-            self.diff_hunks_scroll.set_offset(offset);
-        } else {
-            self.pending_scroll = Some((path, self.view_mode, offset));
-        }
-    }
-
-    /// Whether the pane is showing the rows a remembered position was
-    /// measured against: Diff mode reads its rows straight off the poll,
-    /// File mode needs the file's own view (the hunks it falls back to
-    /// meanwhile are a different row list). A rendered document and an
-    /// image have no rows of their own — the pane's scroll is not theirs.
-    fn stream_is_final(&self) -> bool {
-        match self.surface() {
-            crate::ui::diff_panel::Surface::Diff => self.diff().is_some(),
-            crate::ui::diff_panel::Surface::File => matches!(
-                self.cached_file_view(),
-                Some(crate::diff::view::FileView::Text(_))
-            ),
-            crate::ui::diff_panel::Surface::Preview => true,
-        }
-    }
-
-    /// Apply a deferred restore once its rows are the ones on screen.
-    fn apply_pending_scroll(&mut self) {
-        let Some((path, mode, offset)) = self.pending_scroll.clone() else {
-            return;
-        };
-        if self.current_diff_path() != Some(path.as_str()) || self.view_mode != mode {
-            self.pending_scroll = None;
-            return;
-        }
-        if self.stream_is_final() {
-            self.diff_hunks_scroll.set_offset(offset);
-            self.pending_scroll = None;
-        }
-    }
 
     pub(super) fn reset_diff(&mut self) {
         self.snapshot = None;
@@ -327,79 +29,6 @@ impl AppView {
         self.file_search.current = 0;
         self.diff_tree_scroll.set_offset(point(px(0.), px(0.)));
         self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
-    }
-
-    /// Open the find bar (or refocus it when already open); the whole
-    /// query is selected so typing replaces it.
-    pub(crate) fn open_diff_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // A rendered document has no row list to match against: ⌘F over
-        // one leaves File mode for the hunks, which are rows.
-        if self.surface() == crate::ui::diff_panel::Surface::Preview {
-            self.set_view_mode(ViewMode::Diff, cx);
-        }
-        self.diff_search.open = true;
-        self.diff_search.input.update(cx, |input, cx| {
-            input.focus(window, cx);
-            input.select_all(window, cx);
-        });
-        self.refresh_diff_search(cx);
-        cx.notify();
-    }
-
-    pub(crate) fn close_diff_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.diff_search.open = false;
-        self.diff_search.matches.clear();
-        self.diff_search.current = 0;
-        // Hand focus back to the window fallback so global shortcuts
-        // keep a dispatch path and the terminal cursor goes hollow.
-        self.window_focus.focus(window, cx);
-        cx.notify();
-    }
-
-    /// Step through matches, wrapping at both ends. `back` walks
-    /// Shift-Enter / ⌘⇧G direction.
-    pub(crate) fn diff_search_step(&mut self, back: bool, cx: &mut Context<Self>) {
-        let len = self.diff_search.matches.len();
-        if len == 0 {
-            return;
-        }
-        self.diff_search.current = if back {
-            (self.diff_search.current + len - 1) % len
-        } else {
-            (self.diff_search.current + 1) % len
-        };
-        self.diff_search_jump(cx);
-    }
-
-    /// Recompute matches from the input's current value against the
-    /// selected file. Called on keystrokes, diff refreshes and file
-    /// switches; with `jump`, the first match is scrolled into view
-    /// (query edits), otherwise the current index is kept clamped.
-    pub(crate) fn refresh_diff_search(&mut self, cx: &mut Context<Self>) {
-        self.diff_search.matches.clear();
-        if self.diff_search.open {
-            // The match list is a list of the *rendered* stream's row
-            // indices, so it is rebuilt per mode — markers and notes
-            // included (both streams number their rows the same way).
-            let query = self.diff_search.input.read(cx).value().to_string();
-            if let (Some(stream), _) = crate::ui::diff_panel::pane_rows(self) {
-                self.diff_search.matches = stream.match_indices(&query);
-            }
-        }
-        self.diff_search.current = self
-            .diff_search
-            .current
-            .min(self.diff_search.matches.len().saturating_sub(1));
-        cx.notify();
-    }
-
-    /// Point the scroll container at the current match's row.
-    pub(crate) fn diff_search_jump(&mut self, cx: &mut Context<Self>) {
-        if let Some(&row) = self.diff_search.matches.get(self.diff_search.current) {
-            self.diff_hunks_scroll
-                .scroll_to_item(row, ScrollStrategy::Nearest);
-        }
-        cx.notify();
     }
 
     /// Grow a truncated file's line budget ×4 and reload at once — the
@@ -541,16 +170,16 @@ impl AppView {
             self.tree_index = None;
             return;
         };
-        let changes = crate::diff::tree::Changes::of(&snapshot.diff.files);
+        let changes = crate::diff::listing::Changes::of(&snapshot.diff.files);
         if !self.tree_seeded {
             self.tree_seeded = true;
-            crate::ui::diff_tree::seed_open(&mut self.diff_tree_open, &changes);
+            crate::ui::file_tree::seed_open(&mut self.diff_tree_open, &changes);
         }
         // Field-level borrows: the listing closure reads the repo and the
         // diff while the rows land in `tree_index`.
         let open = &self.diff_tree_open;
-        let index = crate::ui::diff_tree::build_index(open, |dir| {
-            crate::diff::tree::list_dir(&repo, dir, &changes)
+        let index = crate::ui::file_tree::build_index(open, |dir| {
+            crate::diff::listing::list_dir(&repo, dir, &changes)
         });
         self.tree_index = Some(index);
     }
@@ -588,7 +217,7 @@ impl AppView {
         file: Option<&'a crate::diff::DiffFile>,
     ) -> Option<crate::diff::RowStream<'a>> {
         match (self.cached_file_view(), file) {
-            (Some(crate::diff::view::FileView::Text(view)), _) => {
+            (Some(crate::diff::file_view::FileView::Text(view)), _) => {
                 Some(crate::diff::RowStream::view(view))
             }
             (_, Some(file)) => Some(crate::diff::RowStream::diff(file)),
@@ -629,157 +258,6 @@ impl AppView {
             self.view_mode
         };
         crate::ui::diff_panel::surface_of(mode, self.current_diff_path())
-    }
-
-    /// The directory the selected file lives in — what a Markdown
-    /// document's relative image URLs resolve against.
-    pub(crate) fn preview_base(&self) -> std::path::PathBuf {
-        let root = self.diff_root();
-        match self.current_diff_path() {
-            Some(path) => root.join(path).parent().map(|p| p.to_path_buf()).unwrap_or(root),
-            None => root,
-        }
-    }
-
-    /// The working tree the diff's paths are relative to.
-    pub(crate) fn diff_root(&self) -> std::path::PathBuf {
-        self.current_session_cwd().unwrap_or_default()
-    }
-
-    /// Whether a cached build (or in-flight refusal) is still about the
-    /// selected file, and still current.
-    fn preview_is_current(&self, build: &crate::diff::view::PreviewBuild) -> bool {
-        self.current_diff_path() == Some(build.key.0.as_str()) && build.key.1 <= self.diff_gen
-    }
-
-    /// The cached whole-file view for the selected file. A view built for
-    /// an *older* generation still renders: its replacement is being built
-    /// off-thread and blanking the pane in the meantime is the flash the
-    /// poll used to cause.
-    pub(crate) fn cached_file_view(&self) -> Option<&crate::diff::view::FileView> {
-        let path = self.current_diff_path()?;
-        let (cached, generation) = self.file_view_key.as_ref()?;
-        (cached == path && *generation <= self.diff_gen)
-            .then(|| self.file_view.as_deref())
-            .flatten()
-    }
-
-    /// The rendered document's Markdown source, same keying
-    /// as [`Self::cached_file_view`]. `None` while it is still being
-    /// read — or forever, when [`Self::preview_refusal`] holds the
-    /// reason.
-    pub(crate) fn cached_preview(&self) -> Option<&str> {
-        let build = self.preview.as_ref().filter(|b| self.preview_is_current(b))?;
-        let Ok(text) = &build.source else {
-            return None;
-        };
-        Some(text.as_ref())
-    }
-
-    /// Why the rendered document cannot show the selected file (too large, binary, or
-    /// gone): the pane bands this above the rows it falls back to,
-    /// exactly as File mode does.
-    pub(crate) fn preview_refusal(&self) -> Option<crate::diff::view::Unreadable> {
-        let build = self.preview.as_ref().filter(|b| self.preview_is_current(b))?;
-        build.source.as_ref().err().copied()
-    }
-
-    /// Switch the pane's surface. Per session: persisted with the row.
-    pub(crate) fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
-        if self.current_diff_path().is_none() || self.view_mode == mode {
-            return;
-        }
-        // The stream's shape changes with the mode, so each mode keeps
-        // its own position: the hunks' place and the whole file's place
-        // are both worth coming back to.
-        self.remember_scroll();
-        self.view_mode = mode;
-        self.restore_scroll();
-        self.ensure_file_content(cx);
-        self.refresh_diff_search(cx);
-        self.persist(cx);
-        cx.notify();
-    }
-
-    /// ⌘⇧M and the header's button: the hunks ⇄ the whole file (which a
-    /// Markdown file renders).
-    pub(crate) fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
-        let next = self.view_mode.next();
-        self.set_view_mode(next, cx);
-    }
-
-    /// Start the background read behind the whole-file surface when the cache
-    /// no longer matches the selection. An 8 MiB file is milliseconds of
-    /// IO plus a full line split, so it never runs on the UI thread; the
-    /// pane shows the previous content (or a "Reading the file…" band)
-    /// until it lands.
-    pub(crate) fn ensure_file_content(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.current_session_cwd() else {
-            return;
-        };
-        let Some(path) = self.current_diff_path().map(str::to_owned) else {
-            return;
-        };
-        // A clean file has no diff record: the merged view degrades to
-        // its own lines untinted, which is exactly what File mode should
-        // show for a file nobody changed.
-        let file = self.selected_diff_file().cloned();
-        let generation = self.diff_gen;
-        let key = (path.clone(), generation);
-        // Keyed on the *surface*, not the mode: a file nobody changed
-        // renders through File mode whatever the mode says (see
-        // `surface`), and an image needs its view built for the same
-        // reason a text file does.
-        use crate::ui::diff_panel::Surface;
-        let surface = self.surface();
-        let want_view =
-            surface == Surface::File && self.file_view_key.as_ref() != Some(&key);
-        // A rendered document needs both: the document is what shows, the
-        // rows are what a refused source falls back to.
-        let want_preview =
-            surface == Surface::Preview && self.preview.as_ref().map(|b| &b.key) != Some(&key);
-        if !want_view && !want_preview {
-            return;
-        }
-        let this = cx.weak_entity();
-        cx.spawn(async move |_, cx| {
-            // The job gets its own handles: the update below still needs
-            // `path` to tell whether this build is still the right one.
-            let (job_root, job_path) = (root.clone(), path.clone());
-            let built = cx
-                .background_spawn(async move {
-                    let view = want_view.then(|| {
-                        crate::diff::view::FileView::build(&job_root, &job_path, file.as_ref())
-                    });
-                    let source = want_preview
-                        .then(|| crate::diff::view::read_source(&job_root, &job_path));
-                    (view, source)
-                })
-                .await;
-            let (view, source) = built;
-            let _ = this.update(cx, |v, cx| {
-                if v.diff_gen != generation || v.current_diff_path() != Some(path.as_str()) {
-                    return;
-                }
-                if let Some(view) = view {
-                    v.file_view = Some(std::rc::Rc::new(view));
-                    v.file_view_key = Some((path.clone(), generation));
-                }
-                if let Some(source) = source {
-                    v.preview = Some(crate::diff::view::PreviewBuild {
-                        key: (path.clone(), generation),
-                        source: source.map(|text| std::rc::Rc::from(text.as_str())),
-                    });
-                }
-                // The rows this file's remembered position belongs to are
-                // here now: put the pane back where it was left.
-                v.apply_pending_scroll();
-                v.refresh_diff_search(cx);
-                cx.notify();
-            });
-            anyhow::Ok(())
-        })
-        .detach();
     }
 
     /// Kick off one diff reload; results newer than any in-flight one
@@ -1094,7 +572,7 @@ mod tests {
                         );
 
                         // The read lands: the position comes with it.
-                        let app_view = crate::diff::view::FileView::build(
+                        let app_view = crate::diff::file_view::FileView::build(
                             &root,
                             "src/app.rs",
                             changed.iter().find(|f| f.path == "src/app.rs"),

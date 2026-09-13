@@ -18,7 +18,7 @@
 
 use std::rc::Rc;
 
-use super::diff_tree::{figures, plus_minus};
+use super::{figures, plus_minus};
 use super::{diff_file_icon, hover_bg, meta_text, row_px, scaled, selection_bg};
 use gpui_kit::base::input;
 use gpui_kit::component::button::{Button, ButtonVariants as _};

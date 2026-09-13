@@ -228,7 +228,7 @@ impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
             Event::ColorRequest(index, format) => {
-                if let Some(color) = query_color(index, self.dark.load(Ordering::Relaxed)) {
+                if let Some(color) = super::palette::query_rgb(index, self.dark.load(Ordering::Relaxed)) {
                     self.writer.write(format(color).as_bytes());
                 }
             }
@@ -809,22 +809,6 @@ mod zsh_probe {
         let t = feed(bytes);
         assert!(t.contains("just@"), "got {t:?}");
     }
-}
-/// OSC 10/11/12 replies use the same default colors as the painter.
-fn query_color(index: usize, dark: bool) -> Option<alacritty_terminal::vte::ansi::Rgb> {
-    use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
-    let value = if index == NamedColor::Background as usize {
-        if dark { 0x282c34 } else { 0xfafafa }
-    } else if index == NamedColor::Foreground as usize || index == NamedColor::Cursor as usize {
-        if dark { 0xabb2bf } else { 0x2a2c33 }
-    } else {
-        return None;
-    };
-    Some(Rgb {
-        r: (value >> 16) as u8,
-        g: (value >> 8) as u8,
-        b: value as u8,
-    })
 }
 
 #[cfg(test)]

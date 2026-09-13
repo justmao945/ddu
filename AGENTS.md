@@ -25,12 +25,17 @@ editing, and where the long form lives.
 
 - `src/main.rs` — entry, window creation, `AppAssets` (brand SVGs layered over
   the gpui-kit icon set).
-- `src/app/` — `mod.rs` `AppView` (all shared state + actions: sessions, panel
-  toggles, shortcuts, notifications), `sessions.rs` (spawn/kill/restore),
-  `diff.rs` (poll, selection, both search bars — the pane's find and the
-  tree's quick open — and the per-file scroll positions), `persist.rs`
-  (state.json round-trip),
-  `panels.rs`, `workspace.rs` (projects, folder picker).
+- `src/app/` — `mod.rs` `AppView` (the shared state + the actions macro + the
+  app's own accessors), `keys.rs` (the binding table + accel labels), `render.rs`
+  (the Render impl: shell layout, action handlers, splitter healing),
+  `pane.rs` (the right pane's surface/mode, its file-view + preview caches and
+  the per-file scroll memory),
+  `search.rs` (both bars — the pane's find and the tree's quick open),
+  `diff.rs` (poll, snapshot apply, selection re-pin, tree index),
+  `sessions.rs` (spawn/kill/restore/resume), `shutdown.rs` (the confirmed
+  close/⌘Q path), `persist.rs` (state.json round-trip), `panels.rs` (dock
+  toggles + the cached-panel contract tests),
+  `workspace.rs` (projects, folder picker).
 - `src/session.rs` — domain model (`Project`, `AgentSession`, `AgentStatus`),
   launch presets, `spec`/`resume_spec`, `initial_projects()` (= cwd).
 - `src/config.rs` — `settings.json` + `state.json` under
@@ -39,18 +44,27 @@ editing, and where the long form lives.
   a corrupt file is backed up as `<name>.corrupt-<ts>` and defaults are used.
 - `src/diff/` — `git.rs` git2 working-tree diff (5000 lines/file cap, polled
   with a seq guard against stale results); `mod.rs` data model (the pane's
-  `RowStream`, and `marks()` — the overview's change runs); `tree.rs` the lazy
-  listing (case-insensitive name order) and the quick open's path ranking;
-  `view.rs` the whole-file surface: file lines + byte offsets + the parsed
-  `SyntaxHighlighter`, built on the background pass.
-- `src/terminal/` — `mod.rs` portable-pty pump + subscriber-channel wakeups,
-  `grid.rs` alacritty grid, `element.rs` custom paint element, `attention.rs`
+  `RowStream`, and `marks()` — the overview's change runs); `listing.rs` the
+  lazy working-tree listing (case-insensitive name order) and the quick open's
+  path ranking; `file_view.rs` the whole-file surface: file lines + byte
+  offsets + the parsed `SyntaxHighlighter`, built on the background pass;
+  `read.rs` the one read policy both text surfaces obey (binary, size caps,
+  gone-from-disk).
+- `src/terminal/` — `mod.rs` the `TermSession` entity + its events (each concern
+  its own module: `session.rs` PTY lifecycle + IO, `stream.rs` repaint pacing,
+  `search.rs` ⌘F over the grid, `mouse.rs` reporting to the child,
+  `selection.rs`, `scrollbar.rs` geometry + drags, `ime.rs`, and the test-only
+  `harness.rs`), `pty.rs` process + master handles, `grid.rs` alacritty grid +
+  pump threads, `element.rs` custom paint element, `palette.rs` the ANSI ramp +
+  theme defaults, `input.rs` keystroke → escapes, `attention.rs`
   (`BEL`/`OSC 9`/`OSC 777` → desktop notification), `boxart.rs`.
 - `src/ui/code_text.rs` — `SelectableText` with caller-supplied `TextRun`s
   (gpui-base's lays out the runs it built from its own text, so a highlighted
   row cannot ride it); one selection participant per row, same contract.
-- `src/ui/` — panels (`session_panel`, `terminal`, `diff_panel`, `diff_tree`,
-  `status_bar`, `title_bar`), `palette.rs` (the quick open's floating overlay —
+- `src/ui/` — panels (`session_panel`, `terminal_panel` (the center pane),
+  `diff_panel/` (the changes pane: `mod.rs` frame + `rows.rs` + `overview.rs` +
+  `body.rs` + `find_bar.rs`), `file_tree/` (`mod.rs` rows + `index.rs` the tree
+  model), `status_bar`, `title_bar`), `palette.rs` (the quick open's floating overlay —
   scrim + card over the workspace, never inside a panel), `settings/`
   (standalone window), `markdown.rs`
   (the image plugin a rendered document goes through: gpui's own text view sends
@@ -110,7 +124,7 @@ editing, and where the long form lives.
   font. `ui::resolve_mono_family` (called from `apply_mono_typography`, i.e.
   after every `Theme::change`) corrects it, and `ui::is_mono_family` is the one
   monospace heuristic (the settings picker lists with it too).
-- **Highlighting is per row, off the file** (`diff/view.rs` + `ui/code_text.rs`):
+- **Highlighting is per row, off the file** (`diff/file_view.rs` + `ui/code_text.rs`):
   `ViewRow::offset` is the row's byte offset in the file (`None` for a spliced
   deletion, which is never colored), and `RowStream::row_styles` clips a
   whole-file style range down to that row. The parse rides `FileView::build`'s
@@ -128,7 +142,7 @@ editing, and where the long form lives.
 - **The pane's default surface is File** (`ViewMode::default`): the whole file
   with the diff tinted in place, and no `@@` bands there — the merged stream is
   the file in order.
-- **The tree lists the working tree lazily** (`diff/tree.rs`): only the root and
+- **The tree lists the working tree lazily** (`diff/listing.rs`): only the root and
   the directories the user has expanded are read (`list_dir`), merged with the
   poll's diff, so a 40k-file repository draws a few hundred rows. Clean files are
   listed (directories first, in the tree's own text color — the figures mark a

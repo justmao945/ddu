@@ -22,48 +22,13 @@
 //! (`tints_capped`), so the rows are never spliced at the wrong place.
 
 use std::path::Path;
-
 use gpui_kit::base::input::Rope;
 use gpui_kit::component::highlighter::SyntaxHighlighter;
-
+use super::read::{MAX_VIEW_LINES, Unreadable, is_image, read_text};
 use super::{cells, DiffFile, DiffLine};
-
-/// Refuse to build a view for a file larger than this (the pane falls
-/// back to the diff's hunks with a note).
-pub const MAX_VIEW_BYTES: u64 = 8 * 1024 * 1024;
-/// Second guard: row count, which also bounds the pane's size table.
-pub const MAX_VIEW_LINES: usize = 200_000;
-/// A NUL byte within this prefix means binary.
-const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 /// Longest-line candidates remembered for the pane's width measurement
 /// (one `usize` per hint, not a copy of the text).
 const WIDTH_HINTS: usize = 32;
-
-/// Why a file could not be shown as text. One policy, two surfaces: the
-/// merged whole-file view and the rendered document's Markdown source
-/// refuse for the
-/// same reasons and band the same note.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Unreadable {
-    /// NUL byte in the first [`BINARY_SNIFF_BYTES`].
-    Binary,
-    /// Over [`MAX_VIEW_BYTES`], over [`MAX_VIEW_LINES`], or not a file.
-    TooLarge,
-    /// Not on disk (a deleted file: its content lives in the diff).
-    Missing,
-}
-
-impl Unreadable {
-    /// The one-line band the pane puts above the rows it falls back to.
-    pub fn note(self) -> &'static str {
-        match self {
-            Unreadable::Binary => "Binary file — showing the diff.",
-            Unreadable::TooLarge => "Too large to view — showing the diff.",
-            Unreadable::Missing => "No longer on disk — showing the diff.",
-        }
-    }
-}
-
 /// The rendered document's built source, with the `(path, diff
 /// generation)` it belongs
 /// to (same keying as `file_view_key`/`file_view`).
@@ -71,7 +36,6 @@ pub struct PreviewBuild {
     pub key: (String, u64),
     pub source: Result<std::rc::Rc<str>, Unreadable>,
 }
-
 /// The File-mode view of one selected file.
 pub enum FileView {
     Text(TextFileView),
@@ -84,7 +48,6 @@ pub enum FileView {
     /// Not on disk (a deleted file: its content lives in the diff).
     Missing,
 }
-
 impl FileView {
     /// The refusal behind this view, for the pane's note.
     pub fn refusal(&self) -> Option<Unreadable> {
@@ -96,19 +59,6 @@ impl FileView {
         }
     }
 }
-
-/// Whether a path is an image the pane draws instead of reading: the
-/// formats gpui's own image loader decodes (SVG included). Anything else
-/// binary goes through the reading policy like any other file.
-pub fn is_image(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    [
-        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".svg",
-    ]
-    .iter()
-    .any(|ext| lower.ends_with(ext))
-}
-
 /// One row of the whole-file stream: a line of the file, or a line the
 /// diff deleted, spliced above the line that replaced it. The line
 /// reuses [`DiffLine`] — same numbers, same `' ' | '+' | '-'` meaning —
@@ -120,7 +70,6 @@ pub struct ViewRow {
     /// no longer there to highlight.
     pub offset: Option<u32>,
 }
-
 /// A whole file, ready to render.
 pub struct TextFileView {
     pub rows: Vec<ViewRow>,
@@ -137,12 +86,10 @@ pub struct TextFileView {
     /// same background pass as the rows — a render never parses.
     pub highlighter: Option<SyntaxHighlighter>,
 }
-
 /// Files past this size are listed but not parsed: highlighting is a
 /// reading aid, and a multi-megabyte source would hold the background
 /// build (and so the pane) for a parse nobody asked to wait for.
 const MAX_HIGHLIGHT_BYTES: usize = 1 << 20;
-
 impl FileView {
     /// Read `path` (relative to the project root) and merge `diff` into
     /// it. `diff` is the poll's file record — `None` (or one that no
@@ -188,7 +135,6 @@ impl FileView {
         FileView::Text(TextFileView::new(rows, &lines, tints_capped, path, &text))
     }
 }
-
 impl TextFileView {
     fn new(
         rows: Vec<ViewRow>,
@@ -235,7 +181,6 @@ impl TextFileView {
         }
     }
 }
-
 /// The grammar a path's extension names, if the pane can highlight it.
 /// Names are the ones `LanguageRegistry` registers (gpui-component's
 /// `Language::from_name` also accepts them), so this table only decides
@@ -263,37 +208,6 @@ fn language_of(path: &str) -> Option<&'static str> {
         _ => return None,
     })
 }
-
-
-
-/// A Markdown file's source for its rendered document (off the UI
-/// thread), or why
-/// it cannot be shown — the same refusals File mode bands.
-pub fn read_source(root: &Path, path: &str) -> Result<String, Unreadable> {
-    read_text(root, path)
-}
-
-/// Read `path` for display, or say why it cannot be shown. The one place
-/// the size, binary and on-disk policy lives: the merged view and the
-/// Markdown source both come through here, so the two modes can never
-/// disagree about what is viewable.
-pub fn read_text(root: &Path, path: &str) -> Result<String, Unreadable> {
-    let Ok(meta) = std::fs::metadata(root.join(path)) else {
-        return Err(Unreadable::Missing);
-    };
-    if !meta.is_file() || meta.len() > MAX_VIEW_BYTES {
-        return Err(Unreadable::TooLarge);
-    }
-    let Ok(bytes) = std::fs::read(root.join(path)) else {
-        return Err(Unreadable::Missing);
-    };
-    if bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
-        return Err(Unreadable::Binary);
-    }
-    // Lossy: a stray invalid byte must not cost the whole view.
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
 /// File lines for display, and the byte each starts at in the file — the
 /// offset a row hands the highlighter. `\n` splits, a trailing `\r` is
 /// dropped from the *text* (so CRLF files do not render a stray glyph)
@@ -311,7 +225,6 @@ fn split_lines(text: &str) -> (Vec<&str>, Vec<u32>) {
     }
     lines.into_iter().unzip()
 }
-
 /// Every line as untinted context, numbered 1..=n.
 fn context_only(lines: &[&str], starts: &[u32]) -> Vec<ViewRow> {
     lines
@@ -320,7 +233,6 @@ fn context_only(lines: &[&str], starts: &[u32]) -> Vec<ViewRow> {
         .map(|(ix, text)| context(text, ix as u32 + 1, ix as u32 + 1, starts[ix]))
         .collect()
 }
-
 /// Splice the diff's hunks into the file's lines. `None` means the two
 /// disagree — a context line's number or text is not what the diff
 /// claims — which the caller answers with untinted context.
@@ -412,7 +324,6 @@ fn merge(lines: &[&str], starts: &[u32], diff: &DiffFile) -> Option<Vec<ViewRow>
     rows.append(&mut pending);
     Some(rows)
 }
-
 fn context(text: &str, old_no: u32, new_no: u32, offset: u32) -> ViewRow {
     ViewRow {
         line: DiffLine {
@@ -424,10 +335,10 @@ fn context(text: &str, old_no: u32, new_no: u32, offset: u32) -> ViewRow {
         offset: Some(offset),
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::read::{MAX_VIEW_BYTES, read_source};
     use crate::diff::{DiffHunk, DiffLine};
 
     fn line(kind: char, old: Option<u32>, new: Option<u32>, text: &str) -> DiffLine {

@@ -10,7 +10,7 @@ use git2::{DiffDelta, Repository};
 /// One poll: the project's diff against HEAD (staged + unstaged +
 /// untracked), from one `git2` walk of the workdir — no subprocess, and
 /// no working-tree listing (the sidebar lists what it shows; see
-/// [`super::tree`]).
+/// [`super::listing`]).
 pub fn snapshot(
     path: &Path,
     limits: &std::collections::HashMap<String, usize>,
@@ -213,7 +213,7 @@ mod tests {
         // The tree reads the same diff: every changed path is one of the
         // diff's records, and a clean file is in none of them.
         let snap = snapshot(&dir, &Default::default()).unwrap();
-        let changes = crate::diff::tree::Changes::of(&snap.diff.files);
+        let changes = crate::diff::listing::Changes::of(&snap.diff.files);
         assert!(changes.get("hello.txt").is_some());
         assert!(changes.get("new.txt").is_some());
         assert!(changes.get("large.txt").is_some());

@@ -5,9 +5,10 @@
 //! Scope: project-level HEAD→workdir diff (staged + unstaged +
 //! untracked). Per-session worktree scoping comes later.
 
+pub mod file_view;
 pub mod git;
-pub mod tree;
-pub mod view;
+pub mod listing;
+pub mod read;
 
 /// Hard cap on search matches per file; keeps the highlight set and the
 /// counter cheap even for queries like `e` in a maxed-out file.
@@ -88,7 +89,7 @@ pub struct GitDiff {
 /// One poll's view of the project: the diff, and through it everything
 /// the tree needs (`docs/FILE_TREE.md` §4.1). There is no working-tree
 /// listing here: the sidebar lists the directories it is *showing*, on
-/// demand ([`tree::list_dir`]), so a poll never walks a repository.
+/// demand ([`listing::list_dir`]), so a poll never walks a repository.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Snapshot {
     pub diff: GitDiff,
@@ -136,7 +137,7 @@ pub enum NoteKind {
 }
 
 /// Random-access row stream for the right pane: a file's diff hunks
-/// (Diff mode) or the merged whole-file view (File mode, [`view`]).
+/// (Diff mode) or the merged whole-file view (File mode, [`file_view`]).
 ///
 /// Both modes share one contract: a row's index **is** its item index in
 /// the pane's virtual list *and* its index in the find bar's match list —
@@ -153,7 +154,7 @@ pub struct RowStream<'a> {
 
 enum RowSrc<'a> {
     Diff(&'a DiffFile),
-    View(&'a crate::diff::view::TextFileView),
+    View(&'a crate::diff::file_view::TextFileView),
 }
 
 impl<'a> RowStream<'a> {
@@ -182,7 +183,7 @@ impl<'a> RowStream<'a> {
 
     /// A whole-file view: its rows, plus a note when the tints stop
     /// short or the file has no lines at all.
-    pub fn view(v: &'a crate::diff::view::TextFileView) -> Self {
+    pub fn view(v: &'a crate::diff::file_view::TextFileView) -> Self {
         let note = if v.rows.is_empty() {
             Some(NoteKind::EmptyFile)
         } else if v.tints_capped {
@@ -518,8 +519,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f.txt"), "alpha\nbeta\ngamma\n").unwrap();
-        let crate::diff::view::FileView::Text(view) =
-            crate::diff::view::FileView::build(&dir, "f.txt", None)
+        let crate::diff::file_view::FileView::Text(view) =
+            crate::diff::file_view::FileView::build(&dir, "f.txt", None)
         else {
             panic!("text view");
         };

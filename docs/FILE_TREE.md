@@ -8,7 +8,7 @@
 > **Landed (2026-09-13, `DESIGN.md` §7/§12):** §4.1's **index union** — the
 > sidebar lists the whole working tree (tracked + untracked, `.gitignore`
 > respected), with the default-collapse rule
-> (`src/diff/view.rs`); the pane's **whole-file** surface with the `⌘⇧M` /
+> (`src/diff/file_view.rs`); the pane's **whole-file** surface with the `⌘⇧M` /
 > far-right icon-button switch (per session, persisted); and the virtualization
 > §7 asked for — the pane renders a mode-independent `RowStream` through
 > `v_virtual_list`, and the tree renders a per-poll `TreeIndex` the same way.
@@ -69,8 +69,8 @@
 | Model | `src/diff/mod.rs` | `GitDiff { branch, files }`, `DiffFile { path, added, removed, hunks, lines_total, truncated }`, `DiffLine { kind: ' ' \| '+' \| '-', old_no, new_no, text }`, `DiffFile::rows()` (= `Header`/`Line` walk), `match_rows`, `MAX_LINES_PER_FILE = 5000`, `SEARCH_MAX_MATCHES = 500` |
 | Query | `src/diff/git.rs::head_diff` | `Repository::discover` → `diff_tree_to_workdir_with_index(head_tree, opts)` with `include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true)`; per-file line cap |
 | Flow | `src/app/diff.rs` | 3 s poll (`DIFF_POLL_SECS`, `src/app/mod.rs`), `reload_diff` + `diff_seq` stale guard, `apply_diff` re-pins the selection **by path** through `diff_seed_path`, `DiffSearch` (⌘F) match list = child-row indices |
-| Tree UI | `src/ui/diff_tree.rs` | `TreeNode { files, dirs }` built in `render` from `&[DiffFile]`; `tree_stats` rollup; `flatten` → `TreeRow::{File,Dir}`; `guides(depth)` stripes; `dir_row`/`file_row`; collapse set = "present in `diff_tree_closed` means collapsed" (all-open default); `plus_minus`; `tree_{default,min,max}_h()` (scale-aware) |
-| Pane UI | `src/ui/diff_panel.rs` | `panel_view!` → cached child view; `header` (path + `+a/−b`), `body` (scroll container whose **direct children are the rows**, `row_box(el, w, h)`), `diff_line` (one number gutter measured per file by `gutter_width()`, numbering the file as it is now + a sign column (`LINE_CHROME_EXTRAS`), green/red 0.12 tints, yellow search tints 0.30/0.13, `SelectableText` per line), `measure_content_width` (top 16 lines shaped exactly), `hunk_header`, `find_bar` |
+| Tree UI | `src/ui/file_tree/` | `TreeNode { files, dirs }` built in `render` from `&[DiffFile]`; `tree_stats` rollup; `flatten` → `TreeRow::{File,Dir}`; `guides(depth)` stripes; `dir_row`/`file_row`; collapse set = "present in `diff_tree_closed` means collapsed" (all-open default); `plus_minus`; `tree_{default,min,max}_h()` (scale-aware) |
+| Pane UI | `src/ui/diff_panel/` | `panel_view!` → cached child view; `header` (path + `+a/−b`), `body` (scroll container whose **direct children are the rows**, `row_box(el, w, h)`), `diff_line` (one number gutter measured per file by `gutter_width()`, numbering the file as it is now + a sign column (`LINE_CHROME_EXTRAS`), green/red 0.12 tints, yellow search tints 0.30/0.13, `SelectableText` per line), `measure_content_width` (top 16 lines shaped exactly), `hunk_header`, `find_bar` |
 | State | `src/app/mod.rs` | `diff`, `diff_error`, `diff_file: Option<usize>`, `diff_seed_path`, `diff_tree_closed: HashSet<String>`, `diff_tree_scroll`, `diff_hunks_scroll`, `sidebar_split_state`, `show_diff_tree`, `diff_tree_height_seed`, `diff_search`, `diff_pane: Entity<...PanelView>` |
 | Mount | `src/app/mod.rs:1041`, `src/ui/session_panel.rs:118-130` | `diff_pane.cached(diff_panel::root_style())`; the tree layer is the sidebar's lower splitter slot, `.visible(show_diff_tree)` |
 | Persist | `src/config.rs`, `src/app/persist.rs` | per **session**: `selected_file: Option<String>`, `closed_dirs: Vec<String>`, `tree_height: Option<f32>`; `live_tree_height` reads splitter slot 1 |
@@ -80,7 +80,7 @@ Two facts drive the whole design:
 
 * `DiffFile::rows()` order **is** the pane's child order — `match_rows` indices,
   `scroll_to_item`, and the drag-selection `document_order` all ride on it
-  (`src/diff/mod.rs`, `src/ui/diff_panel.rs::file_rows` comment). Any new row
+  (`src/diff/mod.rs`, `src/app/diff.rs::file_rows` comment). Any new row
   stream must keep that identity.
 * The tree is built **inside `render`** today. Fine for a handful of changed
   files, fatal for a 100k-file repository — the build has to move to the
@@ -94,7 +94,7 @@ Two facts drive the whole design:
 > else; the poll does not read the working tree at all. What the tree needs from
 > the diff — "is this path changed", "how many changed files are under this
 > directory" — is answered off the diff's own records, path-sorted
-> (`diff/tree.rs::Changes`), so a directory's children can be listed from the
+> (`diff/listing.rs::Changes`), so a directory's children can be listed from the
 > filesystem on demand (`list_dir`) and merged with the changes as they are
 > read. Measured on a 40k-file repository: the poll drops from 70.7 ms to
 > 57 ms (the tree's share, 17.8 ms, plus the snapshot comparison it forced,
@@ -118,7 +118,7 @@ pub fn snapshot(path: &Path) -> anyhow::Result<Snapshot>;
 background thread), not a `Vec<String>` re-split on every render:
 
 ```rust
-// src/diff/tree.rs (new)
+// src/diff/listing.rs (new)
 pub struct TreeEntry { pub path: String, pub kind: EntryKind, pub added: usize, pub removed: usize }
 pub enum EntryKind { Clean, Added, Modified, Deleted, Renamed, Untracked }
 pub struct TreeNode { pub entries: Vec<(usize, TreeEntry)>, pub dirs: Vec<(String, TreeNode)> }
@@ -143,7 +143,7 @@ Cost: one index read (in-memory) plus the status work the poll already does;
 the tree build is O(n) string splitting on a background thread. Acceptance on a
 100k-file repository: **< 50 ms** for `snapshot`, never on the UI thread.
 
-### 4.2 View rows (`src/diff/view.rs`, new)
+### 4.2 View rows (`src/diff/file_view.rs`, new)
 
 The pane's row stream becomes mode-independent, so search, scrolling and the
 child-index contract survive all three modes:
@@ -193,7 +193,7 @@ cached in `AppView` against `(path, snapshot generation)` — never per poll.
 
 `render` reads a `TreeIndex` the app rebuilds off the render path; the index is
 the root plus the **expanded** directories, each listed on demand
-(`build_index(open, list)`, `list` = `tree::list_dir`). Nothing else is read:
+(`build_index(open, list)`, `list` = `listing::list_dir`). Nothing else is read:
 the layer's cost is the visible tree, not the repository.
 
 * **Default expansion.** The set means "present = expanded" and starts empty.
@@ -291,7 +291,7 @@ New `AppView` fields:
 
 ```rust
 pub(crate) snapshot: Option<crate::diff::Snapshot>,   // replaces `diff: Option<GitDiff>`
-pub(crate) file_view: Option<(String, u64, crate::diff::view::FileView)>, // path, seq, view
+pub(crate) file_view: Option<(String, u64, crate::diff::file_view::FileView)>, // path, seq, view
 pub(crate) view_mode: ViewMode,                       // Diff | File
 pub(crate) diff_tree_open: HashSet<String>,           // expanded dirs (the layer is lazy)
 pub(crate) repo: Option<(PathBuf, Rc<Repository>)>,   // for the tree's listings
@@ -333,10 +333,10 @@ longer holds a list to look it up in.
 
 | Phase | Files | Work |
 | --- | --- | --- |
-| P1 data | `src/diff/git.rs`, `src/diff/tree.rs` (new), `src/diff/mod.rs` | `snapshot()` = diff + index union + prebuilt `FileTree`; `Snapshot`/`TreeEntry`/`EntryKind`; hermetic tests (§9) |
-| P2 tree UI | `src/ui/diff_tree.rs`, `src/app/mod.rs`, `src/app/diff.rs` | flatten the prebuilt tree; badges; filter strip ⇧⌘F; default-collapse seeding; selection re-pin against the full tree |
-| P3 view | `src/diff/view.rs` (new), `src/ui/diff_panel.rs`, `src/app/diff.rs` | `build_view`, the mode switch + ⌘⇧M, whole-file rows, `match_rows` over the merged rows, find bar scoping, `file_view` cache |
-| P4 preview | `src/ui/diff_panel.rs` | `TextView::markdown` path, the Markdown gate on File mode, empty-state fallbacks |
+| P1 data | `src/diff/git.rs`, `src/diff/listing.rs` (new), `src/diff/mod.rs` | `snapshot()` = diff + index union + prebuilt `FileTree`; `Snapshot`/`TreeEntry`/`EntryKind`; hermetic tests (§9) |
+| P2 tree UI | `src/ui/file_tree/`, `src/app/mod.rs`, `src/app/diff.rs` | flatten the prebuilt tree; badges; filter strip ⇧⌘F; default-collapse seeding; selection re-pin against the full tree |
+| P3 view | `src/diff/file_view.rs` (new), `src/ui/diff_panel/`, `src/app/diff.rs` | `build_view`, the mode switch + ⌘⇧M, whole-file rows, `match_rows` over the merged rows, find bar scoping, `file_view` cache |
+| P4 preview | `src/ui/diff_panel/` | `TextView::markdown` path, the Markdown gate on File mode, empty-state fallbacks |
 | P5 cleanup | `AGENTS.md`, `docs/DESIGN.md`, `src/diff/mod.rs` | source map + §7/§8 rewritten; delete what the cutover obsoletes (`build_tree`/`tree_stats` in the UI layer, any Diff-mode-only helper, stale comments about "changed files only") |
 
 ### 8.4 Syntax highlighting — landed for the whole-file surface
@@ -346,7 +346,7 @@ file's rope + language to style ranges (`.update(None, &rope, None)` then
 `.styles(&row_range, theme)`), and `TextFileView` holds the parse next to the
 rows, so a render never parses. What the sketch did not foresee:
 
-* The extension decides the grammar (`language_of` in `src/diff/view.rs`), and
+* The extension decides the grammar (`language_of` in `src/diff/file_view.rs`), and
   the parse rides the **same background pass** as the rows: `FileView::build`
   already reads the file off the UI thread, so a 1 MiB parse costs the pane
   nothing. Past `MAX_HIGHLIGHT_BYTES` the file is listed uncolored rather than
@@ -408,7 +408,7 @@ rows, so a render never parses. What the sketch did not foresee:
 
 ## 11. Decisions taken (open to challenge)
 
-1. **Cutover, not coexistence**: the tree replaces `diff_tree`; there is no
+1. **Cutover, not coexistence**: the tree replaces `file_tree`; there is no
    second "changed only" pane — the default expansion covers that use, and the
    `All / Changed` filter was dropped rather than kept beside a lazy listing
    that cannot count what it has not read.

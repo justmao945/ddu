@@ -77,7 +77,7 @@ Both long lists (the terminal's diff pane rows and the sidebar's file tree) are
 `v_virtual_list`s: the item sizes are declared up front and only the visible
 slice is built per frame — a 3 000-row tree builds ~8 rows, measured. The tree's
 list is short by construction — it holds the directories the user opened, listed
-on demand (`diff_tree::build_index` over `diff::tree::list_dir`), not every file
+on demand (`file_tree::build_index` over `diff::listing::list_dir`), not every file
 in the repository — so its per-frame size table stays small too. Two
 consequences:
 
@@ -89,7 +89,7 @@ consequences:
   `AppView::tree_index` (one `build_index` per diff and per expansion toggle —
   each one listing only the open directories), the whole-file view from the
   File-mode cache (one background `FileView::build` per `(path, diff
-  generation)`). Render only ever reads them: `diff_tree::render` does no IO, and
+  generation)`). Render only ever reads them: `file_tree::render` does no IO, and
   neither does `list_dir` — that runs from `rebuild_tree_index`, off the render
   path.
 
@@ -161,7 +161,8 @@ until that view is notified. The title bar's breadcrumb is one too
 (`ui/title_bar.rs`): it mirrors the session title, which agent CLIs spin, and
 it must not drag the panels into that repaint.
 
-Three halves to keep in sync, all pinned by tests in `src/app/mod.rs`:
+Three halves to keep in sync, all pinned by tests in `src/app/panels.rs`
+(`panel_cache_tests`):
 
 * a stream wakeup notifies `terminal_pane` alone (`subscribe_term`), which is
   what keeps the panels cached on stream frames — measured with the changes
@@ -214,7 +215,7 @@ cached row missing the title notify, above).
 ## Keyboard
 
 Every app shortcut is a `secondary-` chord — `⌘` on macOS, `⌃` on Linux
-(`src/app/mod.rs::key_bindings`; the full list is `DESIGN.md` §10). Global
+(`src/app/keys.rs::key_bindings`; the full list is `DESIGN.md` §10). Global
 shortcuts live in `AppView::new`; terminal-scoped `⌘C`/`⌘V` (`TermCopy` /
 `TermPaste`) double as the right-click menu's shortcut hints via
 `PopupMenuItem::action` — any new terminal action shown in a menu must wire its

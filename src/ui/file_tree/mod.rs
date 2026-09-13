@@ -4,25 +4,26 @@
 //! selectable (`docs/FILE_TREE.md` §4.1/§5.1).
 //!
 //! Lazy, and merged: the rows are the directories the user has opened,
-//! listed on demand ([`crate::diff::tree::list_dir`]) with the diff's
+//! listed on demand ([`crate::diff::listing::list_dir`]) with the diff's
 //! changes folded straight into them — one tree, no separate "changes"
 //! list and no eager walk of the repository. It opens on its changes
 //! (`seed_open`: the ancestors of every changed file), so a 20k-file
 //! repository starts where the agent left off.
+//!
+//! The layer itself (rows, badges, guides) is here; the row model those rows
+//! are built from is [`index`].
 
-use std::collections::HashSet;
+mod index;
 use std::rc::Rc;
-
-use super::{diff_file_icon, hover_bg, meta_text, row_px, scaled, selection_bg};
+use super::{diff_file_icon, figures, hover_bg, meta_text, plus_minus, row_px, scaled, selection_bg};
 use gpui_kit::component::menu::{PopupMenuItem, *};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-
 use crate::app::AppView;
-use crate::diff::tree::{Child, Changes};
 
+pub(crate) use self::index::{TreeIndex, TreeRow, build_index, seed_open};
 /// Layer height bounds and default for the sidebar's vertical splitter
 /// (base sizes at factor 1.0 — see `scaled`).
 pub(crate) fn tree_default_h() -> f32 {
@@ -34,13 +35,11 @@ pub(crate) fn tree_min_h() -> f32 {
 pub(crate) fn tree_max_h() -> f32 {
     scaled(480.)
 }
-
 /// Indent added per nesting level, base at factor 1.0 (the guide
 /// wrapper's left margin).
 fn level_indent() -> f32 {
     scaled(14.)
 }
-
 /// The sidebar's lower layer: the working tree's files and changes.
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     // The tree answers "this session's changes": with no active
@@ -96,7 +95,6 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         )
         .into_any_element()
 }
-
 /// Short note shown when there is nothing to list. The text wraps
 /// and stays inside the layer however narrow the sidebar gets.
 fn empty_layer(text: &str, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -109,107 +107,6 @@ fn empty_layer(text: &str, cx: &mut Context<AppView>) -> impl IntoElement {
         .p_2()
         .child(meta_text(text.to_string(), cx).w_full().text_center())
 }
-
-/// The tree's rows, ready for the virtual list: the expanded
-/// directories' listings (the diff folded in) plus the whole-tree `+/−`
-/// totals. Rebuilt when the diff, the expansion or the listing changes —
-/// never per frame.
-pub(crate) struct TreeIndex {
-    pub(crate) rows: Vec<TreeRow>,
-}
-
-/// One rendered row of the flattened tree. `depth` drives the inner
-/// indent only — rows themselves stay full-width so hover/selection
-/// bands run edge-to-edge (window border to divider).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TreeRow {
-    File {
-        path: String,
-        depth: usize,
-        added: usize,
-        removed: usize,
-        changed: bool,
-    },
-    Dir {
-        path: String,
-        depth: usize,
-        open: bool,
-        /// Changed files anywhere under this directory.
-        changed: usize,
-    },
-}
-
-/// Flatten the **open** directories into the rows the virtual list
-/// renders, listing each one through `list` — the root always, and every
-/// other directory the user has expanded. Nothing else is read: this is
-/// the whole reason a 40k-file repository draws in a few hundred rows.
-pub(crate) fn build_index(
-    open: &HashSet<String>,
-    mut list: impl FnMut(&str) -> Vec<Child>,
-) -> TreeIndex {
-    let mut rows = Vec::new();
-    walk("", 0, open, &mut list, &mut rows);
-    TreeIndex { rows }
-}
-
-/// Depth-first flatten of one directory: subdirs before files, name order
-/// from the listing, collapsed subtrees never listed.
-fn walk(
-    dir: &str,
-    depth: usize,
-    open: &HashSet<String>,
-    list: &mut impl FnMut(&str) -> Vec<Child>,
-    out: &mut Vec<TreeRow>,
-) {
-    for child in list(dir) {
-        let path = if dir.is_empty() {
-            child.name().to_owned()
-        } else {
-            format!("{dir}/{}", child.name())
-        };
-        match child {
-            Child::File {
-                added,
-                removed,
-                changed,
-                ..
-            } => out.push(TreeRow::File {
-                path,
-                depth,
-                added,
-                removed,
-                changed,
-            }),
-            Child::Dir { changed, .. } => {
-                let is_open = open.contains(&path);
-                out.push(TreeRow::Dir {
-                    path: path.clone(),
-                    depth,
-                    open: is_open,
-                    changed,
-                });
-                if is_open {
-                    walk(&path, depth + 1, open, list, out);
-                }
-            }
-        }
-    }
-}
-
-/// Open every directory on the way to a changed file — the default
-/// expansion, once per session (`FILE_TREE.md` §5.1): the layer opens on
-/// the changes and their ancestors, and the user's own toggles decide
-/// from there.
-pub(crate) fn seed_open(open: &mut HashSet<String>, changes: &Changes<'_>) {
-    for path in changes.paths() {
-        let mut rest = path;
-        while let Some(cut) = rest.rfind('/') {
-            rest = &rest[..cut];
-            open.insert(rest.to_owned());
-        }
-    }
-}
-
 /// The layer's rows for one visible slice, straight off the cached index.
 fn tree_rows(
     this: &AppView,
@@ -249,7 +146,6 @@ fn tree_rows(
         })
         .collect()
 }
-
 /// A directory row: the name, and a `● n` badge when the diff found
 /// changes anywhere under it (a rolled-up `+/−` across a whole subtree
 /// says very little — the count does). A clean directory carries no
@@ -330,7 +226,6 @@ fn dir_row(
             )
         })
 }
-
 /// A file row: the name in the tree's own text color, carrying `+a/−b`
 /// when the diff found the file and bare when it did not — whether a file
 /// changed is what the figures say, not what the name's weight says.
@@ -429,7 +324,6 @@ fn file_row(
             )
         })
 }
-
 /// Indent guide stripes: one vertical line per ancestor level, right
 /// where the nested guide borders used to sit. Per-row segments join
 /// into continuous lines across a subtree's rows (no vertical gap
@@ -447,70 +341,15 @@ fn guides(depth: usize, color: Hsla) -> Vec<Div> {
         })
         .collect()
 }
-
-/// Right-aligned tabular `+N −N` figures in a fixed track: the counts
-/// align vertically across rows, GitHub-style.
-///
-/// A zero side is left out entirely (`+8` rather than `+8 −0`, nothing at
-/// all for a binary change): a figure of zero is not information, and a
-/// row of `+0 −0` reads as though something happened.
-pub(crate) fn plus_minus(
-    added: usize,
-    removed: usize,
-    cx: &mut Context<AppView>,
-) -> impl IntoElement {
-    let mono = cx.theme().mono_font_family.clone();
-
-    div()
-        .flex_shrink_0()
-        .flex()
-        .justify_end()
-        .text_sm()
-        .font_family(mono)
-        .when(added > 0, |el| {
-            el.child(
-                div()
-                    .min_w(px(scaled(34.)))
-                    .text_right()
-                    .text_color(cx.theme().green)
-                    .child(format!("+{added}")),
-            )
-        })
-        .when(removed > 0, |el| {
-            el.child(
-                div()
-                    .min_w(px(scaled(34.)))
-                    .text_right()
-                    .text_color(cx.theme().red)
-                    .child(format!("−{removed}")),
-            )
-        })
-}
-
-/// The same figures as text, for a row's accessibility label (and the
-/// tile's tooltip).
-pub(crate) fn figures(added: usize, removed: usize, sep: char) -> String {
-    let mut out = String::new();
-    if added > 0 {
-        out.push_str(&format!("+{added}"));
-    }
-    if removed > 0 {
-        if !out.is_empty() {
-            out.push(sep);
-        }
-        out.push_str(&format!("−{removed}"));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{build_index, seed_open, TreeIndex, TreeRow};
-    use crate::diff::tree::{Changes, Child};
-    use crate::diff::DiffFile;
-    use std::collections::HashMap;
     use std::collections::HashSet;
 
+    use super::{build_index, seed_open, TreeIndex, TreeRow};
+    use crate::diff::listing::{Changes, Child};
+    use crate::diff::DiffFile;
+    use std::collections::HashMap;
+    
     fn changed(path: &str, added: usize, removed: usize) -> DiffFile {
         DiffFile {
             path: path.to_owned(),
@@ -818,7 +657,7 @@ mod tests {
         gpui::run_test_once(
             0,
             Box::new(move |dispatcher| {
-                let mut cx0 = TestAppContext::build(dispatcher, Some("diff_tree_virtual"));
+                let mut cx0 = TestAppContext::build(dispatcher, Some("file_tree_virtual"));
                 let cx = &mut cx0;
                 cx.update(gpui_kit::init);
                 cx.update(|cx| {
