@@ -207,7 +207,7 @@ pub(crate) fn open(cx: &mut App) {
         is_minimizable: true,
         display_id: None,
         window_background: WindowBackgroundAppearance::Opaque,
-        app_id: None,
+        app_id: crate::config::window_app_id(),
         window_min_size: Some(size(px(640.), px(440.))),
         window_decorations: None,
         icon: None,

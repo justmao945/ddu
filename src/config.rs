@@ -145,6 +145,18 @@ pub const PLATFORM_MONO_FAMILY: &str = if cfg!(target_os = "macos") {
 /// Terminal scrollback cap (lines) the terminal falls back to when unset.
 pub const TERMINAL_SCROLLBACK_DEFAULT: usize = 3000;
 
+/// Window identity to open every window with — the Wayland `app_id` /
+/// X11 `WM_CLASS` a compositor, taskbar and window rule match on.
+/// It has to equal the desktop entry's basename (`ddu.desktop`,
+/// installed by `scripts/linux.sh`) or a menu launch shows up as an
+/// anonymous window: no icon, its own taskbar group, and no
+/// `class:ddu` rule. Without it gpui leaves the identity unset.
+/// `None` on macOS, where LaunchServices keys all of that off the
+/// bundle instead and the option would be inert.
+pub fn window_app_id() -> Option<String> {
+    cfg!(target_os = "linux").then(|| "ddu".to_string())
+}
+
 /// Sane band for the desktop's text scale: outside it the stored value
 /// is a broken dconf entry rather than a preference.
 const TEXT_SCALE_MIN: f32 = 0.5;

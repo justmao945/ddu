@@ -65,6 +65,14 @@ License: Apache-2.0, GPL-free throughout (`contrib/usage/` is MIT — see
   into the hicolor theme and writes `~/.local/share/applications/ddu.desktop`
   with `Path=` set to the launch directory (a desktop launch would otherwise
   start in `$HOME`).
+- Window identity: every `WindowOptions` opens with `config::window_app_id()` —
+  on Linux the Wayland `app_id` / X11 `WM_CLASS` `ddu`, which must equal the
+  desktop entry's basename (`ddu.desktop`) for the menu launch to find its
+  window: icon, taskbar grouping and `class:ddu` window rules all key off it.
+  gpui leaves the identity unset on its own, so the window otherwise arrives as
+  an anonymous client (empty `hyprctl clients` class). `None` on macOS, where
+  the bundle carries the identity instead. Verify a launch with
+  `hyprctl clients -j | jq '.[] | select(.pid==<ddu pid>) | .class'`.
 - No bundle, no LaunchServices, no signing — a plain binary whose window the
   compositor maps normally. There is nothing here to keep in sync with the
   macOS bundle flow, so the two never collide (the scripts write different

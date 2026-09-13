@@ -237,6 +237,7 @@ fn open_main_window(cx: &mut gpui_kit::App) {
             px(app::window_min_width()),
             px(app::window_min_height()),
         )),
+        app_id: config::window_app_id(),
         ..TitleBar::window_options()
     };
     cx.spawn(async move |cx| {

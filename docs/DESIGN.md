@@ -107,6 +107,7 @@ Inside `session_panel` the project tree sits above the diff file tree layer in
 its own `v_resizable("sidebar-split")`.
 
 * `Root`: must be the first-level child of every window (`Root::new(view, window, cx)`), otherwise Dialog/Sheet/Notification/focus-trap all break.
+* Window identity: both windows (main + settings) open with `config::window_app_id()` — on Linux the Wayland `app_id` / X11 `WM_CLASS` `ddu`, matching the installed `ddu.desktop` basename and its `StartupWMClass`, so the menu entry's icon, taskbar grouping and `class:ddu` rules apply. Unset on macOS, where the bundle carries it, and unset by default in gpui (an anonymous window otherwise).
 * Left pane: project rows (`+` quick-add, `...` menu with every launcher and the project ops) with that project's sessions as two-line rows — kind badge + live title, meta line with run duration and a spinner while an agent works; the lower splitter slot is the diff file tree layer (§7).
 * Center pane: no tab bar — the session list selects and `⌘1…⌘9` picks the Nth. The pane renders the selected session's `Entity<TermSession>` by id, or the empty state.
 * Right pane: a `resizable_panel()` added only while the changes pane is shown (⌘R; 340 px base, 200 px floor, 60 % of the viewport as the drag cap). Its header shows the selected file's path + `+a/−b`; the copy actions (path / contents) live in the body's context menu; the tree layer's summary strip above carries `N files changed` + totals.
