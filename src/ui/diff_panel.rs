@@ -208,9 +208,6 @@ pub(crate) fn is_markdown(path: &str) -> bool {
         .any(|ext| lower.ends_with(ext))
 }
 
-const NOTE_BINARY: &str = "Binary file — showing the diff.";
-const NOTE_TOO_LARGE: &str = "Too large to view — showing the diff.";
-const NOTE_MISSING: &str = "No longer on disk — showing the diff.";
 const NOTE_READING: &str = "Reading the file…";
 
 /// The mode's row stream for the selected file, plus the reason the
@@ -226,13 +223,29 @@ pub(crate) fn pane_rows(this: &AppView) -> (Option<RowStream<'_>>, Option<&'stat
         return (None, None);
     };
     match this.effective_view_mode() {
-        ViewMode::Preview => (None, None),
+        // Preview's body is the rendered document, not rows — but a
+        // source that cannot be read renders rows like File mode does,
+        // banding the same reason. `None` here (no source, no refusal)
+        // means the read is still in flight; the pane's `body` decides
+        // between the reading note and the Markdown view.
+        ViewMode::Preview => match (this.cached_preview(), this.preview_refusal()) {
+            (Some(_), _) => (None, None),
+            (None, Some(refusal)) => (
+                Some(match this.cached_file_view() {
+                    Some(FileView::Text(view)) => RowStream::view(view),
+                    _ => RowStream::diff(file),
+                }),
+                Some(refusal.note()),
+            ),
+            (None, None) => (Some(RowStream::diff(file)), Some(NOTE_READING)),
+        },
         ViewMode::Diff => (Some(RowStream::diff(file)), None),
         ViewMode::File => match this.cached_file_view() {
             Some(FileView::Text(view)) => (Some(RowStream::view(view)), None),
-            Some(FileView::Binary) => (Some(RowStream::diff(file)), Some(NOTE_BINARY)),
-            Some(FileView::TooLarge) => (Some(RowStream::diff(file)), Some(NOTE_TOO_LARGE)),
-            Some(FileView::Missing) => (Some(RowStream::diff(file)), Some(NOTE_MISSING)),
+            Some(view) => (
+                Some(RowStream::diff(file)),
+                Some(view.refusal().map_or(NOTE_READING, |r| r.note())),
+            ),
             None => (Some(RowStream::diff(file)), Some(NOTE_READING)),
         },
     }
@@ -257,8 +270,11 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
         return empty("Select a file in the tree.", cx).into_any_element();
     };
     let file = &diff.files[file_ix];
-    if this.effective_view_mode() == ViewMode::Preview {
-        return preview_body(this, file, cx).into_any_element();
+    // The rendered document replaces the rows only when its source is
+    // actually there: a Preview that could not be read falls through to
+    // `pane_rows`, which shows the file's rows and bands the reason.
+    if this.effective_view_mode() == ViewMode::Preview && this.cached_preview().is_some() {
+        return preview_body(this, file).into_any_element();
     }
     let (Some(stream), note) = pane_rows(this) else {
         return empty("Select a file in the tree.", cx).into_any_element();
@@ -347,14 +363,8 @@ fn notice_band(text: &str, cx: &Context<AppView>) -> impl IntoElement {
 /// gpui-component's own text view (its parser handles the GFM set —
 /// tables, task lists, strikethrough). Kept to the same size cap as
 /// File mode, so a runaway document cannot stall a frame.
-fn preview_body(this: &AppView, file: &DiffFile, cx: &mut Context<AppView>) -> impl IntoElement {
-    let Some(text) = this.cached_preview().map(|text| text.to_owned()) else {
-        return div()
-            .flex_1()
-            .min_h_0()
-            .child(notice_band(NOTE_READING, cx))
-            .into_any_element();
-    };
+fn preview_body(this: &AppView, file: &DiffFile) -> impl IntoElement {
+    let text = this.cached_preview().map(|text| text.to_owned()).unwrap_or_default();
     div()
         .flex_1()
         .min_h_0()
@@ -1087,6 +1097,116 @@ mod tests {
                     let base = gpui_kit::base::Theme::global(cx);
                     assert_eq!(base.scrollbar.mode(), ScrollbarMode::Hover);
                 });
+            }),
+        );
+    }
+
+    /// Preview's decision table, which is what the pane renders by: the
+    /// Markdown view when the source is there, the file's own rows with
+    /// the reason when it is not, and the reading note while the read is
+    /// still in flight. A refused preview must not be an empty pane.
+    #[test]
+    fn preview_falls_back_to_rows_and_bands_the_reason() {
+        use crate::app::AppView;
+        use crate::config::{Config, State};
+        use crate::diff::view::{PreviewBuild, Unreadable};
+        use crate::diff::{DiffFile, DiffHunk, DiffLine, GitDiff};
+        use gpui::Entity;
+
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 = TestAppContext::build(dispatcher, Some("preview_refusal"));
+                let cx = &mut cx0;
+                cx.update(gpui_kit::init);
+                cx.update(|cx| {
+                    cx.set_global(Config::default());
+                    cx.set_global(crate::config::LoadWarnings(vec![]));
+                    cx.set_global(State::default());
+                });
+                let (view, vcx): (Entity<AppView>, _) =
+                    cx.add_window_view(|window, cx| AppView::new(window, cx));
+                vcx.update(|_, cx| {
+                    view.update(cx, |v, cx| {
+                        v.diff = Some(GitDiff {
+                            branch: None,
+                            files: vec![DiffFile {
+                                path: "notes.md".into(),
+                                added: 1,
+                                removed: 0,
+                                hunks: vec![DiffHunk {
+                                    header: "@@ -0,0 +1 @@".into(),
+                                    lines: vec![DiffLine {
+                                        kind: '+',
+                                        old_no: None,
+                                        new_no: Some(1),
+                                        text: "# Title".into(),
+                                    }],
+                                }],
+                                lines_total: 1,
+                                truncated: false,
+                            }],
+                        });
+                        v.diff_file = Some(0);
+                        v.view_mode = super::ViewMode::Preview;
+                        cx.notify();
+                    });
+                });
+                let key = ("notes.md".to_owned(), 0);
+
+                // Still reading: the diff's rows, and the pane says why.
+                let (stream, note) = vcx.update(|_, cx| {
+                    let v = view.read(cx);
+                    let (rows, note) = super::pane_rows(v);
+                    (rows.map(|s| s.rows()), note)
+                });
+                // The fallback is the diff's own rows: one hunk header
+                // plus its one line.
+                assert_eq!(stream, Some(2));
+                assert_eq!(note, Some(super::NOTE_READING));
+
+                // Refused: same rows, the refusal's own note.
+                vcx.update(|_, cx| {
+                    view.update(cx, |v, cx| {
+                        v.preview = Some(PreviewBuild {
+                            key: (key.0.clone(), v.diff_gen),
+                            source: Err(Unreadable::TooLarge),
+                        });
+                        cx.notify();
+                    });
+                });
+                let (stream, note) = vcx.update(|_, cx| {
+                    let v = view.read(cx);
+                    let (rows, note) = super::pane_rows(v);
+                    (rows.map(|s| s.rows()), note)
+                });
+                assert_eq!(stream, Some(2));
+                assert_eq!(note, Some(Unreadable::TooLarge.note()));
+
+                // Read: the body hands the file to the Markdown view, so
+                // the pane has no rows of its own to render.
+                vcx.update(|_, cx| {
+                    view.update(cx, |v, cx| {
+                        v.preview = Some(PreviewBuild {
+                            key: (key.0.clone(), v.diff_gen),
+                            source: Ok("# Title".into()),
+                        });
+                        cx.notify();
+                    });
+                });
+                let (stream, note, read) = vcx.update(|_, cx| {
+                    let v = view.read(cx);
+                    let (rows, note) = super::pane_rows(v);
+                    (rows.map(|s| s.rows()), note, v.cached_preview().is_some())
+                });
+                assert_eq!((stream, note), (None, None));
+                assert!(read);
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
             }),
         );
     }

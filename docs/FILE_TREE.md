@@ -9,7 +9,9 @@
 > (`src/diff/view.rs`), the pane's **File** and **Preview** modes with the
 > `⌘⇧M` switch (per session, persisted), and the virtualization §7 asked for —
 > the pane renders a mode-independent `RowStream` through `v_virtual_list`, and
-> the tree renders a per-poll `TreeIndex` the same way. **Not landed:** the full
+> the tree renders a per-poll `TreeIndex` the same way. Preview is
+> virtualized too, by gpui-base's own per-block list; a Markdown source that
+> cannot be read falls back to rows with the same band File mode shows. **Not landed:** the full
 > working-tree listing (§4.1's index union), the `All · Changed` filter, the
 > default-collapse seeding rule, the `● n` dir badge, and §4.2's remaining caps
 > triage is now concrete — `MAX_VIEW_BYTES` 8 MiB / `MAX_VIEW_LINES` 200 000.

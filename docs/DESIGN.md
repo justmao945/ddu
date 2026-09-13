@@ -190,7 +190,8 @@ Agent CLIs (claude/codex/omp) daily need streaming output, ANSI colors, line-wra
 * Pane modes: the hunk area (`ui/diff_panel.rs`) shows the selected file in one of three modes, `⌘⇧M` cycles (per session, persisted):
   * **Diff** — hunks only: two number gutters (measured per file) + a sign column, green `+` / red `-` / untinted context rows, `@@` header bands.
   * **File** — the whole file with the changes merged in (`diff/view.rs`): every workdir line once, deletions spliced above the line that replaced them, hunk headers kept as bands, `+`/`-` rows tinted in place. Built off the UI thread once per `(path, diff generation)`; a stale diff (the file moved under the 3 s poll) degrades to untinted context instead of splicing at the wrong line, and a capped diff tints only its prefix (the cap note then grows the file's budget as in Diff mode). Refuses what it cannot show — binary (NUL in the first 8 KiB), over `MAX_VIEW_BYTES` (8 MiB) / `MAX_VIEW_LINES` (200 000), or gone from disk — and bands the reason above the hunks.
-  * **Preview** — rendered Markdown (`TextView::markdown`, `.md`/`.markdown`/`.mdx` only; the toggle disables itself elsewhere and a non-Markdown selection renders File while the mode survives). The find bar has no match list here: ⌘F switches back to File.
+  * **Preview** — rendered Markdown (`TextView::markdown`, `.md`/`.markdown`/`.mdx` only; the toggle disables itself elsewhere and a non-Markdown selection renders File while the mode survives). The library's own scrollable text view virtualizes the document by Markdown block (it builds a `gpui::list` over the parsed blocks and measures them all so the thumb does not jitter), so a long document paints its visible blocks. The find bar has no match list here: ⌘F switches back to File.
+  * **One read policy for both surfaces** (`diff/view.rs`): the merged view and the Markdown source refuse for the same reasons — binary (NUL in the first 8 KiB), over the byte/line cap, or gone from disk — and a refused Preview renders the rows it falls back to with the same one-line band File mode shows. A refusal is stored with the `(path, generation)` it was read for, so the pane can tell "still reading" from "cannot read" instead of banding the reading note forever.
   Both modes are one **`RowStream`** (`diff/mod.rs`): a row's item index *is* its search index, so the find bar, `scroll_to_item` and drag selection are mode-agnostic; the pane's `v_virtual_list` builds only the visible slice of either. Plain lines are `SelectableText` participants ordered by `document_order` (drag selection copies them joined by newlines).
 * Scope: project-level HEAD→workdir diff by default; per-session scope (branch/worktree) comes later — with multiple sessions in one repo they share the project diff. The branch is captured on `GitDiff` but has no display yet.
 * The full working-tree listing and the pane's File/Preview modes are designed in `FILE_TREE.md` (not implemented).
@@ -296,6 +297,11 @@ struct AgentCmd { program: String, args: Vec<String> }
   `FileView` off the UI thread once per `(path, diff generation)`, `TreeIndex`
   once per applied diff. Rendering reads them — it never re-reads the workdir
   or re-flattens the tree.
+* Every scrolling surface is a virtual list, one way or another: Diff rows and
+  File rows through the pane's `v_virtual_list`, the tree through the same over
+  its index, Preview through gpui-base's per-block `gpui::list`. The sidebar's
+  project/session tree is the exception and stays a plain `v_flex` — it is
+  bounded by how many sessions a person keeps, not by a repo.
 * `render` stays declarative: read state, compose elements; parsing/mutation go in
   named methods. One `cx.notify()` per mutation.
 * Pin `gpui-kit 0.6` (i.e. `gpui-pre 0.3.3`); upgrade only by following gpui-kit.

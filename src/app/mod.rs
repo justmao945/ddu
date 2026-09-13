@@ -161,9 +161,12 @@ pub struct AppView {
     /// renders it while both still match.
     pub(crate) file_view: Option<std::rc::Rc<crate::diff::view::FileView>>,
     pub(crate) file_view_key: Option<(String, u64)>,
-    /// Cached Markdown source for Preview mode, same keying.
-    pub(crate) preview_text: Option<std::rc::Rc<str>>,
-    pub(crate) preview_key: Option<(String, u64)>,
+    /// Preview mode's Markdown source — or the reason it could not be
+    /// read — for the `(path, generation)` it was read for. One field for
+    /// both outcomes: a refusal has to be as keyed as a success, or the
+    /// pane would band "reading the file" forever on a file it can never
+    /// read.
+    pub(crate) preview: Option<crate::diff::view::PreviewBuild>,
     /// Bumped on every applied diff: what the two caches above (and
     /// their in-flight builds) compare against.
     pub(crate) diff_gen: u64,
@@ -529,8 +532,7 @@ impl AppView {
             view_mode: ViewMode::default(),
             file_view: None,
             file_view_key: None,
-            preview_text: None,
-            preview_key: None,
+            preview: None,
             diff_gen: 0,
             diff_limits: std::collections::HashMap::new(),
             shutting_down: false,

@@ -32,6 +32,37 @@ const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 /// (one `usize` per hint, not a copy of the text).
 const WIDTH_HINTS: usize = 32;
 
+/// Why a file could not be shown as text. One policy, two surfaces: the
+/// merged File-mode view and Preview's Markdown source refuse for the
+/// same reasons and band the same note.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unreadable {
+    /// NUL byte in the first [`BINARY_SNIFF_BYTES`].
+    Binary,
+    /// Over [`MAX_VIEW_BYTES`], over [`MAX_VIEW_LINES`], or not a file.
+    TooLarge,
+    /// Not on disk (a deleted file: its content lives in the diff).
+    Missing,
+}
+
+impl Unreadable {
+    /// The one-line band the pane puts above the rows it falls back to.
+    pub fn note(self) -> &'static str {
+        match self {
+            Unreadable::Binary => "Binary file — showing the diff.",
+            Unreadable::TooLarge => "Too large to view — showing the diff.",
+            Unreadable::Missing => "No longer on disk — showing the diff.",
+        }
+    }
+}
+
+/// Preview's built source, with the `(path, diff generation)` it belongs
+/// to (same keying as `file_view_key`/`file_view`).
+pub struct PreviewBuild {
+    pub key: (String, u64),
+    pub source: Result<std::rc::Rc<str>, Unreadable>,
+}
+
 /// The File-mode view of one selected file.
 pub enum FileView {
     Text(TextFileView),
@@ -41,6 +72,18 @@ pub enum FileView {
     TooLarge,
     /// Not on disk (a deleted file: its content lives in the diff).
     Missing,
+}
+
+impl FileView {
+    /// The refusal behind this view, for the pane's note.
+    pub fn refusal(&self) -> Option<Unreadable> {
+        match self {
+            FileView::Text(_) => None,
+            FileView::Binary => Some(Unreadable::Binary),
+            FileView::TooLarge => Some(Unreadable::TooLarge),
+            FileView::Missing => Some(Unreadable::Missing),
+        }
+    }
 }
 
 /// One row of the whole-file stream: a hunk header band or a line.
@@ -71,20 +114,12 @@ impl FileView {
     /// longer lines up with the file) still yields a complete view, just
     /// without tints.
     pub fn build(root: &Path, path: &str, diff: Option<&DiffFile>) -> FileView {
-        let Ok(meta) = std::fs::metadata(root.join(path)) else {
-            return FileView::Missing;
+        let text = match read_text(root, path) {
+            Ok(text) => text,
+            Err(Unreadable::Binary) => return FileView::Binary,
+            Err(Unreadable::TooLarge) => return FileView::TooLarge,
+            Err(Unreadable::Missing) => return FileView::Missing,
         };
-        if !meta.is_file() || meta.len() > MAX_VIEW_BYTES {
-            return FileView::TooLarge;
-        }
-        let Ok(bytes) = std::fs::read(root.join(path)) else {
-            return FileView::Missing;
-        };
-        if bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
-            return FileView::Binary;
-        }
-        // Lossy: a stray invalid byte must not cost the whole view.
-        let text = String::from_utf8_lossy(&bytes);
         let lines: Vec<&str> = split_lines(&text);
         if lines.len() > MAX_VIEW_LINES {
             return FileView::TooLarge;
@@ -138,16 +173,31 @@ impl TextFileView {
     }
 }
 
-/// A Markdown file's source for Preview mode: same size cap as the
-/// merged view, off the UI thread, and never fatal (a read failure just
-/// leaves the pane in File mode's notice).
-pub fn read_source(root: &Path, path: &str) -> Option<String> {
-    let meta = std::fs::metadata(root.join(path)).ok()?;
+/// A Markdown file's source for Preview mode (off the UI thread), or why
+/// it cannot be shown — the same refusals File mode bands.
+pub fn read_source(root: &Path, path: &str) -> Result<String, Unreadable> {
+    read_text(root, path)
+}
+
+/// Read `path` for display, or say why it cannot be shown. The one place
+/// the size, binary and on-disk policy lives: the merged view and the
+/// Markdown source both come through here, so the two modes can never
+/// disagree about what is viewable.
+pub fn read_text(root: &Path, path: &str) -> Result<String, Unreadable> {
+    let Ok(meta) = std::fs::metadata(root.join(path)) else {
+        return Err(Unreadable::Missing);
+    };
     if !meta.is_file() || meta.len() > MAX_VIEW_BYTES {
-        return None;
+        return Err(Unreadable::TooLarge);
     }
-    let bytes = std::fs::read(root.join(path)).ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    let Ok(bytes) = std::fs::read(root.join(path)) else {
+        return Err(Unreadable::Missing);
+    };
+    if bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
+        return Err(Unreadable::Binary);
+    }
+    // Lossy: a stray invalid byte must not cost the whole view.
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// File lines for display: `\n` splits, a trailing `\r` is dropped (so
@@ -593,6 +643,48 @@ mod tests {
         };
         assert!(view.tints_capped);
         assert_eq!(view.rows.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Preview reads through the same policy as File mode: it refuses a
+    /// file the merged view refuses, for the same reason, so the pane
+    /// bands one note whichever mode asked.
+    #[test]
+    fn read_source_refuses_what_the_view_refuses() {
+        let dir = std::env::temp_dir().join(format!("ddu-view-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(read_source(&dir, "gone.md"), Err(Unreadable::Missing));
+
+        // Binary is a refusal here too: a NUL byte is not Markdown.
+        std::fs::write(dir.join("bin.md"), b"# t\0x").unwrap();
+        assert_eq!(read_source(&dir, "bin.md"), Err(Unreadable::Binary));
+
+        // A directory is not a file.
+        std::fs::create_dir_all(dir.join("sub.md")).unwrap();
+        assert_eq!(read_source(&dir, "sub.md"), Err(Unreadable::TooLarge));
+
+        // The shared policy, asserted across both surfaces: whatever
+        // the merged view refuses, the source refuses identically.
+        for path in ["gone.md", "bin.md", "sub.md"] {
+            assert_eq!(
+                FileView::build(&dir, path, None).refusal(),
+                read_source(&dir, path).err(),
+                "{path} must refuse the same way in both modes"
+            );
+        }
+
+        std::fs::write(dir.join("ok.md"), "# Title\n\ntext\n").unwrap();
+        assert_eq!(
+            read_source(&dir, "ok.md").expect("readable"),
+            "# Title\n\ntext\n"
+        );
+        assert!(matches!(
+            FileView::build(&dir, "ok.md", None),
+            FileView::Text(_)
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -45,8 +45,7 @@ impl AppView {
         self.diff_limits.clear();
         self.file_view = None;
         self.file_view_key = None;
-        self.preview_text = None;
-        self.preview_key = None;
+        self.preview = None;
         self.tree_index = None;
         self.diff_tree_closed.clear();
         self.diff_search.matches.clear();
@@ -184,9 +183,12 @@ impl AppView {
                     self.file_view = None;
                     self.file_view_key = None;
                 }
-                if stale(&self.preview_key) {
-                    self.preview_text = None;
-                    self.preview_key = None;
+                if self
+                    .preview
+                    .as_ref()
+                    .is_some_and(|b| Some(b.key.0.as_str()) != current.as_deref())
+                {
+                    self.preview = None;
                 }
             }
             Err(err) => {
@@ -229,6 +231,12 @@ impl AppView {
         }
     }
 
+    /// Whether a cached build (or in-flight refusal) is still about the
+    /// selected file, and still current.
+    fn preview_is_current(&self, build: &crate::diff::view::PreviewBuild) -> bool {
+        self.current_diff_path() == Some(build.key.0.as_str()) && build.key.1 == self.diff_gen
+    }
+
     /// The cached whole-file view for the selected file, while it is
     /// still the file's (same path) and still current (same diff
     /// generation).
@@ -240,13 +248,24 @@ impl AppView {
             .flatten()
     }
 
-    /// The cached Markdown source for the selected file, same keying.
+    /// Preview mode's Markdown source for the selected file, same keying
+    /// as [`Self::cached_file_view`]. `None` while it is still being
+    /// read — or forever, when [`Self::preview_refusal`] holds the
+    /// reason.
     pub(crate) fn cached_preview(&self) -> Option<&str> {
-        let path = self.current_diff_path()?;
-        let (cached, generation) = self.preview_key.as_ref()?;
-        (cached == path && *generation == self.diff_gen)
-            .then(|| self.preview_text.as_deref())
-            .flatten()
+        let build = self.preview.as_ref().filter(|b| self.preview_is_current(b))?;
+        let Ok(text) = &build.source else {
+            return None;
+        };
+        Some(text.as_ref())
+    }
+
+    /// Why Preview cannot show the selected file (too large, binary, or
+    /// gone): the pane bands this above the rows it falls back to,
+    /// exactly as File mode does.
+    pub(crate) fn preview_refusal(&self) -> Option<crate::diff::view::Unreadable> {
+        let build = self.preview.as_ref().filter(|b| self.preview_is_current(b))?;
+        build.source.as_ref().err().copied()
     }
 
     /// Switch the pane's surface. Per session: persisted with the row.
@@ -303,8 +322,8 @@ impl AppView {
         let key = (path.clone(), generation);
         let want_view =
             self.view_mode == ViewMode::File && self.file_view_key.as_ref() != Some(&key);
-        let want_preview =
-            self.view_mode == ViewMode::Preview && self.preview_key.as_ref() != Some(&key);
+        let want_preview = self.view_mode == ViewMode::Preview
+            && self.preview.as_ref().map(|b| &b.key) != Some(&key);
         if !want_view && !want_preview {
             return;
         }
@@ -319,8 +338,7 @@ impl AppView {
                         crate::diff::view::FileView::build(&job_root, &job_path, Some(&file))
                     });
                     let source = want_preview
-                        .then(|| crate::diff::view::read_source(&job_root, &job_path))
-                        .flatten();
+                        .then(|| crate::diff::view::read_source(&job_root, &job_path));
                     (view, source)
                 })
                 .await;
@@ -334,8 +352,10 @@ impl AppView {
                     v.file_view_key = Some((path.clone(), generation));
                 }
                 if let Some(source) = source {
-                    v.preview_text = Some(std::rc::Rc::from(source.as_str()));
-                    v.preview_key = Some((path.clone(), generation));
+                    v.preview = Some(crate::diff::view::PreviewBuild {
+                        key: (path.clone(), generation),
+                        source: source.map(|text| std::rc::Rc::from(text.as_str())),
+                    });
                 }
                 v.refresh_diff_search(cx);
                 cx.notify();
