@@ -217,11 +217,39 @@ impl<'a> RowStream<'a> {
                     Some(PaneRow::Line(&hunk.lines[offset - 1]))
                 }
             }
-            RowSrc::View(v) => match &v.rows[ix] {
-                crate::diff::view::ViewRow::Header(header) => Some(PaneRow::Header(header)),
-                crate::diff::view::ViewRow::Line(line) => Some(PaneRow::Line(line)),
-            },
+            RowSrc::View(v) => Some(PaneRow::Line(&v.rows[ix].line)),
         }
+    }
+
+    /// Syntax styles for row `ix`, as byte ranges **within that row's own
+    /// text**, when the row is a File-mode line that sits in the file and
+    /// the view parsed a grammar for it. Empty otherwise: Diff mode's
+    /// hunks and the spliced deletions have no position in the file to
+    /// highlight from.
+    pub fn row_styles(
+        &self,
+        ix: usize,
+        theme: &dyn gpui_kit::base::input::HighlightStyleResolver,
+    ) -> Vec<(std::ops::Range<usize>, gpui_kit::HighlightStyle)> {
+        let RowSrc::View(v) = &self.src else {
+            return Vec::new();
+        };
+        let Some(row) = v.rows.get(ix) else {
+            return Vec::new();
+        };
+        let (Some(offset), Some(highlighter)) = (row.offset, v.highlighter.as_ref()) else {
+            return Vec::new();
+        };
+        let start = offset as usize;
+        let range = start..start + row.line.text.len();
+        highlighter
+            .styles(&range, theme)
+            .into_iter()
+            .map(|(r, style)| {
+                let from = r.start.saturating_sub(start);
+                (from..r.end.saturating_sub(start), style)
+            })
+            .collect()
     }
 
     /// Indices of every line whose text contains `query`,
@@ -282,10 +310,7 @@ impl<'a> RowStream<'a> {
                 .width_hints
                 .iter()
                 .filter_map(|ix| v.rows.get(*ix))
-                .map(|row| match row {
-                    crate::diff::view::ViewRow::Header(h) => (h.as_str(), true),
-                    crate::diff::view::ViewRow::Line(l) => (l.text.as_str(), false),
-                })
+                .map(|row| (row.line.text.as_str(), false))
                 .collect(),
         }
     }

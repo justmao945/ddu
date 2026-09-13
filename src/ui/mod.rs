@@ -6,6 +6,7 @@ use gpui::SharedString;
 use gpui_kit::component::*;
 use gpui_kit::*;
 
+pub(crate) mod code_text;
 pub(crate) mod diff_panel;
 pub(crate) mod markdown;
 pub(crate) mod diff_tree;
@@ -42,11 +43,75 @@ pub(crate) fn row_px() -> f32 {
 /// fallback face even when a terminal font is configured.
 pub(crate) fn apply_mono_typography(cx: &mut App) {
     let config = cx.global::<crate::config::Config>();
-    let family: SharedString = config.mono_family().into();
+    let family = resolve_mono_family(config.mono_family(), cx);
     let size = px(config.terminal_font_size());
     let theme = Theme::global_mut(cx);
     theme.mono_font_family = family;
     theme.mono_font_size = size;
+    // The Base layer (scrollbars, resize handles, and a rendered
+    // document's fenced code blocks) is a *projection* of this theme:
+    // rebuild it so it carries the face and size just set.
+    Theme::sync_base(cx);
+    // Then size the code block off the scaled UI base, not the terminal's
+    // own font size: `mono_md` is a bare px next to prose that follows the
+    // desktop's text scale, so on a scaled desktop a fenced block came
+    // out visibly smaller than the paragraph around it. The library's own
+    // stock ratio is 13px of a 14px body, and 1.5 is its stock leading.
+    let code = crate::config::ui_font_size() * 0.93;
+    let base = gpui_kit::base::Theme::global_mut(cx);
+    base.tokens.typography.mono_md.size = px(code);
+    base.tokens.typography.mono_md.line_height = px(code * 1.5);
+}
+
+/// Monospace detection. Font registries expose no `is_monospace` flag, so
+/// match on the family name: anything saying "mono" (minus the proportional
+/// "propo" Nerd Font variants), plus a substring list of known mono families
+/// whose names don't say it. One heuristic, two callers: the settings
+/// picker lists with it, and `resolve_mono_family` falls back with it.
+pub(crate) fn is_mono_family(family: &str) -> bool {
+    const MONO_NAME_HINTS: &[&str] = &[
+        "menlo",
+        "monaco",
+        "courier",
+        "consolas",
+        "meslo",
+        "fira code",
+        "source code pro",
+        "cascadia code",
+        "hack",
+        "inconsolata",
+        "iosevka",
+        "monaspace",
+        "sarasa term",
+    ];
+    let f = family.to_ascii_lowercase();
+    if f.contains("propo") {
+        return false;
+    }
+    f.contains("mono") || MONO_NAME_HINTS.iter().any(|h| f.contains(h))
+}
+
+/// The mono face to actually render with: the configured family when it is
+/// installed, else an installed face whose name says monospace, else the
+/// configured name unchanged (a headless environment with no font list
+/// keeps the caller's value rather than inventing one).
+///
+/// This is not decoration. gpui matches a family by **exact name** against
+/// the faces it loaded — no fontconfig substitution — and a family it
+/// cannot find falls back to the *UI* face. The stock `DejaVu Sans Mono`,
+/// which is not installed on every desktop, therefore rendered the
+/// terminal and every code row in a proportional font while every other
+/// panel looked normal.
+fn resolve_mono_family(configured: &str, cx: &App) -> SharedString {
+    let installed = cx.text_system().all_font_names();
+    if let Some(hit) = installed.iter().find(|name| name.as_str() == configured) {
+        return hit.clone().into();
+    }
+    installed
+        .iter()
+        .find(|name| is_mono_family(name))
+        .map(|name| SharedString::from(name.clone()))
+        .unwrap_or_else(|| configured.into())
 }
 
 /// Dim count/meta text next to a panel label.

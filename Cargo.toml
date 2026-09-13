@@ -9,7 +9,27 @@ alacritty_terminal = "0.24"
 anyhow = "1.0.104"
 async-channel = "2"
 git2 = "0.19"
-gpui-kit = "0.6"
+# Grammars for the pane's syntax highlighting (`tree-sitter-*` features are
+# forwarded through gpui-kit). One feature per language keeps the build to
+# the grammars the pane can actually meet: c/c++, java, html, css,
+# javascript (+ jsx), typescript/tsx, rust, go, python, swift, bash (+ sh).
+# JSON rides along with the base `tree-sitter` feature. There is no QML
+# grammar in the ecosystem gpui-component wraps.
+gpui-kit = { version = "0.6", features = [
+    "tree-sitter-bash",
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-css",
+    "tree-sitter-go",
+    "tree-sitter-html",
+    "tree-sitter-java",
+    "tree-sitter-javascript",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-swift",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+] }
 parking_lot = "0.12"
 portable-pty = "0.9"
 rustix = { version = "0.38", features = ["std", "event"] }

@@ -299,7 +299,7 @@ pub(super) fn terminal_font_item() -> SettingItem {
             .clone()
             .unwrap_or_default();
         let mut families: Vec<String> = window.text_system().all_font_names();
-        families.retain(|f| is_mono_family(f));
+        families.retain(|f| crate::ui::is_mono_family(f));
         families.sort();
         families.dedup();
         let current: SharedString = if configured.is_empty() {
@@ -372,29 +372,3 @@ pub(super) fn terminal_font_item() -> SettingItem {
     })
 }
 
-/// Monospace detection. Font registries expose no `is_monospace` flag,
-/// so match on the family name: anything saying "mono" (minus the
-/// proportional "propo" Nerd Font variants), plus a substring list of
-/// known mono families whose names don't say it.
-pub(super) fn is_mono_family(family: &str) -> bool {
-    const MONO_NAME_HINTS: &[&str] = &[
-        "menlo",
-        "monaco",
-        "courier",
-        "consolas",
-        "meslo",
-        "fira code",
-        "source code pro",
-        "cascadia code",
-        "hack",
-        "inconsolata",
-        "iosevka",
-        "monaspace",
-        "sarasa term",
-    ];
-    let f = family.to_ascii_lowercase();
-    if f.contains("propo") {
-        return false;
-    }
-    f.contains("mono") || MONO_NAME_HINTS.iter().any(|h| f.contains(h))
-}

@@ -17,7 +17,8 @@ editing, and where the long form lives.
 - `docs/VERIFICATION.md` — how to prove a change on macOS and on Linux.
 - `docs/UI.md` — GPUI/panel invariants and the measurements behind them.
 - `docs/SIGNING.md` — codesign identity and TCC grants (macOS).
-- `docs/FILE_TREE.md`, `docs/AGENT_CORE.md` — designs, **not implemented**.
+- `docs/FILE_TREE.md` — the file tree + view panel design, **landed** except
+  per-session worktrees; `docs/AGENT_CORE.md` — design, **not implemented**.
 - `docs/omarchy/` — Omarchy desktop tweak notes (host config, not this app).
 
 ## Source map
@@ -35,10 +36,15 @@ editing, and where the long form lives.
   (Linux); `DDU_STATE_PATH` / `DDU_SETTINGS_PATH` override. Loads check errors;
   a corrupt file is backed up as `<name>.corrupt-<ts>` and defaults are used.
 - `src/diff/` — `git.rs` git2 working-tree diff (5000 lines/file cap, polled
-  with a seq guard against stale results); `mod.rs` data model.
+  with a seq guard against stale results); `mod.rs` data model (the pane's
+  `RowStream`) ; `view.rs` the whole-file surface: file lines + byte offsets +
+  the parsed `SyntaxHighlighter`, built on the background pass.
 - `src/terminal/` — `mod.rs` portable-pty pump + subscriber-channel wakeups,
   `grid.rs` alacritty grid, `element.rs` custom paint element, `attention.rs`
   (`BEL`/`OSC 9`/`OSC 777` → desktop notification), `boxart.rs`.
+- `src/ui/code_text.rs` — `SelectableText` with caller-supplied `TextRun`s
+  (gpui-base's lays out the runs it built from its own text, so a highlighted
+  row cannot ride it); one selection participant per row, same contract.
 - `src/ui/` — panels (`session_panel`, `terminal`, `diff_panel`, `diff_tree`,
   `status_bar`, `title_bar`), `settings/` (standalone window), `markdown.rs`
   (the image plugin a rendered document goes through: gpui's own text view sends
@@ -91,6 +97,24 @@ editing, and where the long form lives.
   exists for a resize that landed while every slot was still pinned, and a drag
   never changes the container — a per-render correction reverts the drag
   (`docs/UI.md`, pinned by `a_dragged_splitter_is_not_reverted_by_a_render`).
+- **The mono face must name an installed family**: gpui matches a family by
+  exact name against the loaded faces — no fontconfig substitution — and a
+  family it cannot find falls back to the *UI* face, which is how the stock
+  `DejaVu Sans Mono` rendered the terminal and every code row in a proportional
+  font. `ui::resolve_mono_family` (called from `apply_mono_typography`, i.e.
+  after every `Theme::change`) corrects it, and `ui::is_mono_family` is the one
+  monospace heuristic (the settings picker lists with it too).
+- **Highlighting is per row, off the file** (`diff/view.rs` + `ui/code_text.rs`):
+  `ViewRow::offset` is the row's byte offset in the file (`None` for a spliced
+  deletion, which is never colored), and `RowStream::row_styles` clips a
+  whole-file style range down to that row. The parse rides `FileView::build`'s
+  background thread; a render never parses. Grammars come from the
+  `tree-sitter-*` features in `Cargo.toml` (all MIT — the GPL-free rule), one
+  per language, and only the **File** surface highlights: Diff mode's hunks
+  are fragments with no offsets into the file.
+- **The pane's default surface is File** (`ViewMode::default`): the whole file
+  with the diff tinted in place, and no `@@` bands there — the merged stream is
+  the file in order.
 - **The tree lists the working tree lazily** (`diff/tree.rs`): only the root and
   the directories the user has expanded are read (`list_dir`), merged with the
   poll's diff, so a 40k-file repository draws a few hundred rows. Clean files are

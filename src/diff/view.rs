@@ -1,15 +1,19 @@
 //! Whole-file view for the right pane's **File** mode: the file's own
-//! lines with the diff's changes tinted in place, the deletions spliced
-//! back in, and the hunk headers kept as bands — a unified,
-//! context-complete reading of one file (`docs/FILE_TREE.md` §4.2).
+//! lines with the diff's changes tinted in place and the deletions
+//! spliced back in — a unified, context-complete reading of one file
+//! (`docs/FILE_TREE.md` §4.2). No hunk-header bands: the rows are the
+//! file in order, so a `@@` line would name a document that has no
+//! hunks (Diff mode keeps them — that surface *is* hunks). A file whose
+//! syntax the pane knows is highlighted (`language_of`), parsed once
+//! here with the rows.
 //!
 //! The rows are materialized once per `(path, diff generation)` by the
 //! pane and never rebuilt per frame; the pane virtualizes them, so a
 //! 200k-line file costs one build pass and one visible slice per frame.
 //!
-//! Row shape: one header per hunk, then every workdir line exactly
-//! once with the deletions spliced in — `rows.len() == hunks +
-//! file_lines + deleted_lines`, asserted in the tests.
+//! Row shape: every workdir line exactly once with the deletions
+//! spliced in — `rows.len() == file_lines + deleted_lines`, asserted in
+//! the tests.
 //!
 //! Two honesty rules keep the merge safe against the 3 s poll window:
 //! a context line is only trusted when the file on disk still agrees
@@ -18,6 +22,9 @@
 //! (`tints_capped`), so the rows are never spliced at the wrong place.
 
 use std::path::Path;
+
+use gpui_kit::base::input::Rope;
+use gpui_kit::component::highlighter::SyntaxHighlighter;
 
 use super::{cells, DiffFile, DiffLine};
 
@@ -102,12 +109,16 @@ pub fn is_image(path: &str) -> bool {
     .any(|ext| lower.ends_with(ext))
 }
 
-/// One row of the whole-file stream: a hunk header band or a line.
-/// Lines reuse [`DiffLine`] — same numbers, same `' ' | '+' | '-'`
-/// meaning — so the pane renders File mode with the Diff mode row code.
-pub enum ViewRow {
-    Header(String),
-    Line(DiffLine),
+/// One row of the whole-file stream: a line of the file, or a line the
+/// diff deleted, spliced above the line that replaced it. The line
+/// reuses [`DiffLine`] — same numbers, same `' ' | '+' | '-'` meaning —
+/// so the pane renders File mode with the Diff mode row code.
+pub struct ViewRow {
+    pub line: DiffLine,
+    /// Byte offset of `line.text` in the file, when the row is *in* the
+    /// file (context and `+` rows). `None` for a deletion: its text is
+    /// no longer there to highlight.
+    pub offset: Option<u32>,
 }
 
 /// A whole file, ready to render.
@@ -121,7 +132,16 @@ pub struct TextFileView {
     pub tints_capped: bool,
     /// Row indices of the longest lines, by display-cell estimate.
     pub width_hints: Vec<usize>,
+    /// The file's parsed syntax, when its extension names a grammar the
+    /// build carries: rows highlight off it. Parsed here, once, on the
+    /// same background pass as the rows — a render never parses.
+    pub highlighter: Option<SyntaxHighlighter>,
 }
+
+/// Files past this size are listed but not parsed: highlighting is a
+/// reading aid, and a multi-megabyte source would hold the background
+/// build (and so the pane) for a parse nobody asked to wait for.
+const MAX_HIGHLIGHT_BYTES: usize = 1 << 20;
 
 impl FileView {
     /// Read `path` (relative to the project root) and merge `diff` into
@@ -145,17 +165,17 @@ impl FileView {
             Err(Unreadable::TooLarge) => return FileView::TooLarge,
             Err(Unreadable::Missing) => return FileView::Missing,
         };
-        let lines: Vec<&str> = split_lines(&text);
+        let (lines, starts) = split_lines(&text);
         if lines.len() > MAX_VIEW_LINES {
             return FileView::TooLarge;
         }
 
         let (rows, tints_capped) = match diff {
-            Some(diff) => match merge(&lines, diff) {
+            Some(diff) => match merge(&lines, &starts, diff) {
                 Some(rows) => (rows, diff.truncated),
                 // The file moved under the poll: show it untinted rather
                 // than splice the changes into the wrong lines.
-                None => (context_only(&lines), true),
+                None => (context_only(&lines, &starts), true),
             },
             // No diff record at all: the file is *clean* (the tree lists
             // every file, so this is the normal case for an unchanged
@@ -163,24 +183,26 @@ impl FileView {
             // would band "Loading the file's changes…" over a file that
             // has none, and the pane's scroll-driven budget grower would
             // chase a note it can never clear.
-            None => (context_only(&lines), false),
+            None => (context_only(&lines, &starts), false),
         };
-        FileView::Text(TextFileView::new(rows, &lines, tints_capped))
+        FileView::Text(TextFileView::new(rows, &lines, tints_capped, path, &text))
     }
 }
 
 impl TextFileView {
-    fn new(rows: Vec<ViewRow>, lines: &[&str], tints_capped: bool) -> Self {
+    fn new(
+        rows: Vec<ViewRow>,
+        lines: &[&str],
+        tints_capped: bool,
+        path: &str,
+        text: &str,
+    ) -> Self {
         let max_line_no = lines.len().max(1) as u32;
         // Rank by display cells once, here: the pane re-measures a
         // handful of candidates per frame, not every row.
         let mut hints: Vec<(usize, usize)> = Vec::with_capacity(WIDTH_HINTS + 1);
         for (ix, row) in rows.iter().enumerate() {
-            let text = match row {
-                ViewRow::Header(h) => h.as_str(),
-                ViewRow::Line(l) => l.text.as_str(),
-            };
-            let cells = cells(text);
+            let cells = cells(row.line.text.as_str());
             if hints.len() < WIDTH_HINTS {
                 hints.push((cells, ix));
                 hints.sort_unstable();
@@ -193,14 +215,56 @@ impl TextFileView {
         }
         let mut width_hints: Vec<usize> = hints.into_iter().map(|(_, ix)| ix).collect();
         width_hints.sort_unstable();
+        let highlighter = (text.len() <= MAX_HIGHLIGHT_BYTES)
+            .then(|| language_of(path))
+            .flatten()
+            .map(|language| {
+                let mut highlighter = SyntaxHighlighter::new(language);
+                // A full parse, not an incremental edit: the view is
+                // built once per (path, diff generation), off the UI
+                // thread, and a half-parsed tree highlights nothing.
+                highlighter.update(None, &Rope::from_str(text), None);
+                highlighter
+            });
         Self {
             rows,
             max_line_no,
             tints_capped,
             width_hints,
+            highlighter,
         }
     }
 }
+
+/// The grammar a path's extension names, if the pane can highlight it.
+/// Names are the ones `LanguageRegistry` registers (gpui-component's
+/// `Language::from_name` also accepts them), so this table only decides
+/// *which* grammar a file gets — never how it is parsed.
+fn language_of(path: &str) -> Option<&'static str> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "c" => "c",
+        // Headers are the C++ grammar's territory: it parses C headers
+        // too, where the C grammar chokes on a class or a namespace.
+        "h" | "hh" | "hpp" | "hxx" | "cc" | "cpp" | "cxx" | "c++" => "cpp",
+        "java" => "java",
+        "html" | "htm" => "html",
+        "css" | "scss" => "css",
+        "js" | "mjs" | "cjs" | "jsx" => "javascript",
+        "ts" | "mts" | "cts" => "typescript",
+        "tsx" => "tsx",
+        "rs" => "rust",
+        "go" => "go",
+        "py" | "pyi" | "pyw" => "python",
+        "swift" => "swift",
+        "sh" | "bash" | "zsh" => "bash",
+        "json" | "jsonc" => "json",
+        _ => return None,
+    })
+}
+
+
 
 /// A Markdown file's source for its rendered document (off the UI
 /// thread), or why
@@ -230,33 +294,30 @@ pub fn read_text(root: &Path, path: &str) -> Result<String, Unreadable> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// File lines for display: `\n` splits, a trailing `\r` is dropped (so
-/// CRLF files do not render a stray glyph) and a trailing newline does
-/// not invent an empty last line.
-fn split_lines(text: &str) -> Vec<&str> {
-    let mut lines: Vec<&str> = text
-        .split('\n')
-        .map(|l| l.strip_suffix('\r').unwrap_or(l))
-        .collect();
-    if lines.last() == Some(&"") {
+/// File lines for display, and the byte each starts at in the file — the
+/// offset a row hands the highlighter. `\n` splits, a trailing `\r` is
+/// dropped from the *text* (so CRLF files do not render a stray glyph)
+/// while staying in the offsets, and a trailing newline does not invent an
+/// empty last line.
+fn split_lines(text: &str) -> (Vec<&str>, Vec<u32>) {
+    let mut lines: Vec<(&str, u32)> = Vec::new();
+    let mut at = 0u32;
+    for raw in text.split('\n') {
+        lines.push((raw.strip_suffix('\r').unwrap_or(raw), at));
+        at += raw.len() as u32 + 1;
+    }
+    if lines.last().is_some_and(|(line, _)| line.is_empty()) {
         lines.pop();
     }
-    lines
+    lines.into_iter().unzip()
 }
 
 /// Every line as untinted context, numbered 1..=n.
-fn context_only(lines: &[&str]) -> Vec<ViewRow> {
+fn context_only(lines: &[&str], starts: &[u32]) -> Vec<ViewRow> {
     lines
         .iter()
         .enumerate()
-        .map(|(ix, text)| {
-            ViewRow::Line(DiffLine {
-                kind: ' ',
-                old_no: Some(ix as u32 + 1),
-                new_no: Some(ix as u32 + 1),
-                text: (*text).to_string(),
-            })
-        })
+        .map(|(ix, text)| context(text, ix as u32 + 1, ix as u32 + 1, starts[ix]))
         .collect()
 }
 
@@ -268,7 +329,7 @@ fn context_only(lines: &[&str]) -> Vec<ViewRow> {
 /// surviving line, so a `-` run reads directly above the line that
 /// replaced it; a run that ends the file (or the hunk) flushes at the
 /// end.
-fn merge(lines: &[&str], diff: &DiffFile) -> Option<Vec<ViewRow>> {
+fn merge(lines: &[&str], starts: &[u32], diff: &DiffFile) -> Option<Vec<ViewRow>> {
     let mut rows: Vec<ViewRow> = Vec::with_capacity(lines.len() + diff.removed);
     // 0-based workdir cursor and its 1-based old-file twin; both resync
     // from every hunk line the diff numbers.
@@ -287,17 +348,21 @@ fn merge(lines: &[&str], diff: &DiffFile) -> Option<Vec<ViewRow>> {
         if anchor > 0 {
             while next_new < anchor as usize - 1 {
                 let text = lines.get(next_new)?;
-                rows.push(context(text, next_old, next_new as u32 + 1));
+                rows.push(context(text, next_old, next_new as u32 + 1, starts[next_new]));
                 next_new += 1;
                 next_old += 1;
             }
         }
-        rows.push(ViewRow::Header(hunk.header.clone()));
         for line in &hunk.lines {
             match line.kind {
                 '-' => {
                     next_old = line.old_no.unwrap_or(next_old).max(next_old);
-                    pending.push(ViewRow::Line(line.clone()));
+                    // A deletion is not in the file: no offset, so no
+                    // highlight — its text is the diff's, not the file's.
+                    pending.push(ViewRow {
+                        line: line.clone(),
+                        offset: None,
+                    });
                 }
                 kind => {
                     let text = lines.get(next_new)?;
@@ -310,16 +375,19 @@ fn merge(lines: &[&str], diff: &DiffFile) -> Option<Vec<ViewRow>> {
                         }
                     }
                     rows.append(&mut pending);
-                    rows.push(ViewRow::Line(DiffLine {
-                        kind,
-                        old_no: if kind == '+' {
-                            None
-                        } else {
-                            line.old_no.or(Some(next_old))
+                    rows.push(ViewRow {
+                        line: DiffLine {
+                            kind,
+                            old_no: if kind == '+' {
+                                None
+                            } else {
+                                line.old_no.or(Some(next_old))
+                            },
+                            new_no: Some(next_new as u32 + 1),
+                            text: (*text).to_string(),
                         },
-                        new_no: Some(next_new as u32 + 1),
-                        text: (*text).to_string(),
-                    }));
+                        offset: Some(starts[next_new]),
+                    });
                     if kind == ' ' {
                         next_old = line.old_no.unwrap_or(next_old) + 1;
                     }
@@ -332,7 +400,12 @@ fn merge(lines: &[&str], diff: &DiffFile) -> Option<Vec<ViewRow>> {
     // Everything the last hunk did not cover, then a deletion run that
     // ended the file.
     while next_new < lines.len() {
-        rows.push(context(lines[next_new], next_old, next_new as u32 + 1));
+        rows.push(context(
+            lines[next_new],
+            next_old,
+            next_new as u32 + 1,
+            starts[next_new],
+        ));
         next_new += 1;
         next_old += 1;
     }
@@ -340,13 +413,16 @@ fn merge(lines: &[&str], diff: &DiffFile) -> Option<Vec<ViewRow>> {
     Some(rows)
 }
 
-fn context(text: &str, old_no: u32, new_no: u32) -> ViewRow {
-    ViewRow::Line(DiffLine {
-        kind: ' ',
-        old_no: Some(old_no),
-        new_no: Some(new_no),
-        text: text.to_string(),
-    })
+fn context(text: &str, old_no: u32, new_no: u32, offset: u32) -> ViewRow {
+    ViewRow {
+        line: DiffLine {
+            kind: ' ',
+            old_no: Some(old_no),
+            new_no: Some(new_no),
+            text: text.to_string(),
+        },
+        offset: Some(offset),
+    }
 }
 
 #[cfg(test)]
@@ -361,6 +437,13 @@ mod tests {
             new_no: new,
             text: text.to_string(),
         }
+    }
+
+    /// `merge` with the byte offsets of a fresh file: the tests build
+    /// rows from `&[&str]` and never care where the bytes are.
+    fn merged(lines: &[&str], diff: &DiffFile) -> Option<Vec<ViewRow>> {
+        let starts: Vec<u32> = split_lines(&lines.join("\n")).1;
+        merge(lines, &starts, diff)
     }
 
     fn diff_file(hunks: Vec<Vec<DiffLine>>) -> DiffFile {
@@ -398,28 +481,20 @@ mod tests {
             line('+', None, Some(2), "TWO"),
             line(' ', Some(3), Some(3), "three"),
         ]]);
-        let rows = merge(&lines, &diff).expect("merge");
+        let rows = merged(&lines, &diff).expect("merge");
         let texts: Vec<&str> = rows
             .iter()
-            .map(|r| match r {
-                ViewRow::Header(h) => h.as_str(),
-                ViewRow::Line(l) => l.text.as_str(),
-            })
+            .map(|r| r.line.text.as_str())
             .collect();
-        assert_eq!(texts, ["@@ test @@", "one", "two", "TWO", "three", "four"]);
+        assert_eq!(texts, ["one", "two", "TWO", "three", "four"]);
         let kinds: Vec<char> = rows
             .iter()
-            .filter_map(|r| match r {
-                ViewRow::Line(l) => Some(l.kind),
-                _ => None,
-            })
+            .filter_map(|r| Some(r.line.kind))
             .collect();
         assert_eq!(kinds, [' ', '-', '+', ' ', ' ']);
         // Untouched lines past the hunk keep climbing both counters.
-        match rows.last().unwrap() {
-            ViewRow::Line(l) => assert_eq!((l.old_no, l.new_no), (Some(4), Some(4))),
-            _ => panic!("last row is a line"),
-        }
+        let last = &rows.last().unwrap().line;
+        assert_eq!((last.old_no, last.new_no), (Some(4), Some(4)));
     }
 
     /// A deletion run that ends the file has no following line to
@@ -431,16 +506,12 @@ mod tests {
             line(' ', Some(1), Some(1), "one"),
             line('-', Some(2), None, "gone"),
         ]]);
-        let rows = merge(&lines, &diff).expect("merge");
+        let rows = merged(&lines, &diff).expect("merge");
         let last = rows.last().expect("rows");
-        match last {
-            ViewRow::Line(l) => {
-                assert_eq!(l.kind, '-');
-                assert_eq!(l.text, "gone");
-                assert_eq!(l.new_no, None);
-            }
-            _ => panic!("last row is the deletion"),
-        }
+        let l = &last.line;
+        assert_eq!(l.kind, '-');
+        assert_eq!(l.text, "gone");
+        assert_eq!(l.new_no, None);
     }
 
     /// Insertion-only hunk: the added lines sit between the anchors and
@@ -453,14 +524,8 @@ mod tests {
             line(' ', Some(1), Some(2), "a"),
             line(' ', Some(2), Some(3), "b"),
         ]]);
-        let rows = merge(&lines, &diff).expect("merge");
-        let texts: Vec<&str> = rows
-            .iter()
-            .filter_map(|r| match r {
-                ViewRow::Line(l) => Some(l.text.as_str()),
-                _ => None,
-            })
-            .collect();
+        let rows = merged(&lines, &diff).expect("merge");
+        let texts: Vec<&str> = rows.iter().map(|r| r.line.text.as_str()).collect();
         assert_eq!(texts, ["new", "a", "b"]);
     }
 
@@ -485,24 +550,20 @@ mod tests {
                 line('-', Some(6), None, "six"),
             ],
         ]);
-        let rows = merge(&lines, &diff).expect("merge");
-        let numbered: Vec<u32> = rows
-            .iter()
-            .filter_map(|r| match r {
-                ViewRow::Line(l) => l.new_no,
-                _ => None,
-            })
-            .collect();
+        let rows = merged(&lines, &diff).expect("merge");
+        let numbered: Vec<u32> = rows.iter().filter_map(|r| r.line.new_no).collect();
         assert_eq!(numbered, vec![1, 2, 3, 4]);
         let deleted = rows
             .iter()
-            .filter(|r| matches!(r, ViewRow::Line(l) if l.kind == '-'))
+            .filter(|r| r.line.kind == '-')
             .count();
         assert_eq!(deleted, 3);
-        let view = TextFileView::new(rows, &lines, false);
-        // The invariant: every hunk contributes its header, every
-        // workdir line appears once, every deletion is spliced in.
-        assert_eq!(view.rows.len(), 2 + lines.len() + deleted);
+        let view = TextFileView::new(rows, &lines, false, "f.txt", "");
+        // The invariant: every workdir line appears once and every
+        // deletion is spliced in — a hunk header would be a row with no
+        // line behind it, and this surface has none.
+        assert_eq!(view.rows.len(), lines.len() + deleted);
+        assert!(view.rows.iter().all(|r| r.offset.is_none() || r.line.kind != '-'));
         assert_eq!(view.max_line_no, lines.len() as u32);
     }
 
@@ -517,7 +578,7 @@ mod tests {
             line(' ', Some(1), Some(1), "one"),
             line(' ', Some(2), Some(2), "two"),
         ]]);
-        assert!(merge(&lines, &diff).is_none());
+        assert!(merged(&lines, &diff).is_none());
     }
 
     /// A capped diff still tints its prefix (its hunks are complete up
@@ -531,20 +592,109 @@ mod tests {
             line(' ', Some(1), Some(2), "two"),
         ]]);
         diff.truncated = true;
-        let rows = merge(&lines, &diff).expect("merge");
-        let view = TextFileView::new(rows, &lines, diff.truncated);
+        let rows = merged(&lines, &diff).expect("merge");
+        let view = TextFileView::new(rows, &lines, diff.truncated, "f.txt", "");
         assert!(view.tints_capped);
-        // One hunk header plus every workdir line, in order.
-        assert_eq!(view.rows.len(), lines.len() + 1);
+        // Every workdir line, in order, and no header band.
+        assert_eq!(view.rows.len(), lines.len());
         assert_eq!(view.max_line_no, lines.len() as u32);
+    }
+
+    /// Every row that is in the file knows where it is: `offset` is the
+    /// byte its own text starts at, which is what the pane hands the
+    /// highlighter. A spliced deletion has no offset — it is not in the
+    /// file to point at.
+    #[test]
+    fn rows_carry_their_byte_offset_in_the_file() {
+        let dir = std::env::temp_dir().join(format!("ddu-offsets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // CRLF on purpose: a stripped `\r` must not shift a later row.
+        // The file already holds the changed content — that is what a
+        // diff means: line 2 reads `BETA` while the hunk carries `beta`.
+        std::fs::write(dir.join("f.txt"), "alpha\r\nBETA\r\ngamma\ndelta\n").unwrap();
+        let diff = diff_file(vec![vec![
+            line(' ', Some(1), Some(1), "alpha"),
+            line('-', Some(2), None, "beta"),
+            line('+', None, Some(2), "BETA"),
+            line(' ', Some(3), Some(3), "gamma"),
+        ]]);
+        let FileView::Text(view) = FileView::build(&dir, "f.txt", Some(&diff)) else {
+            panic!("text view");
+        };
+        let text = std::fs::read_to_string(dir.join("f.txt")).unwrap();
+        let mut deletions = 0;
+        for row in &view.rows {
+            let Some(at) = row.offset else {
+                assert_eq!(row.line.kind, '-', "only a deletion lacks an offset");
+                deletions += 1;
+                continue;
+            };
+            let at = at as usize;
+            assert_eq!(
+                &text[at..at + row.line.text.len()],
+                row.line.text,
+                "row offset points at the row's own text"
+            );
+        }
+        assert_eq!(deletions, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file whose extension names a grammar is parsed with its rows, and
+    /// a row's styles come back **relative to that row** — the pane colors
+    /// one line without knowing where the file it came from starts. A
+    /// grammar-less file (or a row that is not in the file) yields none.
+    #[test]
+    fn a_known_language_highlights_one_row_at_a_time() {
+        use crate::diff::RowStream;
+        use gpui_kit::component::highlighter::HighlightTheme;
+
+        let dir = std::env::temp_dir().join(format!("ddu-highlight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.rs"), "fn main() {\n    let x = 1;\n}\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "fn main() {\n    let x = 1;\n}\n").unwrap();
+
+        let FileView::Text(view) = FileView::build(&dir, "main.rs", None) else {
+            panic!("text view");
+        };
+        assert!(view.highlighter.is_some(), "a .rs file parses");
+        let stream = RowStream::view(&view);
+        let theme = HighlightTheme::default_light();
+        let theme = theme.as_ref();
+        let body = &view.rows[1].line.text;
+        let styles = stream.row_styles(1, theme);
+        assert!(!styles.is_empty(), "the row carries styles");
+        for (range, _) in &styles {
+            assert!(
+                range.end <= body.len(),
+                "a style stays inside its own row: {range:?} of {body:?}"
+            );
+        }
+        // Line 0 is `fn main() {`: its styles are relative to *it*, so the
+        // same keyword sits at a different offset in each row.
+        assert!(styles.iter().any(|(range, _)| range.start < body.len()));
+        assert!(!stream.row_styles(0, theme).is_empty(), "the first row too");
+
+        let FileView::Text(plain) = FileView::build(&dir, "notes.txt", None) else {
+            panic!("text view");
+        };
+        assert!(plain.highlighter.is_none(), "no grammar, no parse");
+        assert!(RowStream::view(&plain).row_styles(0, theme).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn split_lines_drops_the_trailing_newline_and_cr() {
-        assert_eq!(split_lines("a\nb\n"), vec!["a", "b"]);
-        assert_eq!(split_lines("a\r\nb"), vec!["a", "b"]);
-        assert_eq!(split_lines(""), Vec::<&str>::new());
-        assert_eq!(split_lines("\n"), vec![""]);
+        assert_eq!(split_lines("a\nb\n").0, vec!["a", "b"]);
+        assert_eq!(split_lines("a\r\nb").0, vec!["a", "b"]);
+        // The offsets keep the bytes the text dropped: `b` starts at 3.
+        assert_eq!(split_lines("a\r\nb").1, vec![0, 3]);
+        assert_eq!(split_lines("").0, Vec::<&str>::new());
+        assert_eq!(split_lines("\n").0, vec![""]);
+        // An empty file has one empty line, not a phantom one.
+        assert_eq!(split_lines("").1, Vec::<u32>::new());
     }
 
     /// The row contract at depth: a deep row is reachable by index and
@@ -585,7 +735,7 @@ mod tests {
         };
         let stream = crate::diff::RowStream::view(&view);
         assert_eq!(view.max_line_no, 20_000);
-        assert_eq!(stream.rows(), 20_000 + 1 + 1);
+        assert_eq!(stream.rows(), 20_000 + 1);
         // Deep random access: the last row is the file's last line.
         let last = stream.row(stream.rows() - 1).expect("row");
         assert!(matches!(last, crate::diff::PaneRow::Line(l) if l.text == "LINE 19999 CHANGED"));
@@ -646,22 +796,12 @@ mod tests {
         assert_eq!(view.max_line_no, 3);
         assert!(!view.tints_capped);
         assert!(!view.width_hints.is_empty());
-        let texts: Vec<&str> = view
-            .rows
-            .iter()
-            .filter_map(|r| match r {
-                ViewRow::Line(l) => Some(l.text.as_str()),
-                _ => None,
-            })
-            .collect();
+        let texts: Vec<&str> = view.rows.iter().map(|r| r.line.text.as_str()).collect();
         assert_eq!(texts, ["one", "two", "TWO", "three"]);
         let kinds: Vec<char> = view
             .rows
             .iter()
-            .filter_map(|r| match r {
-                ViewRow::Line(l) => Some(l.kind),
-                _ => None,
-            })
+            .filter_map(|r| Some(r.line.kind))
             .collect();
         assert_eq!(kinds, [' ', '-', '+', ' ']);
 

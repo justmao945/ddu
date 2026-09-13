@@ -26,9 +26,11 @@
 > file itself rather than an empty hunks pane; and **images** — an image file,
 > and `![](…)`/`<img>` inside a rendered document — draw through
 > `src/ui/markdown.rs` instead of going to the http client that cannot read a
-> path.
-> **Not landed:** §8's
-> deferred items (syntax highlighting, worktrees). Caps came out at
+> path. Syntax highlighting comes with it (§8.4, all-MIT grammars, parsed on
+> the same background pass): a `.rs`/`.py`/… file colors per row through
+> `src/ui/code_text.rs`.
+> **Not landed:** worktrees (§8), and Diff mode's hunks stay uncolored (they
+> are fragments with no offsets into the file). Caps came out at
 > `MAX_VIEW_BYTES` 8 MiB / `MAX_VIEW_LINES` 200 000 (not the 1 MiB / 5 000
 > guessed here): the pane virtualizes, so a large file costs one build pass.
 > Framework: `gpui-kit = "0.6"` only. License: Apache-2.0, **GPL-free throughout**.
@@ -321,16 +323,31 @@ longer holds a list to look it up in.
 | P4 preview | `src/ui/diff_panel.rs` | `TextView::markdown` path, the Markdown gate on File mode, empty-state fallbacks |
 | P5 cleanup | `AGENTS.md`, `docs/DESIGN.md`, `src/diff/mod.rs` | source map + §7/§8 rewritten; delete what the cutover obsoletes (`build_tree`/`tree_stats` in the UI layer, any Diff-mode-only helper, stale comments about "changed files only") |
 
-### 8.4 Syntax highlighting (explicitly deferred)
+### 8.4 Syntax highlighting — landed for the whole-file surface
 
-Available without new dependencies at the data level: `gpui-kit` forwards
-`gpui-component`'s grammar features (`gpui-kit-0.6.0/Cargo.toml`), and
-`gpui-component::highlighter::SyntaxHighlighter` (`highlighter/highlighter.rs`)
-maps a rope + language to style ranges (`SyntaxHighlighter::new("markdown")`,
-`.update(...)`, `.styles(range, theme)`). Enabling it means picking
-`tree-sitter-*` features (a dozen grammar crates, C build steps, plus a license
-audit — `DESIGN.md` §13 mandates the check) and turning style ranges into
-`TextRun`s per row. Deferred: v1 ships a correct, fast, uncolored file view.
+As sketched here: `gpui-component::highlighter::SyntaxHighlighter` maps the
+file's rope + language to style ranges (`.update(None, &rope, None)` then
+`.styles(&row_range, theme)`), and `TextFileView` holds the parse next to the
+rows, so a render never parses. What the sketch did not foresee:
+
+* The extension decides the grammar (`language_of` in `src/diff/view.rs`), and
+  the parse rides the **same background pass** as the rows: `FileView::build`
+  already reads the file off the UI thread, so a 1 MiB parse costs the pane
+  nothing. Past `MAX_HIGHLIGHT_BYTES` the file is listed uncolored rather than
+  held back for a parse.
+* Rows carry their **byte offset in the file** (`ViewRow::offset`, `None` for a
+  spliced deletion), which is what turns a whole-file style range into a row's
+  own runs. So the highlight follows the merge: a deletion is never colored,
+  and the offsets survive CRLF.
+* `SelectableText` cannot take runs (it lays out the runs it built from its own
+  text), so `src/ui/code_text.rs` mirrors it with caller-supplied runs — the
+  element the pane's rows already were, with color. Window selection and the
+  drag-copy path are unchanged (`document_order` per row).
+* Enabled grammars: c, cpp, java, html, css, javascript/jsx, typescript, tsx,
+  rust, go, python, swift, bash/sh, json — all MIT (`DESIGN.md` §13). No QML
+  grammar exists in the set gpui-component wraps.
+* Diff mode's hunks stay uncolored: a hunk is a fragment with no offsets into
+  the file, and the pane reads a file only for the whole-file surface.
 
 ## 9. Verification
 
@@ -371,7 +388,7 @@ audit — `DESIGN.md` §13 mandates the check) and turning style ranges into
 | Markdown re-parse per frame | Stable element id + gpui element-state cache, `TextViewState` as the documented fallback; the pane is a cached child view, so parsing only happens on notify |
 | Markdown images (README screenshots) | Landed as a block plugin (`src/ui/markdown.rs`): local paths resolve to `Resource::Path`, remote URLs keep gpui's loader, a missing local file shows its alt text |
 | Selection/persistence drift (`selected_file` was diff-only) | Re-pin against the full tree in `apply_diff`; `tree_filter`/`view_mode` default when absent |
-| Grammar features pulled in for highlighting | Deferred entirely (§8.4); no `tree-sitter-*` feature enabled in this plan |
+| Grammar features pulled in for highlighting | Landed (§8.4): one feature per language in `Cargo.toml`, all MIT; the parse rides the existing background read |
 
 ## 11. Decisions taken (open to challenge)
 
@@ -380,10 +397,13 @@ audit — `DESIGN.md` §13 mandates the check) and turning style ranges into
    `All / Changed` filter was dropped rather than kept beside a lazy listing
    that cannot count what it has not read.
 2. Clean directories start collapsed; changed subtrees start open.
-3. File mode is the merged, whole-file view; Diff mode stays byte-identical to
-   today so nothing regresses while the new mode beds in.
+3. File mode is the merged, whole-file view and **the default**; Diff mode is
+   the hunks, for when the change is the question.
 4. Markdown rendering is not a mode: File mode renders those files, and the
    find bar leaves File mode for Diff rather than matching a rendered
    document.
-5. No syntax highlighting, no virtualization, no `notify`-crate file watching in
-   v1: the 3 s poll already meets the freshness bar.
+   Hunk-header bands (`@@ …`) are Diff-mode-only: the whole-file stream is the
+   file in order, so a band would index a document that has no hunks.
+5. No `notify`-crate file watching in v1: the 3 s poll already meets the
+   freshness bar. (Syntax highlighting and virtualization both landed later
+   — §8.4 and §7.)

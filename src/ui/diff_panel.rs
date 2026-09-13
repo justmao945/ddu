@@ -178,10 +178,12 @@ fn mode_button(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
 /// behave identically in either.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum ViewMode {
-    /// The file's hunks — the original pane, unchanged.
-    #[default]
+    /// The file's hunks: what changed, nothing else.
     Diff,
-    /// The whole file with the diff's changes tinted in place.
+    /// The whole file with the diff's changes tinted in place — the
+    /// default: a file is read, not skimmed, and this surface shows the
+    /// code around the change.
+    #[default]
     File,
 }
 
@@ -579,11 +581,8 @@ fn file_text(this: &AppView) -> String {
         return view
             .rows
             .iter()
-            .filter_map(|row| match row {
-                crate::diff::view::ViewRow::Line(line) if line.kind != '-' => {
-                    Some(line.text.as_str())
-                }
-                _ => None,
+            .filter_map(|row| {
+                (row.line.kind != '-').then_some(row.line.text.as_str())
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -635,8 +634,9 @@ fn render_rows(
             .into_any_element(),
             PaneRow::Line(line) => {
                 let hit = matches.binary_search(&ix).is_ok();
+                let runs = line_runs(&stream, ix, cx);
                 row_box(
-                    diff_line(ix, line, hit, current_row == Some(ix), gutter_w, cx),
+                    diff_line(ix, line, hit, current_row == Some(ix), gutter_w, runs, cx),
                     content_w,
                     heights.line,
                 )
@@ -681,6 +681,7 @@ fn diff_line(
     hit: bool,
     current: bool,
     gutter_w: Pixels,
+    runs: Option<Vec<TextRun>>,
     cx: &mut Context<AppView>,
 ) -> Stateful<Div> {
     // The gutter numbers the file as it is *now*: a context or added
@@ -736,18 +737,102 @@ fn diff_line(
                 // participant, ordered by `document_order`, so drag
                 // selection spans lines and ⌘C copies them joined
                 // with newlines (no gutter or sign in the copy).
-                .child(
-                    SelectableText::new(("diff-text", id), text)
-                        .document_order(id as u64)
-                        .text_style(TextStyleRefinement {
-                            font_family: Some(mono),
-                            font_size: Some(rems(0.875).into()),
-                            color: Some(cx.theme().foreground.opacity(0.85)),
-                            white_space: Some(WhiteSpace::Nowrap),
-                            ..Default::default()
-                        }),
-                ),
+                .child(line_text(id, text, mono, runs, cx)),
         )
+}
+
+/// One line's text: the syntax-highlighted element when the row has runs
+/// for it, the plain selectable run otherwise (Diff mode, a spliced
+/// deletion, a file the build has no grammar for). Both are one selection
+/// participant ordered by the row index — that is what the drag selection
+/// and the copy path ride on.
+fn line_text(
+    id: usize,
+    text: String,
+    mono: SharedString,
+    runs: Option<Vec<TextRun>>,
+    cx: &App,
+) -> AnyElement {
+    let style = TextStyleRefinement {
+        font_family: Some(mono),
+        font_size: Some(rems(0.875).into()),
+        color: Some(cx.theme().foreground.opacity(0.85)),
+        white_space: Some(WhiteSpace::Nowrap),
+        ..Default::default()
+    };
+    match runs {
+        Some(runs) => crate::ui::code_text::CodeText::new(("diff-text", id), text, runs, style)
+            .document_order(id as u64)
+            .into_any_element(),
+        None => SelectableText::new(("diff-text", id), text)
+            .document_order(id as u64)
+            .text_style(style)
+            .into_any_element(),
+    }
+}
+
+/// The row's syntax runs, or `None` when there is nothing to color: the
+/// view parsed no grammar for this file, or the row is not in it (a
+/// spliced deletion). Runs tile the whole line — a gap between tokens
+/// takes the pane's own text color — because `TextRun`s are what the
+/// shaper lays out, not an overlay on top of a styled string.
+fn line_runs(stream: &crate::diff::RowStream<'_>, ix: usize, cx: &App) -> Option<Vec<TextRun>> {
+    let Some(crate::diff::PaneRow::Line(line)) = stream.row(ix) else {
+        return None;
+    };
+    let text = line.text.as_str();
+    let styles = stream.row_styles(ix, cx.theme().highlight_theme.as_ref());
+    if styles.is_empty() {
+        return None;
+    }
+    let font = gpui_kit::font(cx.theme().mono_font_family.clone());
+    let base = cx.theme().foreground.opacity(0.85);
+    let mut runs = Vec::with_capacity(styles.len() + 2);
+    let mut at = 0usize;
+    for (range, style) in styles {
+        let start = clamp_to_boundary(text, range.start.min(text.len()));
+        if start > at {
+            runs.push(run(&text[at..start], &font, base));
+        }
+        let end = clamp_to_boundary(text, range.end.min(text.len()).max(start));
+        let mut styled = run(&text[start..end], &font, style.color.unwrap_or(base));
+        if let Some(weight) = style.font_weight {
+            styled.font.weight = weight;
+        }
+        if let Some(slant) = style.font_style {
+            styled.font.style = slant;
+        }
+        runs.push(styled);
+        at = end;
+    }
+    if at < text.len() {
+        runs.push(run(&text[at..], &font, base));
+    }
+    Some(runs)
+}
+
+/// A run's color and font; the length is the slice's byte length, which
+/// is what gpui's shaper counts.
+fn run(text: &str, font: &Font, color: Hsla) -> TextRun {
+    TextRun {
+        len: text.len(),
+        font: font.clone(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }
+}
+
+/// `index` moved down to the nearest char boundary: the highlighter clips
+/// its ranges to boundaries, but a panicking slice is not a risk worth
+/// taking on text the pane does not own.
+fn clamp_to_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 /// Longest lines shaped exactly per render (bound on text-system calls).
@@ -1276,24 +1361,22 @@ mod tests {
                     |vcx: &mut gpui::VisualTestContext| vcx.update(|_, cx| view.read(cx).view_mode);
                 let surface =
                     |vcx: &mut gpui::VisualTestContext| vcx.update(|_, cx| view.read(cx).surface());
-                assert_eq!(mode(&mut vcx), super::ViewMode::Diff);
+                // The default is the whole file, so a Markdown file is
+                // its rendered document before any toggle.
+                assert_eq!(mode(&mut vcx), super::ViewMode::File);
+                assert_eq!(surface(&mut vcx), super::Surface::Preview);
+                vcx.dispatch_action(ToggleViewMode);
+                assert_eq!(
+                    mode(&mut vcx),
+                    super::ViewMode::Diff,
+                    "⌘⇧M switches to the hunks"
+                );
                 assert_eq!(surface(&mut vcx), super::Surface::Diff);
                 vcx.dispatch_action(ToggleViewMode);
                 assert_eq!(
                     mode(&mut vcx),
                     super::ViewMode::File,
-                    "⌘⇧M switches to the whole file"
-                );
-                assert_eq!(
-                    surface(&mut vcx),
-                    super::Surface::Preview,
-                    "and a Markdown file renders there"
-                );
-                vcx.dispatch_action(ToggleViewMode);
-                assert_eq!(
-                    mode(&mut vcx),
-                    super::ViewMode::Diff,
-                    "and back to the hunks"
+                    "and back to the whole file"
                 );
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();
