@@ -89,12 +89,16 @@ impl AppView {
     }
 }
 
-/// The shell renders its three panels as **cached child views** (see
-/// `panel_view!`): gpui replays a cached subtree — layout, paint,
-/// hitboxes, listeners, key contexts — until the view is notified, which
-/// is what keeps a streaming terminal off the sidebar and the changes
-/// pane. These tests pin both halves of that contract, plus the gpui
-/// behavior they rest on.
+/// The shell renders the sidebar, the terminal pane and the breadcrumb
+/// as **cached child views** (see `panel_view!`): gpui replays a cached
+/// subtree — layout, paint, hitboxes, listeners, key contexts — until the
+/// view is notified, which is what keeps a streaming terminal off the
+/// sidebar. The changes pane is deliberately *not* cached: it is the app's
+/// only selectable surface, and a replayed subtree never re-registers its
+/// window-selection participants (see `panel_view!` and
+/// `a_selection_in_the_changes_pane_survives_a_frame_it_did_not_ask_for`).
+/// These tests pin both halves of that contract, plus the gpui behavior
+/// they rest on.
 #[cfg(test)]
 mod panel_cache_tests {
     use crate::app::AppView;
@@ -261,10 +265,12 @@ mod panel_cache_tests {
         (cx0, view, counts)
     }
 
-    /// A stream wakeup repaints the terminal pane alone: the cached
-    /// sidebar and changes pane must not even be notified, or every
-    /// frame of a stream would rebuild them (the whole point of the
-    /// split). A background session repaints nothing at all.
+    /// A stream wakeup repaints the terminal pane alone: neither the
+    /// cached sidebar nor the changes pane is notified, or every frame of
+    /// a stream would rebuild them (the whole point of the split; the
+    /// changes pane re-renders per frame either way, but nothing may make
+    /// it *rebuild* a stream frame — that is the terminal pane's job
+    /// alone). A background session repaints nothing at all.
     #[test]
     fn stream_wakeup_repaints_only_the_terminal_pane() {
         gpui::run_test_once(
@@ -741,6 +747,130 @@ mod panel_cache_tests {
                 );
                 let after = vcx.update(|_, cx| view.read(cx).shell_state.read(cx).sizes()[0]);
                 assert_eq!(after, dragged, "and it still tracks after a resize");
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    /// A selection made in the changes pane has to outlive the frames it
+    /// did not ask for.
+    ///
+    /// gpui's window selection keeps a participant only while it
+    /// re-registers: `TextSelectionLayer` sweeps every participant that
+    /// did not register during the frame (`WindowSelectionState::finish_frame`),
+    /// and a *cached* subtree re-registers nothing on the frames it
+    /// replays. The shell therefore mounts the changes pane uncached —
+    /// the app's only selectable surface — so the rows land in the
+    /// window selection on every frame; a cached pane dropped the
+    /// selection one frame after the drag that made it (the highlight
+    /// blinking off while a session streamed).
+    #[test]
+    fn a_selection_in_the_changes_pane_survives_a_frame_it_did_not_ask_for() {
+        use crate::app::{AppView, Selection};
+        use crate::config::{Config, LoadWarnings, ShellConfig, State};
+        use crate::diff::{DiffFile, DiffHunk, DiffLine, GitDiff};
+        use gpui_kit::base::TextSelection;
+
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 =
+                    TestAppContext::build(dispatcher, Some("pane_selection_survives_a_frame"));
+                let cx = &mut cx0;
+                cx.update(gpui_kit::init);
+                cx.update(|cx| {
+                    // A silent shell: the reader thread must not race the
+                    // test scheduler with a prompt.
+                    cx.set_global(Config {
+                        shell: ShellConfig {
+                            program: "/bin/cat".into(),
+                        },
+                        ..Default::default()
+                    });
+                    cx.set_global(LoadWarnings(vec![]));
+                    cx.set_global(State::default());
+                });
+                let (view, vcx) = cx.add_window_view(|window, cx| AppView::new(window, cx));
+                let lines: Vec<DiffLine> = (1..=40)
+                    .map(|n| DiffLine {
+                        kind: '+',
+                        old_no: None,
+                        new_no: Some(n),
+                        text: format!("selected line {n:02} with some words on it"),
+                    })
+                    .collect();
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        let files = vec![DiffFile {
+                            path: "src.rs".into(),
+                            added: 40,
+                            removed: 0,
+                            hunks: vec![DiffHunk {
+                                header: "@@ -0,0 +1,40 @@".into(),
+                                lines,
+                            }],
+                            lines_total: 40,
+                            truncated: false,
+                        }];
+                        v.show_diff = true;
+                        v.selection = Some(Selection {
+                            path: "src.rs".into(),
+                            changed: Some(0),
+                        });
+                        v.view_mode = crate::ui::diff_panel::ViewMode::Diff;
+                        v.snapshot = Some(crate::diff::Snapshot {
+                            diff: GitDiff {
+                                branch: None,
+                                files,
+                            },
+                        });
+                        cx.notify();
+                    });
+                    let _ = window.draw(cx);
+                });
+
+                let pane = vcx
+                    .debug_bounds("pane-diff")
+                    .expect("the changes pane lays out");
+                let row_y = pane.origin.y + gpui_kit::px(crate::ui::panel_header_px() + 40.);
+                let from = gpui_kit::point(pane.origin.x + gpui_kit::px(30.), row_y);
+                let to = gpui_kit::point(pane.origin.x + gpui_kit::px(220.), row_y + gpui_kit::px(40.));
+                vcx.simulate_mouse_down(from, gpui_kit::MouseButton::Left, Default::default());
+                vcx.simulate_mouse_move(
+                    to,
+                    Some(gpui_kit::MouseButton::Left),
+                    Default::default(),
+                );
+                vcx.simulate_mouse_up(to, gpui_kit::MouseButton::Left, Default::default());
+                let selected = vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                    TextSelection::selected_text(window, cx)
+                });
+                assert!(
+                    selected.contains("selected line"),
+                    "the drag selects rows, got {selected:?}"
+                );
+
+                // Frames the pane did not ask for — a stream frame looks
+                // like this: the window draws, nothing notifies the pane.
+                for _ in 0..3 {
+                    vcx.update(|window, cx| {
+                        let _ = window.draw(cx);
+                    });
+                }
+                let after = vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                    TextSelection::selected_text(window, cx)
+                });
+                assert!(
+                    after.contains("selected line"),
+                    "the selection must outlive an untouched frame, got {after:?}"
+                );
+
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();
                     cx.quit();

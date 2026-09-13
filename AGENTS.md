@@ -34,7 +34,7 @@ editing, and where the long form lives.
   `diff.rs` (poll, snapshot apply, selection re-pin, tree index),
   `sessions.rs` (spawn/kill/restore/resume), `shutdown.rs` (the confirmed
   close/⌘Q path), `persist.rs` (state.json round-trip), `panels.rs` (dock
-  toggles + the cached-panel contract tests),
+  toggles + the panel-cache contract tests),
   `workspace.rs` (projects, folder picker).
 - `src/session.rs` — domain model (`Project`, `AgentSession`, `AgentStatus`),
   launch presets, `spec`/`resume_spec`, `initial_projects()` (= cwd).
@@ -101,7 +101,11 @@ editing, and where the long form lives.
   `v_flex` ancestor, never the tracked element (`docs/UI.md`).
 - **Cached panels**: a panel's subtree replays until notified, so keep the
   three-halves notify discipline (`subscribe_term` / OSC-title /
-  `notify_panels`) and give every `root_style()` a size (`docs/UI.md`).
+  `notify_panels`) and give every `root_style()` a size (`docs/UI.md`). The
+  changes pane is the exception — it is mounted *uncached* because gpui's
+  window selection needs its participants re-registered every frame, and a
+  cached subtree registers nothing (a live selection in the pane was swept a
+  frame later). Never cache a panel whose text can be selected.
 - **Splitters**: keep the flex slots unpinned and correct widths through
   `resize_panel` + `suppress_resize_records`, never an unconditional
   render-time fixup (`docs/UI.md`).

@@ -153,23 +153,38 @@ returned to. Two rules make it hold:
 
 ## Cached panels
 
-The three shell panels are cached child views (`panel_view!` in
-`src/ui/mod.rs`): sidebar, changes pane and terminal pane mount as
+The sidebar, the terminal pane and the title bar's breadcrumb are cached child
+views (`panel_view!` in `src/ui/mod.rs`): they mount as
 `Entity::cached(panel::root_style())`, so gpui replays a panel's whole subtree
 — render, layout, paint, hitboxes, mouse listeners, key contexts, focus —
-until that view is notified. The title bar's breadcrumb is one too
-(`ui/title_bar.rs`): it mirrors the session title, which agent CLIs spin, and
-it must not drag the panels into that repaint.
+until that view is notified. The breadcrumb is one because it mirrors the
+session title, which agent CLIs spin, and it must not drag the panels into
+that repaint.
+
+**The changes pane is not cached**, and must not be: it is the app's only
+selectable surface, and gpui's window selection keeps a participant only while
+it re-registers — `SelectableText`/`TextView` do that from their own paint, so
+a replayed (cached) subtree registers nothing and `finish_frame`'s sweep drops
+the participant, taking the selection with it. The symptom was a selection in
+the pane blinking off one frame after the drag that made it; for the rendered
+document it was worse, because clearing that participant notifies the text
+view, so every stream frame rebuilt the pane and painted the whole window
+twice (measured 5.5% → 3% CPU, 2× → 1× root renders per stream frame). The
+pane re-renders on every frame the window draws — which is what the library
+assumes of a selectable surface — and nothing else does.
 
 Three halves to keep in sync, all pinned by tests in `src/app/panels.rs`
 (`panel_cache_tests`):
 
 * a stream wakeup notifies `terminal_pane` alone (`subscribe_term`), which is
-  what keeps the panels cached on stream frames — measured with the changes
-  pane open: per-frame draw cost −35%, taffy layout −65%, sidebar render −92%;
+  what keeps the *cached* panels cached on stream frames — measured with the
+  changes pane open: per-frame draw cost −35%, taffy layout −65%, sidebar
+  render −92%; the changes pane re-renders per frame regardless (see above),
+  so the win is the sidebar's and the breadcrumb's, plus the double frame the
+  document surface used to cost;
 * a stream frame that *changes the OSC title* (the spinner glyph in the
   sidebar row and the breadcrumb) additionally notifies those two — and
-  nothing else, or an agent's spinner tick would rebuild the changes pane 20
+  nothing else, or an agent's spinner tick would rebuild the cached panels 20
   times a second;
 * every other `cx.notify()` on `AppView` fans out through
   `AppView::notify_panels` (an app-level `observe_self`), or a panel whose

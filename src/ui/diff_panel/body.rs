@@ -141,10 +141,6 @@ fn preview_body(this: &AppView) -> impl IntoElement {
         .min_h_0()
         .min_w_0()
         .overflow_hidden()
-        // Prose needs margins: the rows carry their own `p_2`, and a
-        // document rendered flush against the pane's edges reads as
-        // clipped text rather than a page.
-        .p_3()
         .child(
             TextView::markdown(
                 SharedString::from(format!(
@@ -155,7 +151,16 @@ fn preview_body(this: &AppView) -> impl IntoElement {
             )
             .selectable(true)
             .scrollable(true)
-            .plugin(crate::ui::markdown::LocalImages::new(base)),
+            .plugin(crate::ui::markdown::LocalImages::new(base))
+            // Prose needs margins: the rows carry their own `p_2`, and a
+            // document rendered flush against the pane's edges reads as
+            // clipped text rather than a page. They belong on the *text
+            // view*, not on the box around it: gpui lays the view's own
+            // scrollbar out against its padding box (taffy resolves an
+            // absolute child against the border box, padding excluded),
+            // so a padded wrapper parks the thumb a padding short of the
+            // pane's right border while the rows' thumb sits on it.
+            .p_3(),
         )
         .into_any_element()
 }

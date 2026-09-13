@@ -30,17 +30,18 @@ pub(crate) struct TerminalPalette {
 
 impl TerminalPalette {
     pub(crate) fn new(theme: &Theme) -> Self {
+        let colors = DefaultColors::of(theme);
         match theme.mode {
             ThemeMode::Dark => Self {
-                fg: rgb(DARK_FG).into(),
-                bg: rgb(DARK_BG).into(),
+                fg: rgb(colors.fg).into(),
+                bg: rgb(colors.bg).into(),
                 cursor: rgb(0x61afef).into(),
                 selection: rgb(0x264f78).into(),
                 base: one_dark_palette(),
             },
             ThemeMode::Light => Self {
-                fg: rgb(LIGHT_FG).into(),
-                bg: rgb(LIGHT_BG).into(),
+                fg: rgb(colors.fg).into(),
+                bg: rgb(colors.bg).into(),
                 cursor: rgb(0x2f5af3).into(),
                 selection: rgb(0xb3d7ff).into(),
                 base: one_light_palette(),
@@ -127,23 +128,48 @@ fn dimmed_index(named: NamedColor) -> usize {
 fn rgb_u24(r: u8, g: u8, b: u8) -> Rgba {
     rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32)
 }
-/// The theme's own default foreground/background: the values
-/// `NamedColor::Foreground`/`Background` paint with, and the ones an OSC
-/// 10/11/12 query must answer. One table, so a reply can never name a
-/// color the grid does not paint.
-const DARK_FG: u32 = 0xabb2bf;
-const DARK_BG: u32 = 0x282c34;
-const LIGHT_FG: u32 = 0x2a2c33;
-const LIGHT_BG: u32 = 0xfafafa;
+/// The default foreground/background the grid paints with: the *theme's*
+/// own two colors, so a terminal cell a child left at its default reads
+/// as strongly as the prose beside the pane, and an OSC 10/11/12 query
+/// answers the color the grid actually paints. Held as one value so the
+/// paint path (the UI thread, `TerminalPalette::new`) and the reply path
+/// (the pump thread, via [`query_rgb`]) can never disagree.
+///
+/// They used to be pinned to Zed's One Dark/Light *terminal* pair
+/// (`#abb2bf` on dark), which is deliberately dimmer than the app's
+/// foreground: plain command output therefore sat a contrast step under
+/// every other pane and read as blurry next to it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct DefaultColors {
+    pub(crate) fg: u32,
+    pub(crate) bg: u32,
+}
 
-/// What an OSC 10/11/12 color query answers for `index` in this theme
-/// mode, or `None` for the colors the ANSI ramp owns (the child gets no
-/// reply and keeps its own default).
-pub(crate) fn query_rgb(index: usize, dark: bool) -> Option<Rgb> {
+impl DefaultColors {
+    pub(crate) fn of(theme: &Theme) -> Self {
+        Self {
+            fg: hsla_u24(theme.foreground),
+            bg: hsla_u24(theme.background),
+        }
+    }
+}
+
+/// An `Hsla` as the 24-bit value a terminal color is stored and replied
+/// with (the 8-bit channel is the interface's own resolution).
+fn hsla_u24(color: Hsla) -> u32 {
+    let rgba: Rgba = color.into();
+    let c = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
+    (c(rgba.r) << 16) | (c(rgba.g) << 8) | c(rgba.b)
+}
+
+/// What an OSC 10/11/12 color query answers for `index`, or `None` for
+/// the colors the ANSI ramp owns (the child gets no reply and keeps its
+/// own default).
+pub(crate) fn query_rgb(index: usize, colors: DefaultColors) -> Option<Rgb> {
     let value = if index == NamedColor::Background as usize {
-        if dark { DARK_BG } else { LIGHT_BG }
+        colors.bg
     } else if index == NamedColor::Foreground as usize || index == NamedColor::Cursor as usize {
-        if dark { DARK_FG } else { LIGHT_FG }
+        colors.fg
     } else {
         return None;
     };

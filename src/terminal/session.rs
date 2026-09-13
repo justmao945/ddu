@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use gpui_kit::*;
 
+use super::palette;
 use super::stream::stream_interval;
 use super::*;
 
@@ -25,16 +26,15 @@ impl TermSession {
             cols,
             rows,
             wake_tx,
-            gpui_kit::component::theme::Theme::global(cx).is_dark(),
+            palette::DefaultColors::of(gpui_kit::component::theme::Theme::global(cx)),
             scrollback,
         )?;
 
         let entity = cx.new(|cx| {
             cx.observe_global::<gpui_kit::component::theme::Theme>(|this: &mut Self, cx| {
-                this.grid.dark.store(
-                    gpui_kit::component::theme::Theme::global(cx).is_dark(),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+                this.grid.set_default_colors(palette::DefaultColors::of(
+                    gpui_kit::component::theme::Theme::global(cx),
+                ));
                 // The palette is resolved from the live theme at paint
                 // time — wake so existing sessions repaint immediately.
                 cx.emit(TermEvent::Wakeup);

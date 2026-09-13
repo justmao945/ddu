@@ -319,6 +319,15 @@ pub(crate) fn selection_hover_bg(cx: &App) -> Hsla {
 /// stated by the composer: caching skips measuring the contents, so the
 /// composer has to say how the subtree is laid out. Both call sites read
 /// the same function, so the box cannot drift from the panel's.
+///
+/// **A panel whose text can be selected must not be cached.** gpui's
+/// window selection keeps a participant only while it re-registers each
+/// frame, and `SelectableText`/`TextView` register from their own paint:
+/// a replayed subtree registers nothing, so the sweep in
+/// `WindowSelectionState::finish_frame` drops the participant and the
+/// selection with it. The changes pane is the one panel with selectable
+/// text — it is mounted uncached for exactly that reason
+/// (`AppView::render`, `a_selection_in_the_changes_pane_survives_a_frame_it_did_not_ask_for`).
 macro_rules! panel_view {
     ($(#[$doc:meta])* $name:ident, $render:path) => {
         $(#[$doc])*

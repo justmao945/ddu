@@ -33,9 +33,8 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-/// The pane's layout box: one definition, read by the pane's own root
-/// element and by the shell's cached mount (`panel_view!` explains why
-/// the composer has to state it).
+/// The pane's layout box: the pane's own root element reads it (the
+/// shell mounts this pane *uncached* — see `AppView::render`).
 pub(crate) fn root_style() -> StyleRefinement {
     StyleRefinement::default()
         .flex()
@@ -834,5 +833,4 @@ mod tests {
             }),
         );
     }
-
 }

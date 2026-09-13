@@ -323,7 +323,31 @@ impl Render for AppView {
                                     .size_full()
                                     .min_w_0()
                                     .overflow_hidden()
-                                    .child(self.diff_pane.clone().cached(ui::diff_panel::root_style())),
+                                    // *Uncached*, unlike the sidebar, the
+                                    // terminal pane and the breadcrumb. This
+                                    // pane is the only place in the app that
+                                    // puts text in gpui's window selection
+                                    // (its rows and the rendered document are
+                                    // `SelectableText`/`TextView`), and that
+                                    // layer keeps a participant only while it
+                                    // re-registers: `TextSelectionLayer` sweeps
+                                    // whatever did not register *this* frame
+                                    // (`finish_frame`), and a cached subtree
+                                    // registers nothing on the frames it
+                                    // replays. A cached pane therefore lost a
+                                    // live selection — the highlight blinked
+                                    // off the moment a stream frame arrived —
+                                    // and, for the rendered document, the sweep
+                                    // cleared a participant whose clear
+                                    // notifies the text view, so every stream
+                                    // frame re-rendered the pane and painted
+                                    // the whole window twice (measured: 5.5% →
+                                    // 3% CPU, 20 → 10.5 root renders per 2 s
+                                    // window, session for session). Painting
+                                    // the pane every frame is what the library
+                                    // assumes of a selectable surface; it costs
+                                    // the pane's own rows, and nothing else.
+                                    .child(self.diff_pane.clone()),
                             ),
                     );
                 }

@@ -4,7 +4,7 @@
 
 use std::io::Read;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener};
@@ -213,7 +213,8 @@ pub struct EventProxy {
     writer: PtyWriter,
     wake: async_channel::Sender<PumpMsg>,
     meta: Arc<Mutex<TermMeta>>,
-    dark: Arc<AtomicBool>,
+    fg: Arc<AtomicU32>,
+    bg: Arc<AtomicU32>,
 }
 
 impl EventProxy {
@@ -227,7 +228,8 @@ impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
             Event::ColorRequest(index, format) => {
-                if let Some(color) = super::palette::query_rgb(index, self.dark.load(Ordering::Relaxed)) {
+                let (fg, bg) = (self.fg.load(Ordering::Relaxed), self.bg.load(Ordering::Relaxed));
+                if let Some(color) = super::palette::query_rgb(index, super::palette::DefaultColors { fg, bg }) {
                     self.writer.write(format(color).as_bytes());
                 }
             }
@@ -269,6 +271,16 @@ impl Dimensions for GridDims {
     }
 }
 
+/// The default colors a test grid starts with (the real ones come from
+/// the theme — see [`super::palette::DefaultColors`]).
+#[cfg(test)]
+fn test_colors() -> super::palette::DefaultColors {
+    super::palette::DefaultColors {
+        fg: 0xab_b2_bf,
+        bg: 0x28_2c_34,
+    }
+}
+
 /// The whole terminal: grid data model + escape-sequence parser feed
 /// point + input writer. Shared between the UI thread (render, input,
 /// resize) and the pump thread (parse).
@@ -276,7 +288,11 @@ pub struct TermGrid {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     pub meta: Arc<Mutex<TermMeta>>,
     pub writer: PtyWriter,
-    pub dark: Arc<AtomicBool>,
+    /// The theme's default foreground/background, shared with the pump
+    /// thread so an OSC 10/11/12 reply names the color the palette paints
+    /// (see `set_default_colors`).
+    pub fg: Arc<AtomicU32>,
+    pub bg: Arc<AtomicU32>,
     /// Rolling tail of raw PTY output (resume-id extraction at exit).
     pub recent: Arc<RecentOutput>,
     /// Only a test needs to plant bytes itself (see `inject_bytes`): the
@@ -294,15 +310,18 @@ impl TermGrid {
         writer: PtyWriter,
         wake: async_channel::Sender<PumpMsg>,
         scrollback: usize,
+        colors: super::palette::DefaultColors,
     ) -> Self {
         let meta = Arc::new(Mutex::new(TermMeta::default()));
-        let dark = Arc::new(AtomicBool::new(true));
+        let fg = Arc::new(AtomicU32::new(colors.fg));
+        let bg = Arc::new(AtomicU32::new(colors.bg));
         let recent = Arc::new(RecentOutput::new(64 * 1024));
         let proxy = EventProxy {
             writer: writer.clone(),
             wake: wake.clone(),
             meta: meta.clone(),
-            dark: dark.clone(),
+            fg: fg.clone(),
+            bg: bg.clone(),
         };
         let term = Arc::new(FairMutex::new(Term::new(
             Config {
@@ -316,13 +335,22 @@ impl TermGrid {
             term,
             meta,
             writer,
-            dark,
+            fg,
+            bg,
             recent,
             #[cfg(test)]
             wake,
             cols,
             rows,
         }
+    }
+
+    /// The theme's default foreground/background, from the UI thread (the
+    /// paint path builds its palette from the same theme, and the pump
+    /// thread answers OSC 10/11/12 from these).
+    pub fn set_default_colors(&self, colors: super::palette::DefaultColors) {
+        self.fg.store(colors.fg, Ordering::Relaxed);
+        self.bg.store(colors.bg, Ordering::Relaxed);
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -530,12 +558,11 @@ pub fn spawn_session(
     cols: u16,
     rows: u16,
     wake: async_channel::Sender<PumpMsg>,
-    dark: bool,
+    colors: super::palette::DefaultColors,
     scrollback: usize,
 ) -> anyhow::Result<(TermGrid, PtyProcess)> {
     let (process, reader, child) = PtyProcess::spawn(cmd, cols, rows)?;
-    let grid = TermGrid::new(cols, rows, process.writer().clone(), wake.clone(), scrollback);
-    grid.dark.store(dark, Ordering::Relaxed);
+    let grid = TermGrid::new(cols, rows, process.writer().clone(), wake.clone(), scrollback, colors);
     spawn_pump(
         grid.term.clone(),
         wake,
@@ -549,6 +576,7 @@ pub fn spawn_session(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use std::time::{Duration, Instant};
     fn visible_text(term: &FairMutex<Term<EventProxy>>) -> String {
@@ -640,7 +668,7 @@ mod tests {
             cwd: std::env::temp_dir(),
         };
         let (grid, _process) =
-            spawn_session(&cmd, 80, 24, wake, true, 1000).expect("spawn sh");
+            spawn_session(&cmd, 80, 24, wake, test_colors(), 1000).expect("spawn sh");
 
         assert!(
             wait_until(&grid.term, "$", Duration::from_secs(5)),
@@ -691,14 +719,14 @@ mod zsh_probe {
     fn feed(bytes: &[u8]) -> String {
         let (tx, _rx) = async_channel::bounded::<PumpMsg>(1);
         let grid =
-            TermGrid::new(80, 24, crate::terminal::pty::PtyWriter::for_test(), tx, 1000);
+            TermGrid::new(80, 24, crate::terminal::pty::PtyWriter::for_test(), tx, 1000, test_colors());
         grid.inject_bytes(bytes);
         nonspace(&grid.term)
     }
 
     fn test_grid() -> TermGrid {
         let (tx, _rx) = async_channel::bounded::<PumpMsg>(1);
-        TermGrid::new(80, 24, crate::terminal::pty::PtyWriter::for_test(), tx, 1000)
+        TermGrid::new(80, 24, crate::terminal::pty::PtyWriter::for_test(), tx, 1000, test_colors())
     }
 
     #[test]
@@ -769,6 +797,7 @@ mod zsh_probe {
 #[cfg(test)]
 mod color_query_tests {
     use super::*;
+    use super::super::palette::DefaultColors;
 
     #[test]
     fn osc_queries_reply_and_follow_theme_changes() {
@@ -786,19 +815,19 @@ mod color_query_tests {
         let capture = Capture(Arc::new(std::sync::Mutex::new(Vec::new())));
         let (wake, _rx) = async_channel::bounded(1);
         let grid =
-            TermGrid::new(80, 24, PtyWriter::test_writer(capture.clone()), wake, 1000);
+            TermGrid::new(80, 24, PtyWriter::test_writer(capture.clone()), wake, 1000, test_colors());
         let mut parser: Processor<StdSyncHandler> = Processor::new();
-        for (dark, expected) in [
+        for (colors, expected) in [
             (
-                true,
+                DefaultColors { fg: 0xab_b2_bf, bg: 0x28_2c_34 },
                 "\x1b]10;rgb:abab/b2b2/bfbf\x1b\\\x1b]11;rgb:2828/2c2c/3434\x1b\\",
             ),
             (
-                false,
+                DefaultColors { fg: 0x2a_2c_33, bg: 0xfa_fa_fa },
                 "\x1b]10;rgb:2a2a/2c2c/3333\x1b\\\x1b]11;rgb:fafa/fafa/fafa\x1b\\",
             ),
         ] {
-            grid.dark.store(dark, Ordering::Relaxed);
+            grid.set_default_colors(colors);
             capture.0.lock().unwrap().clear();
             for byte in b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\" {
                 parser.advance(&mut *grid.term.lock(), *byte);

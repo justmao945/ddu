@@ -55,7 +55,7 @@ ddu/
       pane.rs         # the right pane's surface/mode + file-view/preview caches + scroll memory
       search.rs       # the pane's find bar and the tree's quick open
       persist.rs      # state.json read/write, restore-on-launch
-      panels.rs       # panel toggles + remembered last-dragged widths (+ cached-panel tests)
+      panels.rs       # panel toggles + remembered last-dragged widths (+ panel-cache tests)
       workspace.rs    # projects, folder picker
     session.rs        # Project / AgentSession / AgentCmd model + resume recipes
     terminal/         # ddu-terminal (only complex module; own directory)
@@ -93,7 +93,7 @@ ddu/
   contrib/usage/      # UsageTray (MIT; not a cargo member, no Rust build)
 ```
 
-Dependency direction: `session`, `terminal` and `diff` are leaves — they never name the app. `app` owns every piece of state; each `ui/` panel is a cached child view that renders `&mut AppView`, so `app` and `ui` reference each other by design, while cross-module traffic inside `app` is `cx.emit / subscribe` (terminal wakeups, resize events) or small shared types. Don't touch `gpui-base` (unless building new behavior).
+Dependency direction: `session`, `terminal` and `diff` are leaves — they never name the app. `app` owns every piece of state; each `ui/` panel is a child view that renders `&mut AppView` (cached unless it holds selectable text), so `app` and `ui` reference each other by design, while cross-module traffic inside `app` is `cx.emit / subscribe` (terminal wakeups, resize events) or small shared types. Don't touch `gpui-base` (unless building new behavior).
 
 ```toml
 [dependencies]
@@ -125,7 +125,8 @@ Root (gpui-kit; first level of the window)
    │    │    + sidebar status strip
    │    └─ region   v_flex
    │         ├─ h_resizable("panes")   [ terminal | changes ]
-   │         │    terminal_pane (cached) | diff_pane (cached, only when shown)
+   │         │    terminal_pane (cached) | diff_pane (shown; uncached — it is
+   │         │    the selectable surface)
    │         └─ center status strip
    ├─ dialog layer (gpui-kit `Root::render_dialog_layer`)
    └─ shutdown overlay (while live agents are stopped and ids saved)
@@ -140,7 +141,7 @@ its own `v_resizable("sidebar-split")`.
 * Center pane: no tab bar — the session list selects and `⌘1…⌘9` picks the Nth. The pane renders the selected session's `Entity<TermSession>` by id, or the empty state.
 * Right pane: a `resizable_panel()` added only while the changes pane is shown (⌘R; 340 px base, 200 px floor, 60 % of the viewport as the drag cap). Its header shows the selected file's path, then `+a/−b` when the diff touched the file (nothing when it did not); the copy actions (path / contents) live in the body's context menu. The tree layer carries no summary strip above it — the rows are the whole story.
 * `ElementId` must use domain ids (e.g. `("project-row", project)`, `("diff-line", id)`), **never list indexes**, or add/remove will mix up row state. Never generate random ids inside `render`.
-* Panels are cached child views (`panel_view!`): a panel's subtree — render, layout, paint, hitboxes, listeners, key contexts, focus — is replayed until that panel is notified, so every panel states its own root style *including a size*.
+* Panels are cached child views (`panel_view!`): a panel's subtree — render, layout, paint, hitboxes, listeners, key contexts, focus — is replayed until that panel is notified, so every panel states its own root style *including a size*. The changes pane is mounted uncached: it holds the app's only window-selection participants, which a replayed subtree never re-registers, and the sweep would drop a live selection (`docs/UI.md`).
 * Focus: the terminal owns a `FocusHandle`; clicking a pane focuses the root handle so the cursor goes hollow. `Tab`/`Shift-Tab` are bound in the `Terminal` context (they reach the PTY instead of Root's focus cycling), and the settings window binds Escape/⌘W in its own context.
 * Settings window: a standalone native window with its own `WindowOptions`, singleton via a global `SettingsWindowSlot` — reopening focuses the live one instead of stacking a second. Its content is gpui-component `Settings` chrome, which exposes nothing to accessibility (see `VERIFICATION.md`).
 * The long form of every panel/render invariant below — and the measurements behind them — is `UI.md`.
@@ -307,10 +308,15 @@ struct AgentCmd { program: String, args: Vec<String> }
   `stream_interval(paint_ms)` (50 ms → 66 → 100 ms as a frame's own paint cost
   grows, EWMA-fed). Keystrokes, scrolling and selection bypass the throttle, so
   interactive latency is unchanged.
-* Panels are cached child views: a stream frame notifies the terminal pane alone,
-  an OSC-title change adds the sidebar row and the title-bar breadcrumb, and every
-  other `cx.notify()` fans out through `AppView::notify_panels`. This is what keeps
-  a streaming agent from rebuilding the changes pane 20×/s.
+* Panels are cached child views: a stream frame notifies the terminal pane
+  alone, an OSC-title change adds the sidebar row and the title-bar breadcrumb,
+  and every other `cx.notify()` fans out through `AppView::notify_panels`. This
+  is what keeps a streaming agent from rebuilding the *sidebar and breadcrumb*
+  20×/s; the changes pane re-renders per frame by design (it is the app's only
+  selectable surface — `UI.md`), and mounting it cached cost *more*: the sweep
+  of its selection participants rebuilt the pane on every stream frame and
+  painted the window twice per frame (measured 5.5% → 3% CPU, 2× → 1× root
+  renders with a document open).
 * The terminal element paints only the visible window; large diffs are capped per
   file (§7) and both the pane and the tree are virtual lists: only the visible
   slice is built per frame (a 3 000-row tree builds ~8 rows), with row heights
