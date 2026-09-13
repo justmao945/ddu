@@ -13,7 +13,7 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use super::{diff_file_icon, hover_bg, meta_text, panel_header_px, row_px, scaled, selection_bg};
+use super::{diff_file_icon, hover_bg, meta_text, row_px, scaled, selection_bg};
 use gpui_kit::component::menu::{PopupMenuItem, *};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
@@ -66,23 +66,6 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         .size_full()
         .min_w_0()
         .overflow_hidden()
-        // Summary strip: what the working tree's changes come to. A
-        // clean tree shows nothing here — `+0 −0` is noise, not a
-        // status.
-        .child(
-            div()
-                .h(px(panel_header_px()))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .gap_2()
-                .pl(px(4.))
-                .pr_2()
-                .child(div().flex_1())
-                .when(index.added > 0 || index.removed > 0, |el| {
-                    el.child(plus_minus(index.added, index.removed, cx))
-                }),
-        )
         .child(
             // A flex host, not a plain block: the virtual list inside
             // takes its height from this box, and a block parent leaves
@@ -133,8 +116,6 @@ fn empty_layer(text: &str, cx: &mut Context<AppView>) -> impl IntoElement {
 /// never per frame.
 pub(crate) struct TreeIndex {
     pub(crate) rows: Vec<TreeRow>,
-    pub(crate) added: usize,
-    pub(crate) removed: usize,
 }
 
 /// One rendered row of the flattened tree. `depth` drives the inner
@@ -168,14 +149,10 @@ pub(crate) fn build_index(
 ) -> TreeIndex {
     let mut rows = Vec::new();
     walk("", 0, open, &mut list, &mut rows);
-    TreeIndex {
-        added: 0,
-        removed: 0,
-        rows,
-    }
+    TreeIndex { rows }
 }
 
-/// Depth-first flatten of one directory: files before subdirs, name order
+/// Depth-first flatten of one directory: subdirs before files, name order
 /// from the listing, collapsed subtrees never listed.
 fn walk(
     dir: &str,
@@ -354,9 +331,9 @@ fn dir_row(
         })
 }
 
-/// A file row: the name, tinted and carrying `+a/−b` when the diff found
-/// the file, muted and bare when it is unchanged — both selectable, both
-/// opening the pane.
+/// A file row: the name in the tree's own text color, carrying `+a/−b`
+/// when the diff found the file and bare when it did not — whether a file
+/// changed is what the figures say, not what the name's weight says.
 #[allow(clippy::too_many_arguments)]
 fn file_row(
     path: &str,
@@ -425,13 +402,7 @@ fn file_row(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_color(if changed {
-                    cx.theme().foreground.opacity(0.9)
-                } else {
-                    // Unchanged: listed, but visibly not what the agent
-                    // touched.
-                    cx.theme().foreground.opacity(0.45)
-                })
+                .text_color(cx.theme().foreground.opacity(0.9))
                 .child(name),
         )
         // A changed file with no line figures (binary, or an empty new
@@ -573,7 +544,7 @@ mod tests {
         fn index(&mut self, open: &HashSet<String>, changes: &Changes<'_>) -> TreeIndex {
             let dirs = std::mem::take(&mut self.dirs);
             let mut listed = Vec::new();
-            let mut index = build_index(open, |dir| {
+            let index = build_index(open, |dir| {
                 listed.push(dir.to_owned());
                 // Like `list_dir`: the listing happens first, the diff's
                 // figures are folded into it by full path.
@@ -600,9 +571,6 @@ mod tests {
                     })
                     .collect()
             });
-            let (added, removed) = changes.totals();
-            index.added = added;
-            index.removed = removed;
             self.dirs = dirs;
             self.listed = listed;
             index
@@ -652,15 +620,15 @@ mod tests {
             .dir(
                 "",
                 vec![
-                    file("README.md"),
-                    file("changed.rs"),
                     dir("docs", 0),
                     dir("src", 1),
+                    file("README.md"),
+                    file("changed.rs"),
                 ],
             )
-            .dir("docs", vec![file("a.md"), dir("deep", 0)])
+            .dir("docs", vec![dir("deep", 0), file("a.md")])
             .dir("docs/deep", vec![file("b.md")])
-            .dir("src", vec![file("changed.rs"), dir("ui", 0)])
+            .dir("src", vec![dir("ui", 0), file("changed.rs")])
             .dir("src/ui", vec![file("mod.rs")])
     }
 
@@ -680,15 +648,14 @@ mod tests {
         assert_eq!(
             rows(&index),
             [
-                "README.md",
-                "changed.rs",
                 "docs/ (closed)",
                 "src/",
-                "  changed.rs",
                 "  ui/ (closed)",
+                "  changed.rs",
+                "README.md",
+                "changed.rs",
             ]
         );
-        assert_eq!((index.added, index.removed), (2, 1));
         // The root and `src/` — and *nothing* under `docs/` or `src/ui/`.
         assert_eq!(fs.listed, ["", "src"]);
 
@@ -700,17 +667,17 @@ mod tests {
             removed,
             changed,
             ..
-        } = &index.rows[4]
+        } = &index.rows[3]
         else {
             panic!("a file row");
         };
         assert_eq!(path, "src/changed.rs");
         assert_eq!((*added, *removed, *changed), (2, 1, true));
-        let TreeRow::Dir { path, changed, .. } = &index.rows[3] else {
+        let TreeRow::Dir { path, changed, .. } = &index.rows[1] else {
             panic!("a dir row");
         };
         assert_eq!((path.as_str(), *changed), ("src", 1));
-        let TreeRow::Dir { path, changed, .. } = &index.rows[2] else {
+        let TreeRow::Dir { path, changed, .. } = &index.rows[0] else {
             panic!("a dir row");
         };
         assert_eq!((path.as_str(), *changed), ("docs", 0), "a clean directory");
@@ -728,14 +695,12 @@ mod tests {
         assert_eq!(
             rows(&index),
             [
-                "README.md",
-                "changed.rs",
                 "docs/ (closed)",
-                "src/ (closed)"
+                "src/ (closed)",
+                "README.md",
+                "changed.rs"
             ]
         );
-        // A clean tree shows no totals at all (the strip hides them).
-        assert_eq!((index.added, index.removed), (0, 0));
         assert_eq!(fs.listed, [""]);
     }
 
@@ -750,12 +715,12 @@ mod tests {
         assert_eq!(
             rows(&index),
             [
-                "README.md",
-                "changed.rs",
                 "docs/",
-                "  a.md",
                 "  deep/ (closed)",
-                "src/ (closed)"
+                "  a.md",
+                "src/ (closed)",
+                "README.md",
+                "changed.rs"
             ]
         );
         assert_eq!(fs.listed, ["", "docs"]);
@@ -765,13 +730,13 @@ mod tests {
         assert_eq!(
             rows(&index),
             [
-                "README.md",
-                "changed.rs",
                 "docs/",
-                "  a.md",
                 "  deep/",
                 "    b.md",
-                "src/ (closed)"
+                "  a.md",
+                "src/ (closed)",
+                "README.md",
+                "changed.rs"
             ]
         );
         assert_eq!(fs.listed, ["", "docs", "docs/deep"]);

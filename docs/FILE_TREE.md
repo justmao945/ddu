@@ -7,8 +7,7 @@
 >
 > **Landed (2026-09-13, `DESIGN.md` §7/§12):** §4.1's **index union** — the
 > sidebar lists the whole working tree (tracked + untracked, `.gitignore`
-> respected), with §5.1's `All n · Changed m` strip, the default-collapse rule
-> and the `● n` changed-descendant badge; §4.2's merged row stream
+> respected), with the default-collapse rule
 > (`src/diff/view.rs`); the pane's **whole-file** surface with the `⌘⇧M` /
 > far-right icon-button switch (per session, persisted); and the virtualization
 > §7 asked for — the pane renders a mode-independent `RowStream` through
@@ -16,14 +15,19 @@
 > A Markdown file renders in File mode through gpui-base's own per-block list;
 > a source that cannot be read falls back to rows with the same band. > **Landed (2026-09-13, later the same day):** the tree is **lazy** — §4.1's
 > index union is gone again, in its place a per-directory `list_dir` the layer
-> calls only for the directories it shows, and §5.1's `All n · Changed m` strip
-> with it (one merged tree, no filter, no counts: `+0 −0` and a file total are
-> noise). The pane's header carries its figures the same way (`+8`, not
-> `+8 −0`), a file nobody changed renders as the file itself rather than an
-> empty hunks pane, and **images** — an image file, and `![](…)`/`<img>` inside
-> a rendered document — draw through `src/ui/markdown.rs` instead of going to
-> the http client that cannot read a path.
-> **Not landed:** `R`/column tuning of the strip, and §8's
+> calls only for the directories it shows. §5.1's strip never survives that
+> rewrite — one merged tree, directories before files, every name in the tree's
+> own text color (the `+a/−b` figures mark a change, not the name's weight), no
+> filter, no counts: `+0 −0` and a file total are noise, and a lazy listing
+> cannot count what it has not read. The pane's header carries its figures the
+> same way (`+8`, not `+8 −0`) and drops the word "unchanged" for a file with
+> none; **one** number gutter numbers the file as it is now (a deleted line
+> carries no number) where §5.2 drew two; a file nobody changed renders as the
+> file itself rather than an empty hunks pane; and **images** — an image file,
+> and `![](…)`/`<img>` inside a rendered document — draw through
+> `src/ui/markdown.rs` instead of going to the http client that cannot read a
+> path.
+> **Not landed:** §8's
 > deferred items (syntax highlighting, worktrees). Caps came out at
 > `MAX_VIEW_BYTES` 8 MiB / `MAX_VIEW_LINES` 200 000 (not the 1 MiB / 5 000
 > guessed here): the pane virtualizes, so a large file costs one build pass.
@@ -34,7 +38,8 @@
 * Sidebar lower layer lists **every file in the working tree** — tracked (index)
   and untracked, `.gitignore` respected — as a real directory tree.
 * Changed files carry their `+a/−b` figures and tint **inside that same tree**;
-  unchanged files are listed, muted, and selectable. One tree, no separate
+  unchanged files are listed in the tree's own text color and selectable (the
+  figures, not the name's weight, mark a change). One tree, no separate
   "changes" list.
 * Right pane becomes a view panel with two modes for the selected file:
   1. **Diff** — today's hunks-only view (kept verbatim),
@@ -63,7 +68,7 @@
 | Query | `src/diff/git.rs::head_diff` | `Repository::discover` → `diff_tree_to_workdir_with_index(head_tree, opts)` with `include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true)`; per-file line cap |
 | Flow | `src/app/diff.rs` | 3 s poll (`DIFF_POLL_SECS`, `src/app/mod.rs`), `reload_diff` + `diff_seq` stale guard, `apply_diff` re-pins the selection **by path** through `diff_seed_path`, `DiffSearch` (⌘F) match list = child-row indices |
 | Tree UI | `src/ui/diff_tree.rs` | `TreeNode { files, dirs }` built in `render` from `&[DiffFile]`; `tree_stats` rollup; `flatten` → `TreeRow::{File,Dir}`; `guides(depth)` stripes; `dir_row`/`file_row`; collapse set = "present in `diff_tree_closed` means collapsed" (all-open default); `plus_minus`; `tree_{default,min,max}_h()` (scale-aware) |
-| Pane UI | `src/ui/diff_panel.rs` | `panel_view!` → cached child view; `header` (path + `+a/−b`), `body` (scroll container whose **direct children are the rows**, `row_box(el, w, h)`), `diff_line` (two number gutters measured per file by `gutter_width()` + a sign column (`LINE_CHROME_EXTRAS`), green/red 0.12 tints, yellow search tints 0.30/0.13, `SelectableText` per line), `measure_content_width` (top 16 lines shaped exactly), `hunk_header`, `find_bar` |
+| Pane UI | `src/ui/diff_panel.rs` | `panel_view!` → cached child view; `header` (path + `+a/−b`), `body` (scroll container whose **direct children are the rows**, `row_box(el, w, h)`), `diff_line` (one number gutter measured per file by `gutter_width()`, numbering the file as it is now + a sign column (`LINE_CHROME_EXTRAS`), green/red 0.12 tints, yellow search tints 0.30/0.13, `SelectableText` per line), `measure_content_width` (top 16 lines shaped exactly), `hunk_header`, `find_bar` |
 | State | `src/app/mod.rs` | `diff`, `diff_error`, `diff_file: Option<usize>`, `diff_seed_path`, `diff_tree_closed: HashSet<String>`, `diff_tree_scroll`, `diff_hunks_scroll`, `sidebar_split_state`, `show_diff_tree`, `diff_tree_height_seed`, `diff_search`, `diff_pane: Entity<...PanelView>` |
 | Mount | `src/app/mod.rs:1041`, `src/ui/session_panel.rs:118-130` | `diff_pane.cached(diff_panel::root_style())`; the tree layer is the sidebar's lower splitter slot, `.visible(show_diff_tree)` |
 | Persist | `src/config.rs`, `src/app/persist.rs` | per **session**: `selected_file: Option<String>`, `closed_dirs: Vec<String>`, `tree_height: Option<f32>`; `live_tree_height` reads splitter slot 1 |
@@ -196,7 +201,7 @@ the layer's cost is the visible tree, not the repository.
 * **Rows.** `file_row` keeps the edge-to-edge band, `guides(depth)` stripes, the
   type icon (`ui::diff_file_icon`) and the copy-name/copy-path context menu.
   Changed rows carry `+/−` figures and a bright name; clean rows the same
-  geometry with a muted name and no figures. **A zero side is not printed**
+  geometry in the tree's own text color and no figures. **A zero side is not printed**
   (`+8`, never `+8 −0`; a binary or empty change prints nothing at all), and
   `dir_row` shows a `● n` changed-descendant badge — never a file count, which
   the lazy listing cannot know and the user does not need.
@@ -218,7 +223,7 @@ the layer's cost is the visible tree, not the repository.
   changed, `AppView::surface` folds Diff into File, so a clean `.rs` shows its
   source and a clean `README.md` its rendered document instead of empty hunks.
 * **File** mode = the same row machinery over `FileView::Text` rows: same
-  gutters, same `LINE_CHROME_EXTRAS`, same `SelectableText` per line and
+  gutter, same `LINE_CHROME_EXTRAS`, same `SelectableText` per line and
   `document_order`, `' '` rows untinted, `+`/`-` rows tinted 0.12. `Missing` /
   `Binary` / `TooLarge` fall back to Diff mode with the existing notice style
   (`empty()` / `hunk_header` band).
@@ -243,7 +248,7 @@ the layer's cost is the visible tree, not the repository.
   for `md`/`markdown`/`mdx`. The find bar has no match API over a rendered
   document, so ⌘F over one switches to Diff, whose rows it can match.
 * Keyboard: ⌘⇧M toggles Diff ⇄ File (bound in `key_bindings()`,
-  `src/app/mod.rs`), and the strip's far-right icon button is the same toggle;
+  `src/app/mod.rs`), and the header's far-right icon button is the same toggle;
   ⇧⌘F toggles the tree filter. Both get a routing assertion in the existing
   key-binding test.
 * Cached-panel discipline is preserved: mode changes mutate `AppView` and

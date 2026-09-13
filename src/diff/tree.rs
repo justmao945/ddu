@@ -87,12 +87,6 @@ impl<'a> Changes<'a> {
         self.order.iter().map(|ix| self.path(*ix))
     }
 
-    /// The whole diff's `+/−`, for the sidebar's summary strip.
-    pub fn totals(&self) -> (usize, usize) {
-        self.files
-            .iter()
-            .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed))
-    }
 }
 
 /// One entry of a directory's listing.
@@ -192,12 +186,12 @@ pub fn list_dir(repo: &Repository, dir: &str, changes: &Changes<'_>) -> Vec<Chil
             });
         }
     }
-    // Files first, then directories, each name-sorted: the order the
-    // tree has always drawn, and the only one its tests pin.
-    files.sort_unstable_by(|a, b| a.name().cmp(b.name()));
+    // Directories first, then files, each name-sorted: a tree reads top
+    // down through its folders before it lists what sits beside them.
     dirs.sort_unstable_by(|a, b| a.name().cmp(b.name()));
-    files.extend(dirs);
-    files
+    files.sort_unstable_by(|a, b| a.name().cmp(b.name()));
+    dirs.extend(files);
+    dirs
 }
 
 #[cfg(test)]
@@ -239,7 +233,6 @@ mod tests {
         assert_eq!(changes.count_under("src-gen"), 1);
         assert_eq!(changes.count_under("docs"), 0);
 
-        assert_eq!(changes.totals(), (13, 14));
         let paths: Vec<&str> = changes.paths().collect();
         assert_eq!(paths, ["README.md", "src-gen/b.rs", "src/main.rs", "src/ui/mod.rs"]);
     }
@@ -283,12 +276,12 @@ mod tests {
                 format!("{kind}:{}", c.name())
             })
             .collect();
-        // Files first (name-sorted), then directories; `.gitignore` and
-        // the ignored file are gone, `target/` (ignored, no tracked
-        // content) is gone with them.
+        // Directories first, then files (each name-sorted);
+        // `.gitignore` and the ignored file are gone, `target/`
+        // (ignored, no tracked content) is gone with them.
         assert_eq!(
             names,
-            ["f:.gitignore", "f:README.md", "f:untracked.rs", "d:src"],
+            ["d:src", "f:.gitignore", "f:README.md", "f:untracked.rs"],
             "listing of the repository root"
         );
 
@@ -336,7 +329,7 @@ mod tests {
             .iter()
             .map(|c| c.name().to_owned())
             .collect();
-        assert_eq!(inner, ["main.rs", "ui"]);
+        assert_eq!(inner, ["ui", "main.rs"]);
 
         let _ = std::fs::remove_dir_all(&root);
     }

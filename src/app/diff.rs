@@ -266,12 +266,9 @@ impl AppView {
         // Field-level borrows: the listing closure reads the repo and the
         // diff while the rows land in `tree_index`.
         let open = &self.diff_tree_open;
-        let mut index = crate::ui::diff_tree::build_index(open, |dir| {
+        let index = crate::ui::diff_tree::build_index(open, |dir| {
             crate::diff::tree::list_dir(&repo, dir, &changes)
         });
-        let (added, removed) = changes.totals();
-        index.added = added;
-        index.removed = removed;
         self.tree_index = Some(index);
     }
 

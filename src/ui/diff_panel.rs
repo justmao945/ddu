@@ -132,17 +132,10 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         // already at capacity, and a header that ellipsizes the file's
         // name to print its length has its priorities backwards (File
         // mode's gutter numbers every line anyway).
-        .child(match file {
-            // An unchanged file has no figures — say so instead of
-            // printing `+0 −0`.
-            None => div()
-                .flex_shrink_0()
-                .text_sm()
-                .text_color(cx.theme().foreground.opacity(0.45))
-                .child("unchanged")
-                .into_any_element(),
-            Some(f) => plus_minus(f.added, f.removed, cx).into_any_element(),
-        })
+        // A file the diff did not touch has no figures to show — the
+        // header then carries the path alone, rather than saying
+        // "unchanged" in words the pane does not need.
+        .when_some(file, |el, f| el.child(plus_minus(f.added, f.removed, cx)))
         .child(mode_button(this, cx))
 }
 
@@ -479,7 +472,7 @@ fn image_body(this: &AppView, _cx: &mut Context<AppView>) -> impl IntoElement {
 /// not the file's first row.
 /// Declared row heights for the virtual list. Line rows are single
 /// nowrap lines of `text_sm`, so one height fits all of them (the number
-/// gutters carry the row's only extra: `pt(2px)`); hunk header bands add
+/// gutter carries the row's only extra: `pt(2px)`); hunk header bands add
 /// their padding, with extra top spacing between hunks; a note row is a
 /// bare line. Computed with the framework's own text-style math so the
 /// declared sizes match what the rows lay out at.
@@ -690,10 +683,10 @@ fn diff_line(
     gutter_w: Pixels,
     cx: &mut Context<AppView>,
 ) -> Stateful<Div> {
-    let (old, new) = (
-        line.old_no.map(|n| n.to_string()).unwrap_or_default(),
-        line.new_no.map(|n| n.to_string()).unwrap_or_default(),
-    );
+    // The gutter numbers the file as it is *now*: a context or added
+    // line carries its line number in the working tree, a deleted line
+    // carries none (it is not in the file any more).
+    let number = line.new_no.map(|n| n.to_string()).unwrap_or_default();
     let tint = match line.kind {
         '+' => Some(cx.theme().green.opacity(0.12)),
         '-' => Some(cx.theme().red.opacity(0.12)),
@@ -726,8 +719,7 @@ fn diff_line(
         .font_family(mono.clone())
         .text_sm()
         .when_some(search_bg.or(tint), |el, bg| el.bg(bg))
-        .child(gutter(old, gutter_w, cx))
-        .child(gutter(new, gutter_w, cx))
+        .child(gutter(number, gutter_w, cx))
         .child(
             div()
                 .w(px(14.))
@@ -760,9 +752,9 @@ fn diff_line(
 
 /// Longest lines shaped exactly per render (bound on text-system calls).
 const MEASURE_CANDIDATES: usize = 16;
-/// Chrome left of a line's text besides the two number gutters (their
-/// width is measured per stream — see `gutter_width`): the sign column
-/// (14px) and the text block's `pl_2`/`pr_3` padding.
+/// Chrome left of a line's text besides the number gutter (its width is
+/// measured per stream — see `gutter_width`): the sign column (14px) and
+/// the text block's `pl_2`/`pr_3` padding.
 const LINE_CHROME_EXTRAS: f32 = 14. + 8. + 12.;
 /// Hunk header horizontal padding (`px_2` on both sides).
 const HEADER_CHROME: f32 = 16.;
@@ -779,7 +771,7 @@ fn measure_content_width(
     window: &mut Window,
     cx: &mut Context<AppView>,
 ) -> Pixels {
-    let line_chrome = f32::from(gutter_w) * 2. + LINE_CHROME_EXTRAS;
+    let line_chrome = f32::from(gutter_w) + LINE_CHROME_EXTRAS;
     let font = Font {
         family: cx.theme().mono_font_family.clone(),
         ..Default::default()
@@ -969,7 +961,9 @@ fn gutter_width(stream: &RowStream<'_>, window: &mut Window, cx: &mut Context<Ap
         .shape_line(sample, size, &[run], None)
         .width();
     // `pr_2` keeps the digits off the sign column, plus a pixel of slack.
-    (digits_w + px(8. + 1.)).max(px(scaled(36.)))
+    // One gutter, not two: the floor only has to keep a one-digit file
+    // from looking cramped.
+    (digits_w + px(8. + 1.)).max(px(scaled(24.)))
 }
 
 /// `1234567` → `1,234,567` (the truncation note's line budget).

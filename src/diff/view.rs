@@ -113,7 +113,8 @@ pub enum ViewRow {
 /// A whole file, ready to render.
 pub struct TextFileView {
     pub rows: Vec<ViewRow>,
-    /// Highest line number any row carries (the gutter's width).
+    /// Highest line number any row carries (the pane's single gutter:
+    /// the line this row has in the file as it is now).
     pub max_line_no: u32,
     /// The diff that tinted this view was capped, or was too stale to
     /// trust: rows past the cap (or all of them) carry no tint.

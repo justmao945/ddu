@@ -336,7 +336,7 @@ fn markdown_of(block: &ImageBlock) -> String {
 mod tests {
     // Explicit, not `use super::*`: the parent's glob imports would drag
     // in every component item, and `#[test]` must stay the test harness's.
-    use super::{ImageBlock, Part, html_images, local_path, mdast, parse_block};
+    use super::{ImageBlock, Part, local_path, mdast, parse_block};
     use std::path::{Path, PathBuf};
     // Aliased: the component's own `Text` is in scope through its glob
     // import, and the two are not interchangeable.

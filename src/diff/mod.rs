@@ -249,14 +249,16 @@ impl<'a> RowStream<'a> {
         hits
     }
 
-    /// Highest line number in the stream (the pane's gutter width).
+    /// Highest line number the stream prints (the pane's gutter width).
+    /// The gutter numbers the file as it is now, so this is the new-side
+    /// maximum: a deletion carries no number of its own.
     pub fn max_line_no(&self) -> u32 {
         match &self.src {
             RowSrc::Diff(file) => file
                 .hunks
                 .iter()
                 .flat_map(|h| h.lines.iter())
-                .filter_map(|l| l.old_no.max(l.new_no))
+                .filter_map(|l| l.new_no)
                 .max()
                 .unwrap_or(0),
             RowSrc::View(v) => v.max_line_no,

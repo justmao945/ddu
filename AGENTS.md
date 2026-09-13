@@ -94,8 +94,9 @@ editing, and where the long form lives.
 - **The tree lists the working tree lazily** (`diff/tree.rs`): only the root and
   the directories the user has expanded are read (`list_dir`), merged with the
   poll's diff, so a 40k-file repository draws a few hundred rows. Clean files are
-  listed muted and selectable, so anything that assumed "a row means a changed
-  file" — the selection, the pane's rows, the find bar — goes through
+  listed (directories first, in the tree's own text color — the figures mark a
+  change, not the name's weight), so anything that assumed "a row means a
+  changed file" — the selection, the pane's rows, the find bar — goes through
   `AppView::selection` (a path) instead. A file nobody changed renders as the
   file itself (`AppView::surface` folds Diff into File), and a zero figure is
   never printed (`+8`, not `+8 −0`).
