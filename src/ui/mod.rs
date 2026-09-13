@@ -10,6 +10,7 @@ pub(crate) mod code_text;
 pub(crate) mod diff_panel;
 pub(crate) mod markdown;
 pub(crate) mod diff_tree;
+pub(crate) mod palette;
 pub(crate) mod session_panel;
 pub(crate) mod settings;
 pub(crate) mod status_bar;

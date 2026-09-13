@@ -51,6 +51,11 @@ impl DiffSearch {
 pub(crate) struct FileSearch {
     pub input: Entity<InputState>,
     pub open: bool,
+    /// The hit list's scroll position: a palette is narrow and shows a
+    /// window of the hits, so the cursor is what scrolls it. A virtual
+    /// list's handle, because that is what the hits are — the list is
+    /// capped (`FILE_SEARCH_MAX`), not short.
+    pub scroll: VirtualListScrollHandle,
     /// Every path the search can reach: the index's tracked files plus
     /// whatever the poll found untracked — the same universe the tree
     /// lists, and no walk to get it (the index is already in memory).
@@ -72,6 +77,7 @@ impl FileSearch {
         Self {
             input,
             open: false,
+            scroll: VirtualListScrollHandle::new(),
             paths: Vec::new(),
             matches: Vec::new(),
             current: 0,
@@ -85,20 +91,17 @@ impl FileSearch {
 }
 
 impl AppView {
-    /// Open the quick open (or refocus it when already open) and reveal
-    /// the layer it lives in: with the sidebar or the file tree hidden,
-    /// a search bar would have nowhere to be. The whole query is
-    /// selected, so typing replaces it.
+    /// Open the quick open (or refocus it when already open). The
+    /// palette floats over the workspace, so the panels stay as they
+    /// are — nothing is revealed, and nothing is hidden. The whole query
+    /// is selected, so typing replaces it.
     pub(crate) fn open_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // No session, no working tree to search.
         if self.current_session().is_none() {
             return;
         }
-        if !self.show_sessions {
-            self.set_sessions(true, cx);
-        }
-        self.show_diff_tree = true;
         self.file_search.open = true;
+        self.file_search.scroll.set_offset(point(px(0.), px(0.)));
         self.refresh_file_paths();
         self.file_search.input.update(cx, |input, cx| {
             input.focus(window, cx);
@@ -151,6 +154,10 @@ impl AppView {
         self.file_search.matches =
             crate::diff::tree::search(&self.file_search.paths, &query, FILE_SEARCH_MAX);
         self.file_search.current = 0;
+        // A new ranking is read from its top: keeping the old offset
+        // would open the list part-way down an answer the user has not
+        // seen yet.
+        self.file_search.scroll.set_offset(point(px(0.), px(0.)));
         cx.notify();
     }
 
@@ -165,6 +172,12 @@ impl AppView {
         } else {
             (self.file_search.current + 1) % len
         };
+        // The cursor is the way the list scrolls: the palette shows a
+        // window of the hits, and stepping past its edge has to bring
+        // the next row into it.
+        self.file_search
+            .scroll
+            .scroll_to_item(self.file_search.current, ScrollStrategy::Nearest);
         cx.notify();
     }
 
@@ -995,6 +1008,38 @@ mod tests {
                         );
                         assert!(!v.file_search.open, "the bar closes on the pick");
                     });
+                });
+                // The keys a palette is actually used with: step the
+                // cursor with the arrows and open what it landed on. The
+                // field is a single-line input, so `down` is nothing to
+                // it and the palette's own binding is what lands (see
+                // `app::tests::the_palette_steps_with_the_arrows_the_field_gives_up`).
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| v.open_file_search(window, cx));
+                });
+                vcx.simulate_input("rs");
+                view.update(cx, |v, _| {
+                    assert!(
+                        v.file_search.matches.len() >= 2,
+                        "the arrows need somewhere to go"
+                    );
+                });
+                vcx.simulate_keystrokes("down");
+                view.update(cx, |v, _| assert_eq!(v.file_search.current, 1, "down steps"));
+                vcx.simulate_keystrokes("up");
+                view.update(cx, |v, _| assert_eq!(v.file_search.current, 0, "up steps back"));
+                vcx.simulate_keystrokes("down");
+                let cursor = view.update(cx, |v, _| {
+                    v.file_search.current_path().map(str::to_owned)
+                });
+                vcx.simulate_keystrokes("enter");
+                view.update(cx, |v, _| {
+                    assert!(!v.file_search.open, "enter closes the palette");
+                    assert_eq!(
+                        v.current_diff_path().map(str::to_owned),
+                        cursor,
+                        "enter opens the file the cursor is on"
+                    );
                 });
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();

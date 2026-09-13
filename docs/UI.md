@@ -231,12 +231,46 @@ unbound still reaches the shell. Pin the split with
 `app::tests::shell_control_keys_stay_with_the_shell`, and the quick open's chord
 with `app::tests::the_quick_open_owns_its_chord_in_every_context`.
 
-Both search bars take their keys the same way: the bar carries
+All three search bars take their keys the same way: the bar carries
 `track_focus(input)` plus a `key_context` (`DiffSearch` / `TerminalSearch` /
 `FileSearch`), and the actions are handled on the bar (Enter, Escape — dispatched
 by the input itself) or on `AppView` (⌘G/⌘⇧G, so they keep working if focus
-drifts mid-search). The plain arrows are the input's own: a bar cannot claim
-them, because the deepest context on the dispatch path is the input's `Input`.
+drifts mid-search).
+
+The plain arrows belong to the input, which is why the bars step with ⌘G/⌘⇧G —
+with one exception the palette exploits. gpui-base binds `up`/`down` for any
+input in the deeper `Input` context, but it *registers handlers* for them only
+when the field is multi-line: in the palette's single-line field the action is
+dispatched into nothing, the chain moves on to the next binding, and the
+palette's own — one context shallower — steps the cursor. Pinned by
+`app::tests::the_palette_steps_with_the_arrows_the_field_gives_up` (the app's
+half; the library's keymap is not visible from a unit test) and exercised end to
+end — type, `down`, `up`, Enter — in
+`app::diff::tests::quick_open_searches_the_working_tree_and_opens_the_hit`.
+
+## The quick open's palette
+
+⌘P opens a **floating palette** over the workspace (`ui/palette.rs`), not a
+search inside the sidebar: the hits are a list of paths, the tree is a tree, and
+putting the first inside the second put a sidebar-sized box around an answer
+that wants a palette's width. Nothing is revealed and nothing is hidden — the
+panels stay exactly as the user left them, and committing a hit selects the file
+exactly as a click in the tree does (ancestors opened, pane taking it).
+
+It is two layers: a scrim (`absolute inset_0`, click-away closes, and no scroll
+handler of its own so a wheel over it never reaches the panes) and the card
+hanging from the top. The card's geometry is a share of the window — `TOP_SHARE`
+down, `WIDTH_SHARE` wide, clamped between `MIN_WIDTH` and `MAX_WIDTH` — with the
+scaled px bounds following the desktop text scale; the row heights are the rows'
+own `scaled()`.
+
+Its list height is **stated, not measured**: one row per hit up to
+`VISIBLE_ROWS`, then scrolling, with the cursor what scrolls it
+(`scroll_to_item(.., Nearest)` in `file_search_step`). A virtual list measures
+nothing, so a host that leaves the height to its content lays out at zero — the
+card would render as a field with no hits under it. The card is mounted as the
+last child of `#app-root` and before `Root::render_dialog_layer`, so it paints
+over every panel and under any dialog opened from it.
 
 ## Terminal glyphs
 

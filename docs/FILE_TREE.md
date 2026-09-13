@@ -215,15 +215,17 @@ the layer's cost is the visible tree, not the repository.
   every lowercase one. A case-only pair falls back to exact bytes, so the order
   stays total; the fold is byte-wise, because the listing is re-sorted on every
   expansion and a `to_lowercase()` per comparison allocates twice per pair.
-* **Quick open (⌘P / ⌃P, landed)** is not a filter *of the tree* — the lazy
-  listing has only the open directories, so it could not answer "any file in the
-  project". It searches the working tree's own path list (the index's tracked
-  files plus the poll's untracked ones — the same universe the tree can show)
-  with `tree::search`: a case-insensitive subsequence match, ranked by where it
-  lands (name prefix → name hit → name subsequence → path hit → path
-  subsequence), ties to the shorter path, capped at 200 hits. The bar replaces
-  the layer while it is open; Enter opens the cursor's hit with its ancestors
-  expanded, so the tree is where the search left it.
+* **Quick open (⌘P / ⌃P, landed)** is not part of the tree at all — neither a
+  filter *of* it (the lazy listing has only the open directories, so it could not
+  answer "any file in the project") nor a layer that swaps in for it. It is a
+  floating palette over the workspace (`ui/palette.rs`): the tree stays exactly
+  as it was, and committing a hit opens the cursor's file with its ancestors
+  expanded in the tree, so the tree is where the search left it. It searches the
+  working tree's own path list (the index's tracked files plus the poll's
+  untracked ones — the same universe the tree can show) with `tree::search`: a
+  case-insensitive subsequence match, ranked by where it lands (name prefix →
+  name hit → name subsequence → path hit → path subsequence), ties to the
+  shorter path, capped at 200 hits.
 * **Refresh.** A changed file appearing/disappearing only changes badges and
   tints — no expansion state is disturbed, so the tree does not jump under the
   user when an agent saves a file.

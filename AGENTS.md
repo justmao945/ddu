@@ -50,7 +50,9 @@ editing, and where the long form lives.
   (gpui-base's lays out the runs it built from its own text, so a highlighted
   row cannot ride it); one selection participant per row, same contract.
 - `src/ui/` — panels (`session_panel`, `terminal`, `diff_panel`, `diff_tree`,
-  `status_bar`, `title_bar`), `settings/` (standalone window), `markdown.rs`
+  `status_bar`, `title_bar`), `palette.rs` (the quick open's floating overlay —
+  scrim + card over the workspace, never inside a panel), `settings/`
+  (standalone window), `markdown.rs`
   (the image plugin a rendered document goes through: gpui's own text view sends
   every `![]()`/`<img>` to the *http* client, which cannot read a path, so the
   block holding an image is rendered here through `img(Resource::Path)`), and
@@ -153,8 +155,12 @@ editing, and where the long form lives.
 - **Keyboard**: app shortcuts are `secondary-` chords (copy/paste/find are
   `⌃⇧` on Linux); a chord a binding claims never reaches the PTY — `⌃P` (the
   quick open) trades readline's previous-history for a file search, pinned by
-  `app::tests::the_quick_open_owns_its_chord_in_every_context`. Any terminal
-  action shown in a menu must wire `PopupMenuItem::action` (`docs/UI.md`).
+  `app::tests::the_quick_open_owns_its_chord_in_every_context`. A search bar's
+  arrows belong to its input, so the bars step with ⌘G/⌘⇧G — except the
+  palette, whose single-line field makes gpui-base's `up`/`down` binding land on
+  a handler that was never registered, letting the palette's own binding take
+  them (`docs/UI.md`). Any terminal action shown in a menu must wire
+  `PopupMenuItem::action` (`docs/UI.md`).
 - **Modal dialogs**: pickers go through `rfd::AsyncFileDialog` deferred with
   `window.spawn`; confirm dialogs use `ui::dialog_footer(...)`, never a
   hand-rolled `DialogFooter` pair (`docs/UI.md`).

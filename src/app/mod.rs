@@ -418,6 +418,14 @@ fn key_bindings() -> Vec<KeyBinding> {
         // to the input's own caret. Enter/Escape come from the input.
         KeyBinding::new("secondary-g", FileSearchNext, Some("FileSearch")),
         KeyBinding::new("secondary-shift-g", FileSearchPrev, Some("FileSearch")),
+        // The palette's arrows. The field is an input, and gpui-base
+        // claims up/down for every input in the deeper "Input" context —
+        // but it *registers* the move actions only for a multi-line
+        // field, so a single-line one falls through to the palette,
+        // which is one context shallower. This is the whole reason the
+        // palette can navigate with the arrows every other one uses.
+        KeyBinding::new("down", FileSearchNext, Some("FileSearch")),
+        KeyBinding::new("up", FileSearchPrev, Some("FileSearch")),
         // The terminal bar's match-cycling: its "TerminalSearch"
         // context (set on the bar in `ui::terminal`) is deeper
         // than the surface's "Terminal", so these win while its
@@ -493,6 +501,28 @@ mod tests {
             vec!["input::Copy", "ddu::TermCopy"]
         );
         assert_eq!(chain(COPY_ACCEL, &["Root"]), vec!["input::Copy"]);
+    }
+
+    /// The palette's arrows are the app's — in the palette's own context,
+    /// and nowhere else, so the terminal keeps its shell's history keys.
+    ///
+    /// Its field is a single-line input: gpui-base binds up/down for any
+    /// input in the deeper "Input" context, but *registers handlers* for
+    /// them only when the input is multi-line, so even if the library's
+    /// binding is in the keymap the palette's action is the one that
+    /// lands and the cursor is what moves. What a test can pin is the
+    /// app's half of that — the library's keymap is not visible from
+    /// here.
+    #[test]
+    fn the_palette_steps_with_the_arrows_the_field_gives_up() {
+        assert_eq!(winner("up", &["Root", "FileSearch"]), "ddu::FileSearchPrev");
+        assert_eq!(
+            winner("down", &["Root", "FileSearch"]),
+            "ddu::FileSearchNext"
+        );
+        assert_eq!(winner("up", &["Root", "Terminal"]), "");
+        assert_eq!(winner("down", &["Root", "Terminal"]), "");
+        assert_eq!(winner("up", &["Root"]), "");
     }
 
     /// The quick open is the app's chord everywhere — including in the
@@ -1075,13 +1105,9 @@ impl Render for AppView {
                 let six = this.current_session;
                 this.request_close_session(p, six, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleSessions, window, cx| {
-                this.toggle_sessions(window, cx)
-            }))
+            .on_action(cx.listener(|this, _: &ToggleSessions, _, cx| this.toggle_sessions(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
-            .on_action(cx.listener(|this, _: &ToggleDiffTree, window, cx| {
-                this.toggle_diff_tree(window, cx)
-            }))
+            .on_action(cx.listener(|this, _: &ToggleDiffTree, _, cx| this.toggle_diff_tree(cx)))
             .on_action(cx.listener(|this, _: &ToggleViewMode, _, cx| this.toggle_view_mode(cx)))
             // The diff pane's find bar. ⌘G/⌘⇧G resolve only while the
             // bar's input holds focus (the "DiffSearch" key context);
@@ -1260,6 +1286,11 @@ impl Render for AppView {
                     ),
                 )
             })
+            // The quick open's palette (⌘P): a scrim and a card over the
+            // whole workspace, mounted *above* the panels and below the
+            // dialog layer, so a confirm dialog opened from a palette (or
+            // while one is up) still paints over everything.
+            .child(ui::palette::render(self, cx))
             // Overlay layers (anchored, no layout impact): dialogs opened via
             // window.open_dialog / open_alert_dialog are hosted here —
             // gpui-kit requires the app to render these layers.

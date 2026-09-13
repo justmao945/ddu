@@ -72,7 +72,7 @@ fn toggle_sessions(this: &AppView, cx: &mut Context<AppView>) -> Button {
         .small()
         .tooltip(format!("Toggle sidebar ({})", crate::app::accel_hint("B")))
         .accessibility_label(format!("Toggle sidebar ({})", crate::app::accel_hint("B")))
-        .on_click(cx.listener(|this, _, window, cx| this.toggle_sessions(window, cx)))
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_sessions(cx)))
 }
 
 fn toggle_diff(this: &AppView, cx: &mut Context<AppView>) -> Button {
@@ -103,5 +103,5 @@ fn toggle_diff_tree(this: &AppView, cx: &mut Context<AppView>) -> Button {
         .small()
         .tooltip(format!("Toggle file tree ({})", crate::app::accel_hint("T")))
         .accessibility_label(format!("Toggle file tree ({})", crate::app::accel_hint("T")))
-        .on_click(cx.listener(|this, _, window, cx| this.toggle_diff_tree(window, cx)))
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_tree(cx)))
 }
