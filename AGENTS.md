@@ -3,6 +3,7 @@
 Multi-agent workspace: left = projects + agent sessions, center = PTY terminal
 (runs `terminal` / `claude` / `codex` CLIs), right = live git diff. Rust +
 `gpui-kit = "0.6"` (re-exports `gpui-pre 0.3.3` + `gpui-component 0.6`).
+Targets macOS and Linux (X11/Wayland).
 License: Apache-2.0, GPL-free throughout. Design docs: `docs/DESIGN.md` (the app),
 `docs/AGENT_CORE.md` (in-process agent core — design, not yet implemented).
 
@@ -17,8 +18,9 @@ License: Apache-2.0, GPL-free throughout. Design docs: `docs/DESIGN.md` (the app
 - `src/session.rs` — domain model (`Project`, `AgentSession`, `AgentStatus`),
   launch presets, `initial_projects()` (= cwd).
 - `src/config.rs` — persistence split in two JSON files under
-  `~/Library/Application Support/ddu/`: `settings.json` (user
-  settings, one-to-one with the Settings window) and `state.json`
+  `~/Library/Application Support/ddu/` (macOS) or
+  `$XDG_CONFIG_HOME/ddu/` / `~/.config/ddu/` (Linux): `settings.json`
+  (user settings, one-to-one with the Settings window) and `state.json`
   (runtime workspace snapshot: projects, the active project/session,
   panel widths, per-project diff state, last agent resume hint, and
   per-row `live` — the rows still running at the last save, which the
@@ -35,10 +37,47 @@ License: Apache-2.0, GPL-free throughout. Design docs: `docs/DESIGN.md` (the app
 - `src/ui/` — panels: `session_panel`, `terminal`, `diff_panel`,
   `status_bar`, `title_bar`, `settings_window` (standalone native window,
   singleton via a global slot). Shared metrics/mappings in
-  `src/ui/mod.rs` (`PANEL_HEADER_PX` 32, `ROW_PX` 26, selection =
-  `foreground.opacity(0.12)`, accent reserved for activity).
+  `src/ui/mod.rs` (`scaled(base)` — all shell geometry (row heights,
+  panel widths, tree-layer heights, indents) is a base px value at
+  text-scale factor 1.0 multiplied by
+  `config::desktop_text_scale()`, so layout tracks the GTK text scale
+  the fonts already follow; selection = `foreground.opacity(0.12)`,
+  accent reserved for activity).
 
-## Running — LaunchServices only (macOS 26)
+## Running
+
+### Linux (X11 / Wayland)
+
+- Dev: `scripts/linux.sh run` — builds `--release` and runs the binary from
+  `$DDU_DIR` (default: this repo). `initial_projects()` seeds from the
+  process cwd, so the launch directory *is* the workspace. `DDU_STATE_PATH`
+  / `DDU_SETTINGS_PATH` isolate a test workspace.
+- Install: `scripts/linux.sh install` — copies the binary to
+  `~/.local/bin/ddu` (prefix: `DDU_INSTALL_DIR`), installs `assets/icon.svg`
+  into the hicolor theme and writes `~/.local/share/applications/ddu.desktop`
+  with `Path=` set to the launch directory (a desktop launch would otherwise
+  start in `$HOME`).
+- No bundle, no LaunchServices, no signing — a plain binary whose window the
+  compositor maps normally. There is nothing here to keep in sync with the
+  macOS bundle flow, so the two never collide (the scripts write different
+  paths).
+- State: `$XDG_CONFIG_HOME/ddu/` (default `~/.config/ddu/`).
+- Keyboard: every app shortcut is a `secondary-` chord — `⌘` on macOS, `⌃`
+  on Linux (`src/app/mod.rs::key_bindings`). Copy/paste/find are the
+  exception: a terminal shares those keys with the shell, so on Linux they
+  live in the `⌃⇧` space (`Ctrl+C` must stay SIGINT). A chord a binding
+  claims never reaches the PTY — gpui's bubble-phase action dispatch stops
+  propagation before the terminal's key listener runs — so the Linux `⌃R`,
+  `⌃N`, `⌃O`, `⌃T`, `⌃B`, `⌃W` chords are ddu's, not readline's. Anything
+  unbound still reaches the shell. Pin the split with
+  `app::tests::shell_control_keys_stay_with_the_shell`.
+- Shell default: `config::default_shell()` takes `$SHELL` only when it names
+  a real file, then the first installed of `/bin/bash`, `/usr/bin/bash`,
+  `/bin/sh`, `/bin/zsh`. Never hardcode a shell — a minimal environment (a
+  desktop entry, a session without `SHELL` exported) otherwise spawns a
+  missing `/bin/zsh` and every restored session dies with a spawn ENOENT.
+
+### macOS 26 — LaunchServices only
 
 - Dev: `scripts/dev.sh` — builds, bundles `target/ddu-dev.app` as "Day Day
   Up Dev" (`dev.just.ddu.dev`), isolates state under
@@ -116,6 +155,15 @@ the footer when Enter should confirm. One-off informational dialogs
   `accessibility_label`. gpui-component's own chrome (the settings page nav, its
   list/tree widgets) exposes nothing, so drive that by coordinates and keep
   actions reversible: a click in the terminal pane types into a live agent.
+- On Linux there is no AX tree and, on a Wayland session without a
+  screenshot portal, no pixels either — verify by observable state instead:
+  `hyprctl clients -j` (the window mapped, its pid and size), `ps -eo pid,ppid,cmd`
+  (the PTY child of the ddu pid is the restored/default session's shell), the
+  state file (`DDU_STATE_PATH`) for what the app persisted, and
+  `hyprctl binds -j` that no compositor chord collides with the app's
+  accelerators (omarchy/Hyprland grab `SUPER`/`CTRL+ALT` chords, never bare
+  `CTRL` or `CTRL+SHIFT`). A fresh state spawns the default launcher by itself,
+  so the shell child proves the PTY path without touching the UI.
 - The diff find bar ("Find in diff") needs a selected file first: ⌘T drops the
   file-tree layer in under the sessions, ⌘R opens the changes pane, then click a
   row in the tree and ⌘F. The layer toggles make the whole sequence replayable
@@ -178,6 +226,19 @@ the footer when Enter should confirm. One-off informational dialogs
   breadcrumb ended up against the bar's bottom border). Every panel
   states a size (`size_full` / `h_full`), and each panel states
   `root_style()` once so the mount and the panel's root element agree.
+- Splitter widths (`shell_state` / `panes_state` in `src/app/mod.rs`):
+  gpui-base pins every slot at its first measured bounds
+  (`update_panel_size`), and once all slots are pinned
+  `adjust_to_container_size` proportionally REWRITES every recorded
+  width on each window resize. Render therefore keeps the flex slots
+  unpinned (`reset_panel` on the region and the center pane — the
+  adjust then bails) and re-asserts the recorded sidebar/diff widths
+  when a resize already drifted them (`resize_panel`, flagged via
+  `suppress_resize_records` so the drag-persist subscription ignores
+  the synthetic event). Never let a render-time correction fire
+  unconditionally: when the window is too narrow to honor a width, the
+  clamped layout is correct and retrying would emit Resized every
+  frame.
 - Stream repaint pacing is adaptive: the pump spaces output-driven
   repaints by `stream_interval(paint_ms)` — 50 ms (20 fps) while the
   terminal element's own paint is cheap, then 66 / 100 ms once a frame's

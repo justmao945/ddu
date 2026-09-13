@@ -1,6 +1,6 @@
 # Day Day Up
 
-**ddu** is a native macOS workspace for AI coding agents: run **claude**, **codex**, or a plain shell session in any project — several at once — and watch the working tree's git diff update live in the next pane. One window, three panes, everything in view.
+**ddu** is a native workspace for AI coding agents — macOS and Linux: run **claude**, **codex**, or a plain shell session in any project — several at once — and watch the working tree's git diff update live in the next pane. One window, three panes, everything in view.
 
 > Inspired by [Zed](https://zed.dev) — for the feel of a fast, native UI, not its code. Built on [gpui](https://github.com/zed-industries/zed) and [gpui-kit](https://github.com/longbridge/gpui-kit).
 
@@ -14,30 +14,48 @@
 - **Real terminals, not a text box** — every session runs in a PTY with streaming ANSI color, scrollback, and live resize, so agent CLIs behave exactly as they do in your shell.
 - **Live git diff** — working tree vs. HEAD: modified, staged, and untracked files with per-file `+`/`−` stats and the current branch, refreshed automatically as your agents edit.
 - **Session lifecycle** — spawn, kill, and restart sessions; get notified when an agent exits or fails. ddu keeps each session's conversation id, so an agent chat can be resumed later (`claude --resume` / `codex resume`) — and the sessions that were still running when you quit come back running on the next launch, agents resumed from that id.
-- **Settings window** — theme, shell, and terminal font, in a dedicated window (`⌘,`).
-- **Persistent workspace** — projects, panel layout, and per-project diff state survive relaunches (`~/Library/Application Support/ddu/`), and every session that was still running is started again.
+- **Settings window** — theme, shell, and terminal font, in a dedicated window (`⌘,` / `Ctrl+,`).
+- **Persistent workspace** — projects, panel layout, and per-project diff state survive relaunches (`~/Library/Application Support/ddu/` on macOS, `~/.config/ddu/` on Linux), and every session that was still running is started again.
 
 ## Keyboard shortcuts
 
-| Keys | Action |
-| --- | --- |
-| `⌘N` | New agent session |
-| `⌘O` | Add project (folder picker) |
-| `⌘1`…`⌘9` | Select the Nth session in the current project |
-| `⌘T` | Toggle the diff file tree |
-| `⌘B` | Toggle the sessions sidebar |
-| `⌘R` | Toggle the diff panel |
-| `⌘W` | Close session |
-| `⌘,` | Open settings |
-| `⌘C` / `⌘V` | Copy / paste (in terminal) |
+Every shortcut uses the platform's primary modifier: `⌘` on macOS, `Ctrl` on Linux. Copy, paste and find are the exception — a terminal shares those keys with the shell it runs, so on Linux they move to `Ctrl+Shift` (`Ctrl+C` stays SIGINT).
+
+| Action | macOS | Linux |
+| --- | --- | --- |
+| New agent session | `⌘N` | `Ctrl+N` |
+| Add project (folder picker) | `⌘O` | `Ctrl+O` |
+| Select the Nth session | `⌘1`…`⌘9` | `Ctrl+1`…`Ctrl+9` |
+| Toggle the diff file tree | `⌘T` | `Ctrl+T` |
+| Toggle the sessions sidebar | `⌘B` | `Ctrl+B` |
+| Toggle the diff panel | `⌘R` | `Ctrl+R` |
+| Close session | `⌘W` | `Ctrl+W` |
+| Copy / paste (terminal and changes pane) | `⌘C` / `⌘V` | `Ctrl+Shift+C` / `Ctrl+Shift+V` |
+| Find in terminal / changes | `⌘F` | `Ctrl+Shift+F` |
+| Zoom the terminal font | `⌘+` / `⌘−` | `Ctrl++` / `Ctrl+−` |
+| Open settings | `⌘,` | `Ctrl+,` |
+| Quit | `⌘Q` | `Ctrl+Q` |
+
+A chord the app binds never reaches the shell, so on Linux `Ctrl+R`, `Ctrl+N`, `Ctrl+O`, `Ctrl+T`, `Ctrl+B` and `Ctrl+W` are ddu's, not readline's; everything unbound (`Ctrl+A/E/K/U/L/P/D/Z`, …) goes to the shell as usual.
 
 ## Getting started
 
-Requirements: macOS 13+ and a Rust toolchain. Agent sessions need the `claude` or `codex` CLI on your `PATH`; the plain terminal preset works out of the box.
+Requirements: macOS 13+ or Linux (X11/Wayland, Vulkan or GL), plus a Rust toolchain. Agent sessions need the `claude` or `codex` CLI on your `PATH`; the plain terminal preset works out of the box.
+
+### Linux
 
 ```sh
 git clone https://github.com/justmao945/ddu.git
 cd ddu
+scripts/linux.sh run        # build --release, run from $DDU_DIR (default: this repo)
+scripts/linux.sh install    # ~/.local/bin/ddu + a desktop entry
+```
+
+The launched directory *is* the workspace ddu opens on (`DDU_DIR` overrides it for `run`, and is baked into the desktop entry's launch path at install time; `DDU_INSTALL_DIR` overrides the install prefix). State lives in `$XDG_CONFIG_HOME/ddu/` (default `~/.config/ddu/`) — `DDU_STATE_PATH` / `DDU_SETTINGS_PATH` name the two files directly, which is also how the screenshots above were staged.
+
+### macOS
+
+```sh
 scripts/dev.sh
 ```
 

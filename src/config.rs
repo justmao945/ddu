@@ -10,23 +10,27 @@
 //! defaults are used; saves return the error for the caller to surface.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::session::AgentCmd;
 
-/// `~/Library/Application Support/ddu/` on macOS, `~/.config/ddu/`
-/// elsewhere. Env override `DDU_STATE_PATH` still names the state file
-/// directly (launcher/tests); `DDU_SETTINGS_PATH` does the same for
-/// settings.
+/// `~/Library/Application Support/ddu/` on macOS, `$XDG_CONFIG_HOME/ddu`
+/// (or `~/.config/ddu`) elsewhere. Env override `DDU_STATE_PATH` still
+/// names the state file directly (launcher/tests); `DDU_SETTINGS_PATH`
+/// does the same for settings.
 fn data_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     if cfg!(target_os = "macos") {
-        PathBuf::from(home).join("Library/Application Support/ddu")
-    } else {
-        PathBuf::from(home).join(".config/ddu")
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        return PathBuf::from(home).join("Library/Application Support/ddu");
     }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        return PathBuf::from(xdg).join("ddu");
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".config/ddu")
 }
 
 pub fn settings_path() -> PathBuf {
@@ -51,9 +55,30 @@ pub struct ShellConfig {
 impl Default for ShellConfig {
     fn default() -> Self {
         Self {
-            program: std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into()),
+            program: default_shell(),
         }
     }
+}
+
+/// Login shell for new Terminal sessions: `$SHELL` when it names a
+/// real file, otherwise the first installed fallback. A hardcoded
+/// `/bin/zsh` fallback breaks machines without zsh (typical Linux):
+/// every restore dies with a spawn ENOENT.
+fn default_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .into_iter()
+        .chain(
+            [
+                "/bin/bash",
+                "/usr/bin/bash",
+                "/bin/sh",
+                "/bin/zsh",
+            ]
+            .map(str::to_string),
+        )
+        .find(|p| Path::new(p).is_file())
+        .unwrap_or_else(|| "/bin/sh".into())
 }
 
 /// What the sidebar `+` button creates by default.
@@ -98,11 +123,92 @@ pub struct Config {
     pub terminal_scrollback: Option<usize>,
 }
 
+/// Stock UI base size (px) — the root the panels' `text_sm`/`text_xs`
+/// steps are relative to.
+pub const UI_FONT_SIZE_DEFAULT: f32 = 14.;
+
 /// Stock mono size the terminal falls back to when unset.
 pub const TERMINAL_FONT_SIZE_DEFAULT: f32 = 13.;
 
+/// Stock mono face per platform, mirroring gpui-component's Theme
+/// default. The theme's `mono_font_family` is always ddu-managed (the
+/// configured terminal face or this), so "System default" needs the
+/// same value the registry would have used.
+pub const PLATFORM_MONO_FAMILY: &str = if cfg!(target_os = "macos") {
+    "Menlo"
+} else if cfg!(target_os = "windows") {
+    "Consolas"
+} else {
+    "DejaVu Sans Mono"
+};
+
 /// Terminal scrollback cap (lines) the terminal falls back to when unset.
 pub const TERMINAL_SCROLLBACK_DEFAULT: usize = 3000;
+
+/// Sane band for the desktop's text scale: outside it the stored value
+/// is a broken dconf entry rather than a preference.
+const TEXT_SCALE_MIN: f32 = 0.5;
+const TEXT_SCALE_MAX: f32 = 3.;
+
+/// Cached result of [`detect_text_scale`] — startup asks dconf once.
+static TEXT_SCALE: LazyLock<f32> = LazyLock::new(detect_text_scale);
+
+/// The desktop's text scale, i.e. how much bigger than stock the user
+/// asked for UI text to be. GTK apps multiply their font sizes by it
+/// and omarchy's `display text size` writes it, so ddu's *defaults*
+/// follow it too — otherwise the app sits at stock 12px text next to a
+/// desktop that renders everything at 16px. Linux only: 1.0 (no
+/// scaling) elsewhere and whenever the preference can't be read.
+///
+/// An explicit `terminal_font_size` in settings.json stays absolute:
+/// a size the user picked while looking at the running app is not a
+/// request to scale it again.
+pub fn desktop_text_scale() -> f32 {
+    *TEXT_SCALE
+}
+
+/// Effective UI base size (px): the stock base scaled by the desktop's
+/// text scale.
+pub fn ui_font_size() -> f32 {
+    UI_FONT_SIZE_DEFAULT * desktop_text_scale()
+}
+
+/// `DDU_TEXT_SCALE` wins (verification/tests), then dconf, then stock.
+fn detect_text_scale() -> f32 {
+    let override_ = std::env::var("DDU_TEXT_SCALE").ok();
+    let gsettings = cfg!(target_os = "linux")
+        .then(|| {
+            std::process::Command::new("gsettings")
+                .args([
+                    "get",
+                    "org.gnome.desktop.interface",
+                    "text-scaling-factor",
+                ])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .and_then(|out| String::from_utf8(out.stdout).ok())
+        })
+        .flatten();
+    resolve_text_scale(override_.as_deref(), gsettings.as_deref())
+}
+
+/// Precedence and clamping, split out so both are pinned without a
+/// dconf round-trip.
+fn resolve_text_scale(override_: Option<&str>, gsettings: Option<&str>) -> f32 {
+    override_
+        .and_then(parse_text_scale)
+        .or_else(|| gsettings.and_then(parse_text_scale))
+        .unwrap_or(1.)
+}
+
+/// `gsettings get` prints the value as a plain number (`1.3332999999999999`).
+fn parse_text_scale(raw: &str) -> Option<f32> {
+    let scale: f32 = raw.trim().parse().ok()?;
+    scale
+        .is_finite()
+        .then(|| scale.clamp(TEXT_SCALE_MIN, TEXT_SCALE_MAX))
+}
 
 // ── state.json ────────────────────────────────────────────────────────
 
@@ -253,7 +359,9 @@ impl Config {
         items
     }
 
-    /// Resolve a kind key to a spawnable command.
+    /// Resolve a kind key to a spawnable command. A configured
+    /// program that names no existing file fails here with a plain
+    /// message instead of a cryptic PTY spawn ENOENT at restore time.
     pub fn cmd_for(&self, kind: &str) -> anyhow::Result<AgentCmd> {
         let (program, args) = if kind == "terminal" {
             (self.shell.program.as_str(), "")
@@ -266,11 +374,15 @@ impl Config {
             !program.trim().is_empty(),
             "Set a program for {kind} in Settings."
         );
+        let program = program.trim();
+        if program.contains('/') && !Path::new(program).is_file() {
+            anyhow::bail!("{program} is not installed (picked in Settings → Program).");
+        }
         let args = shlex::split(args).ok_or_else(|| {
             anyhow::anyhow!("Unclosed quote in arguments for {kind}. Check Settings.")
         })?;
         Ok(AgentCmd {
-            program: program.trim().into(),
+            program: program.into(),
             args,
         })
     }
@@ -287,10 +399,24 @@ impl Config {
         }
     }
 
-    /// Configured terminal font size (px), falling back to the stock
-    /// mono size when unset.
+    /// Effective terminal font size (px): the configured value, or the
+    /// stock mono size (scaled by the desktop's text scale) when unset.
     pub fn terminal_font_size(&self) -> f32 {
-        self.terminal_font_size.unwrap_or(TERMINAL_FONT_SIZE_DEFAULT)
+        self.terminal_font_size
+            .unwrap_or(TERMINAL_FONT_SIZE_DEFAULT * desktop_text_scale())
+    }
+
+    /// Effective mono face: the configured terminal font, else the
+    /// platform stock mono. Drives the theme's `mono_font_family`,
+    /// which the terminal, diff pane and diff tree all read — without
+    /// it they render in the registry's fallback face regardless of
+    /// the configured terminal font.
+    pub fn mono_family(&self) -> &str {
+        self.terminal_font
+            .as_deref()
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .unwrap_or(PLATFORM_MONO_FAMILY)
     }
 
     /// Configured terminal scrollback cap (lines), falling back to the
@@ -410,13 +536,30 @@ mod tests {
         assert!(!cfg.dark_theme);
         assert_eq!(cfg.new_session.kind, "terminal");
         // A settings file from before the font-size key still gets the
-        // stock mono size, never a 0px fallback.
-        assert_eq!(cfg.terminal_font_size(), TERMINAL_FONT_SIZE_DEFAULT);
+        // stock mono size (scaled by the desktop's text scale), never a
+        // 0px fallback.
+        assert_eq!(cfg.terminal_font_size, None);
+        assert_eq!(
+            cfg.terminal_font_size(),
+            TERMINAL_FONT_SIZE_DEFAULT * desktop_text_scale()
+        );
         // Same for the scrollback cap: an old file without the key
         // keeps the stock 3000-line history.
         assert_eq!(cfg.terminal_scrollback(), TERMINAL_SCROLLBACK_DEFAULT);
     }
 
+
+    #[test]
+    fn desktop_text_scale_prefers_the_override_and_clamps() {
+        // The env override wins, a plain dconf value is used as-is, and
+        // a broken value (or none at all) falls back to stock 1.0.
+        assert_eq!(resolve_text_scale(Some("1.3333"), Some("2.0")), 1.3333);
+        assert_eq!(resolve_text_scale(None, Some("0.8\n")), 0.8);
+        assert_eq!(resolve_text_scale(None, None), 1.);
+        assert_eq!(resolve_text_scale(Some("nan"), Some("garbage")), 1.);
+        assert_eq!(resolve_text_scale(Some("99"), None), TEXT_SCALE_MAX);
+        assert_eq!(resolve_text_scale(None, Some("0.01")), TEXT_SCALE_MIN);
+    }
 
     #[test]
     fn removed_last_project_stays_removed() {
@@ -512,5 +655,25 @@ mod tests {
         assert_eq!(state, State::default());
         assert!(warnings.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_shell_prefers_an_installed_program() {
+        // The Linux failure: `$SHELL` unset and no zsh on disk must
+        // not default to a missing `/bin/zsh` (every restore dies
+        // with spawn ENOENT); a bogus persisted program is rejected
+        // at `cmd_for` with a plain message instead.
+        let fallback = super::default_shell();
+        assert!(
+            std::path::Path::new(&fallback).is_file(),
+            "default shell must exist, got {fallback}"
+        );
+        let cfg = Config {
+            shell: ShellConfig {
+                program: "/definitely/not/a/shell".into(),
+            },
+            ..Config::default()
+        };
+        assert!(cfg.cmd_for("terminal").is_err());
     }
 }

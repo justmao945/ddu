@@ -19,11 +19,11 @@ use gpui_kit::*;
 pub(crate) fn set_theme(mode: ThemeMode, cx: &mut App) {
     Theme::change(mode, None, cx);
     // `Theme::change` re-applies the registry theme config; keep the
-    // compact 14px base set at startup (see `main.rs`), and the
-    // configured terminal mono size (the registry resets it to 13px).
-    Theme::global_mut(cx).font_size = px(14.);
-    Theme::global_mut(cx).mono_font_size =
-        px(cx.global::<crate::config::Config>().terminal_font_size());
+    // base size set at startup (see `main.rs`), and the configured
+    // mono typography (the registry resets it to the stock 13px +
+    // platform family).
+    Theme::global_mut(cx).font_size = px(crate::config::ui_font_size());
+    crate::ui::apply_mono_typography(cx);
     // `Theme::change(.., None, ..)` refreshes no window — repaint all,
     // or existing terminals/panels keep the old palette until their
     // next wakeup.
@@ -201,14 +201,25 @@ fn number_spinner(
         .into_any_element()
 }
 
+/// The zoom chord is platform-specific (⌘ on macOS, ⌃ elsewhere) and a
+/// settings row wants a `&'static str` for its keyword index, so each
+/// platform spells the sentence out.
+#[cfg(target_os = "macos")]
+const SIZE_DESCRIPTION: &str =
+    "Mono font size in points for all terminal sessions, clamped to 8–32, \
+     with ⌘+ and ⌘− zooming from anywhere.";
+#[cfg(not(target_os = "macos"))]
+const SIZE_DESCRIPTION: &str =
+    "Mono font size in points for all terminal sessions, clamped to 8–32, \
+     with Ctrl++ and Ctrl+− zooming from anywhere.";
+
 /// Terminal font size (px): a spinner field — type a value, or step
 /// with the ▲▼ buttons / arrow keys. Every change applies to the live
 /// theme and persists immediately.
 pub(super) fn terminal_size_item() -> SettingItem {
     super::item(
         "Size",
-        "Mono font size in points for all terminal sessions, clamped to 8–32, \
-         with ⌘+ and ⌘− zooming from anywhere.",
+        SIZE_DESCRIPTION,
         |options, window, cx| {
             let size = cx.global::<crate::config::Config>().terminal_font_size() as f64;
             number_spinner(
@@ -230,10 +241,13 @@ pub(super) fn terminal_size_item() -> SettingItem {
     )
     .on_reset(
         |cx| {
-            cx.global::<crate::config::Config>().terminal_font_size() != TERMINAL_FONT_SIZE_DEFAULT
+            cx.global::<crate::config::Config>()
+                .terminal_font_size
+                .is_some()
         },
         |_, cx| {
-            Theme::global_mut(cx).mono_font_size = px(TERMINAL_FONT_SIZE_DEFAULT);
+            Theme::global_mut(cx).mono_font_size =
+                px(TERMINAL_FONT_SIZE_DEFAULT * crate::config::desktop_text_scale());
             update_config(|c, _| c.terminal_font_size = None, cx);
         },
     )
@@ -349,6 +363,7 @@ pub(super) fn terminal_font_item() -> SettingItem {
                         .on_click(move |_, _, cx| {
                             let family = family.clone();
                             update_config(move |c, _| c.terminal_font = Some(family.clone()), cx);
+                            crate::ui::apply_mono_typography(cx);
                         }),
                     );
                 }

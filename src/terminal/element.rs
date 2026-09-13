@@ -92,14 +92,10 @@ pub(crate) struct Metrics {
 impl Metrics {
     pub(crate) fn new(window: &Window, cx: &App) -> Self {
         let theme = cx.theme();
-        // Configured terminal font wins; empty = the system mono face.
-        let family = cx
-            .global::<crate::config::Config>()
-            .terminal_font
-            .clone()
-            .filter(|f| !f.trim().is_empty())
-            .unwrap_or_else(|| theme.mono_font_family.to_string());
-        let font = font(SharedString::from(family));
+        // The theme's mono family already mirrors `terminal_font`
+        // (`ui::apply_mono_typography`), falling back to the platform
+        // stock mono face when unset.
+        let font = font(theme.mono_font_family.clone());
         let font_size = theme.mono_font_size;
         let line_height = px(f32::from(font_size) * LINE_HEIGHT_FACTOR);
         let run = TextRun {

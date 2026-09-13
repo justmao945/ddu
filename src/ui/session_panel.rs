@@ -10,13 +10,15 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{ROW_PX, hover_bg, selection_bg};
+use super::{hover_bg, row_px, scaled, selection_bg};
 use super::panel_view;
 use crate::app::AppView;
 use crate::session::{AgentSession, AgentStatus};
 
 /// Height of a two-line session row.
-const SESSION_ROW_PX: f32 = 40.;
+fn session_row_px() -> f32 {
+    scaled(40.)
+}
 
 /// Update a shared hover slot from one element's `on_hover` callback,
 /// returning whether it changed (i.e. whether a repaint is needed).
@@ -118,10 +120,10 @@ pub(crate) fn render(
                     resizable_panel()
                         .size(
                             this.diff_tree_height_seed
-                                .unwrap_or(px(super::diff_tree::TREE_DEFAULT_H)),
+                                .unwrap_or(px(super::diff_tree::tree_default_h())),
                         )
                         .size_range(
-                            px(super::diff_tree::TREE_MIN_H)..px(super::diff_tree::TREE_MAX_H),
+                            px(super::diff_tree::tree_min_h())..px(super::diff_tree::tree_max_h()),
                         )
                         .flex_none()
                         .visible(this.show_diff_tree)
@@ -138,8 +140,12 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     // The `+` button spawns the configured default — say which, and
     // its global shortcut.
     let cfg = cx.global::<crate::config::Config>();
-    let quick_tooltip: SharedString =
-        format!("New {} (⌘N)", cfg.label_for(&cfg.new_session.kind)).into();
+    let quick_tooltip: SharedString = format!(
+        "New {} ({})",
+        cfg.label_for(&cfg.new_session.kind),
+        crate::app::accel_hint("N")
+    )
+    .into();
     v_flex()
         .id("project-tree")
         .flex_1()
@@ -172,7 +178,7 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                         .role(Role::TreeItem)
                         .aria_expanded(expanded)
                         .aria_label(SharedString::from(project.name.clone()))
-                        .h(px(ROW_PX))
+                        .h(px(row_px()))
                         .flex_shrink_0()
                         .flex()
                         .items_center()
@@ -250,10 +256,10 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                     if project.sessions.is_empty() {
                         el.child(
                             div()
-                                .h(px(ROW_PX))
+                                .h(px(row_px()))
                                 .flex()
                                 .items_center()
-                                .pl(px(18.))
+                                .pl(px(scaled(18.)))
                                 .ml_1()
                                 .text_xs()
                                 .text_color(fg.opacity(0.35))
@@ -277,7 +283,10 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                     .p_2()
                     .text_xs()
                     .text_color(fg.opacity(0.35))
-                    .child("No projects — add one with ⌘O or the folder button below."),
+                    .child(format!(
+                        "No projects — add one with {} or the folder button below.",
+                        crate::app::accel_hint("O")
+                    )),
             )
         })
 }
@@ -309,12 +318,12 @@ fn session_row(
         .role(Role::TreeItem)
         .aria_selected(active)
         .aria_label(SharedString::from(format!("{title} — {}", meta_label(s))))
-        .h(px(SESSION_ROW_PX))
+        .h(px(session_row_px()))
         .flex_shrink_0()
         .flex()
         .items_center()
         .gap_2()
-        .pl(px(18.))
+        .pl(px(scaled(18.)))
         .pr_2()
         .ml_1()
         .rounded(radius)
@@ -371,8 +380,11 @@ fn session_row(
                     .ghost()
                     .xsmall()
                     .tab_stop(false)
-                    .tooltip("Close session (⌘W)")
-                    .accessibility_label("Close session (⌘W)")
+                    .tooltip(format!("Close session ({})", crate::app::accel_hint("W")))
+                    .accessibility_label(format!(
+                        "Close session ({})",
+                        crate::app::accel_hint("W")
+                    ))
                     // Stop the mouse-down so the row's own click
                     // synthesis never sees this press (see quick-add).
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -412,7 +424,7 @@ fn kind_icon(s: &AgentSession, cx: &Context<AppView>) -> Div {
     let fg = cx.theme().foreground;
     let cell = |child: AnyElement| {
         div()
-            .size(px(18.))
+            .size(px(scaled(18.)))
             .flex_shrink_0()
             .flex()
             .items_center()
@@ -436,7 +448,7 @@ fn kind_icon(s: &AgentSession, cx: &Context<AppView>) -> Div {
     cell(
         svg()
             .path(path)
-            .size(px(15.))
+            .size(px(scaled(15.)))
             .flex_shrink_0()
             .text_color(tint)
             .into_any_element(),

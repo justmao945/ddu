@@ -4,7 +4,9 @@
 //! selection. Diff lines never truncate — long lines scroll
 //! horizontally with a visible scrollbar.
 
-use super::PANEL_HEADER_PX;
+use std::rc::Rc;
+
+use super::{panel_header_px, scaled};
 use super::diff_tree::plus_minus;
 use super::panel_view;
 use crate::app::AppView;
@@ -76,7 +78,7 @@ fn header(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .and_then(|d| this.diff_file.and_then(|ix| d.files.get(ix)));
 
     div()
-        .h(px(PANEL_HEADER_PX))
+        .h(px(panel_header_px()))
         .flex_shrink_0()
         .px_3()
         .flex()
@@ -115,27 +117,36 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
     let Some(file_ix) = this.diff_file.filter(|ix| *ix < diff.files.len()) else {
         return empty("Select a file in the tree.", cx).into_any_element();
     };
+    let file = &diff.files[file_ix];
+    let gutter_w = gutter_width(file, window, cx);
+    let content_w = measure_content_width(file, gutter_w, window, cx);
+    let heights = RowHeights::new(window);
+    let sizes = Rc::new(row_sizes(file, heights));
+
 
     div()
         .flex_1()
         .min_h_0()
         .min_w_0()
         .child(
-            div()
-                .id("diff-hunks")
-                .size_full()
-                // Cross-axis alignment: default stretch would clamp the
-                // content column to the viewport width, so taffy would
-                // report content_size == viewport and the horizontal
-                // scrollbar would never get a range.
-                .items_start()
-                .overflow_scroll()
-                .track_scroll(&this.diff_hunks_scroll)
-                .p_2()
-                // Rows are the scroll container's DIRECT children: the
-                // handle indexes children positionally, which is what
-                // makes search's `scroll_to_item` work per line.
-                .children(file_rows(&diff.files[file_ix], this, window, cx)),
+            // v_virtual_list builds only the visible slice per frame:
+            // row heights are declared up front (see `RowHeights`), so
+            // scrolling even a huge diff costs one range render instead
+            // of rebuilding every row. Item indices still mirror the
+            // `DiffFile::rows` walk (plus the binary/truncation notes),
+            // which is what keeps search's `scroll_to_item` landing on
+            // the right row.
+            v_virtual_list(
+                cx.entity(),
+                "diff-hunks",
+                sizes,
+                move |this, range, window, cx| {
+                    render_rows(this, file_ix, range, content_w, gutter_w, heights, window, cx)
+                },
+            )
+            .track_scroll(&this.diff_hunks_scroll)
+            .size_full()
+            .p_2(),
         )
         .scrollbar(&this.diff_hunks_scroll, scroll::ScrollbarAxis::Both)
         .context_menu({
@@ -171,101 +182,188 @@ fn body(this: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> impl 
 
 /// Longest lines shaped exactly per render (bound on text-system calls).
 const MEASURE_CANDIDATES: usize = 16;
-/// Chrome left of a diff line's text: two number gutters (36px each),
-/// the sign column (14px) and the text block's `pl_2`/`pr_3` padding.
-const LINE_CHROME: f32 = 36. + 36. + 14. + 8. + 12.;
+/// Chrome left of a diff line's text besides the two number gutters
+/// (their width is measured per file — see `gutter_width`): the sign
+/// column (14px) and the text block's `pl_2`/`pr_3` padding.
+const LINE_CHROME_EXTRAS: f32 = 14. + 8. + 12.;
 /// Hunk header horizontal padding (`px_2` on both sides).
 const HEADER_CHROME: f32 = 16.;
 
-/// Lays one file out as the scroll container's direct-child rows: per
-/// hunk the `@@` header band then its lines, in [`DiffFile::rows`]
-/// order. Every row carries the file's definite `content_w`: the scroll
-/// container derives its content size from direct-child bounds (only a
-/// definite width gives the horizontal scrollbar a range, and uniform
-/// widths keep the +/- tint bands spanning it), and the row's position
-/// among these children is exactly the index `diff::match_rows` reports
-/// for it. Row indices must stay in sync with `DiffFile::rows` — both
-/// walk hunks as [header, lines…].
-fn file_rows(
-    file: &DiffFile,
+/// Declared row heights for the virtual list. Line rows are single
+/// nowrap lines of `text_sm`, so one height fits all of them (the
+/// number gutters carry the row's only extra: `pt(2px)`); hunk header
+/// bands add their padding, with extra top spacing between hunks.
+/// Computed with the framework's own text-style math so the declared
+/// sizes match what the rows lay out at.
+#[derive(Clone, Copy)]
+struct RowHeights {
+    line: Pixels,
+    header: Pixels,
+    header_spaced: Pixels,
+    meta: Pixels,
+}
+
+impl RowHeights {
+    fn new(window: &Window) -> Self {
+        let mut style = window.text_style().clone();
+        style.font_size = rems(0.875).into();
+        let lh = style.line_height_in_pixels(window.rem_size());
+        Self {
+            line: lh + px(2.),
+            // py_1 band + pb_1 wrapper.
+            header: lh + px(8. + 4.),
+            // + pt_2 between hunks.
+            header_spaced: lh + px(8. + 4. + 8.),
+            meta: lh,
+        }
+    }
+}
+
+/// Every row's height, in the pane's item order: per hunk the `@@`
+/// header then its lines, in [`DiffFile::rows`] order, with the
+/// binary/empty note standing alone and the truncation note appended
+/// last. Widths are unused by `v_virtual_list` (it measures one row
+/// for the cross axis); the rows carry the definite `content_w`
+/// themselves, which is what gives the horizontal scrollbar its range
+/// and keeps the +/- tint bands uniform.
+fn row_sizes(file: &DiffFile, heights: RowHeights) -> Vec<gpui_kit::Size<Pixels>> {
+    if file.hunks.is_empty() {
+        return vec![size(px(0.), heights.meta)];
+    }
+    let extra = if file.truncated { 1 } else { 0 };
+    let mut sizes =
+        Vec::with_capacity(file.hunks.iter().map(|h| h.lines.len() + 1).sum::<usize>() + extra);
+    for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
+        sizes.push(size(
+            px(0.),
+            if hunk_ix == 0 {
+                heights.header
+            } else {
+                heights.header_spaced
+            },
+        ));
+        sizes.extend(std::iter::repeat_n(size(px(0.), heights.line), hunk.lines.len()));
+    }
+    if file.truncated {
+        sizes.push(size(px(0.), heights.meta));
+    }
+    sizes
+}
+
+/// Builds the rows of one visible slice. The walk is the same
+/// [`DiffFile::rows`] order `diff::match_rows` numbers, so a row's
+/// item index IS its search index; a hunk header is spaced iff it is
+/// not the file's first row.
+fn render_rows(
     this: &AppView,
+    file_ix: usize,
+    range: std::ops::Range<usize>,
+    content_w: Pixels,
+    gutter_w: Pixels,
+    heights: RowHeights,
     window: &mut Window,
     cx: &mut Context<AppView>,
 ) -> Vec<AnyElement> {
-    let content_w = measure_content_width(file, window, cx);
-    // Uniform definite row width: the scroll container derives its
-    // content size from direct-child bounds (only a definite width
-    // gives the horizontal scrollbar a range), and equal widths keep
-    // the +/- tint bands spanning it.
-    let mut rows: Vec<AnyElement> = Vec::new();
-    if file.hunks.is_empty() {
-        rows.push(
-            into_row(
-                super::meta_text(
-                    "No text changes to display (binary, empty file, or metadata change).",
-                    cx,
-                ),
-                content_w,
-            )
-            .into_any_element(),
-        );
-    }
+    let Some(diff) = &this.diff else {
+        return Vec::new();
+    };
+    let Some(file) = diff.files.get(file_ix) else {
+        return Vec::new();
+    };
     let matches = &this.diff_search.matches;
     let current_row = matches.get(this.diff_search.current).copied();
-    // Rendering straight off `rows()` is what keeps the rendered child
-    // order (and thus every row's scroll index) identical to the walk
-    // `match_rows` numbers — one iterator, no parallel bookkeeping.
-    let mut row_ix = 0usize;
-    let mut hunk_ix = 0usize;
-    for row in file.rows() {
-        let element = match row {
-            DiffRow::Header(header) => {
-                let el = into_row(hunk_header(header.to_string(), hunk_ix > 0, cx), content_w)
-                    .into_any_element();
-                hunk_ix += 1;
-                el
-            }
+    if file.hunks.is_empty() {
+        return if range.start == 0 {
+            vec![row_box(
+                meta_row("No text changes to display (binary, empty file, or metadata change).", cx),
+                content_w,
+                heights.meta,
+            )
+            .into_any_element()]
+        } else {
+            Vec::new()
+        };
+    }
+    let mut rows: Vec<AnyElement> = Vec::with_capacity(range.end - range.start);
+    for (row_ix, row) in file
+        .rows()
+        .enumerate()
+        .skip(range.start)
+        .take(range.end - range.start)
+    {
+        rows.push(match row {
+            DiffRow::Header(header) => row_box(
+                hunk_header(header.to_string(), row_ix > 0, cx),
+                content_w,
+                if row_ix > 0 {
+                    heights.header_spaced
+                } else {
+                    heights.header
+                },
+            )
+            .into_any_element(),
             DiffRow::Line(line) => {
                 let hit = matches.binary_search(&row_ix).is_ok();
-                into_row(
-                    diff_line(row_ix, line, hit, current_row == Some(row_ix), cx),
+                row_box(
+                    diff_line(row_ix, line, hit, current_row == Some(row_ix), gutter_w, cx),
                     content_w,
+                    heights.line,
                 )
                 .into_any_element()
             }
-        };
-        rows.push(element);
-        row_ix += 1;
+        });
     }
     if file.truncated {
-        rows.push(
-            into_row(
-                super::meta_text(
-                    "Preview limited to 5,000 lines. Change totals include the entire file.",
-                    cx,
-                ),
-                content_w,
-            )
-            .into_any_element(),
-        );
+        let note_ix = file.hunks.iter().map(|h| h.lines.len() + 1).sum::<usize>();
+        if range.start <= note_ix && note_ix < range.end {
+            let limit = this
+                .diff_limits
+                .get(&file.path)
+                .copied()
+                .unwrap_or(crate::diff::MAX_LINES_PER_FILE);
+            let note = if file.lines_total >= limit && limit < crate::diff::EXPAND_MAX_LINES {
+                // The rendered slice reached the cap note: grow the
+                // file's budget and reload (next frame — this closure
+                // runs mid-layout, the entity is on the stack).
+                let path = file.path.clone();
+                cx.on_next_frame(window, move |this, _window, cx| {
+                    this.expand_diff_limit(&path, cx);
+                });
+                "Loading more lines…".to_owned()
+            } else {
+                format!(
+                    "Preview limited to {} lines. Change totals include the entire file.",
+                    grouped(limit)
+                )
+            };
+            rows.push(row_box(meta_row(&note, cx), content_w, heights.meta).into_any_element());
+        }
     }
     rows
 }
 
 /// Every row carries the file's definite width plus the full-width
-/// minimum, so row bands stay uniform and the scroll container gets a
-/// real content size from its direct children.
-fn into_row<E: Styled>(el: E, w: Pixels) -> E {
-    el.w(w).min_w_full().flex_shrink_0()
+/// minimum, so row bands stay uniform and the list's measured cross
+/// size gives the horizontal scrollbar a real range. The height is
+/// the one declared to `v_virtual_list`.
+fn row_box<E: Styled>(el: E, w: Pixels, h: Pixels) -> E {
+    el.w(w).min_w_full().h(h)
 }
 
-/// Width the content column needs so the longest line never clips.
-/// Candidates are ranked by a display-cell estimate (non-ASCII ~2 cells),
+/// One-line note row (binary file, truncation cap): clipped to its
+/// row box instead of wrapping, the virtual list owns its height.
+fn meta_row(text: &str, cx: &App) -> Div {
+    super::meta_text(text, cx)
+        .whitespace_nowrap()
+        .overflow_hidden()
+}
+
 fn diff_line(
     id: usize,
     line: &DiffLine,
     hit: bool,
     current: bool,
+    gutter_w: Pixels,
     cx: &mut Context<AppView>,
 ) -> Stateful<Div> {
     let (old, new) = (
@@ -302,10 +400,10 @@ fn diff_line(
         .items_start()
         .min_w_full()
         .font_family(mono.clone())
-        .text_xs()
+        .text_sm()
         .when_some(search_bg.or(tint), |el, bg| el.bg(bg))
-        .child(gutter(old, cx))
-        .child(gutter(new, cx))
+        .child(gutter(old, gutter_w, cx))
+        .child(gutter(new, gutter_w, cx))
         .child(
             div()
                 .w(px(14.))
@@ -327,7 +425,7 @@ fn diff_line(
                         .document_order(id as u64)
                         .text_style(TextStyleRefinement {
                             font_family: Some(mono),
-                            font_size: Some(rems(0.75).into()),
+                            font_size: Some(rems(0.875).into()),
                             color: Some(cx.theme().foreground.opacity(0.85)),
                             white_space: Some(WhiteSpace::Nowrap),
                             ..Default::default()
@@ -338,12 +436,14 @@ fn diff_line(
 
 /// Width the content column needs so the longest line never clips.
 /// Candidates are ranked by a display-cell estimate (non-ASCII ~2 cells),
-/// then the top few are shaped exactly with the mono font at `text_xs`.
+/// then the top few are shaped exactly with the mono font at `text_sm`.
 fn measure_content_width(
     file: &DiffFile,
+    gutter_w: Pixels,
     window: &mut Window,
     cx: &mut Context<AppView>,
 ) -> Pixels {
+    let line_chrome = f32::from(gutter_w) * 2. + LINE_CHROME_EXTRAS;
     let font = Font {
         family: cx.theme().mono_font_family.clone(),
         ..Default::default()
@@ -358,7 +458,7 @@ fn measure_content_width(
     for hunk in &file.hunks {
         candidates.push((estimate(&hunk.header), hunk.header.as_str(), HEADER_CHROME));
         for line in &hunk.lines {
-            candidates.push((estimate(&line.text), line.text.as_str(), LINE_CHROME));
+            candidates.push((estimate(&line.text), line.text.as_str(), line_chrome));
         }
     }
     candidates.sort_unstable_by(|a, b| b.0.cmp(&a.0));
@@ -388,21 +488,26 @@ fn measure_content_width(
 /// The `@@ …` hunk header as a full-width band: subtle background,
 /// muted mono text, spanning the whole content column like the code
 /// rows below it instead of hugging the header text. `spaced` adds the
-/// inter-hunk gap the flattened layout lost with the per-hunk wrappers
-/// (the old `gap_2` between hunk blocks becomes this top margin).
+/// inter-hunk gap the flattened layout lost with the per-hunk wrappers.
+/// The spacing lives in the wrapper's padding — not margins — because
+/// a `v_virtual_list` item is laid out as a root: root margins never
+/// apply, and the wrapper's own box is what `RowHeights` counts.
 fn hunk_header(header: String, spaced: bool, cx: &mut Context<AppView>) -> Div {
     div()
-        .min_w_full()
-        .when(spaced, |el| el.mt_2())
-        .mb_1()
-        .px_2()
-        .py_1()
-        .rounded(cx.theme().radius)
-        .bg(cx.theme().foreground.opacity(0.05))
-        .text_xs()
-        .font_family(cx.theme().mono_font_family.clone())
-        .text_color(cx.theme().foreground.opacity(0.5))
-        .child(header)
+        .when(spaced, |el| el.pt_2())
+        .pb_1()
+        .child(
+            div()
+                .w_full()
+                .px_2()
+                .py_1()
+                .rounded(cx.theme().radius)
+                .bg(cx.theme().foreground.opacity(0.05))
+                .text_sm()
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_color(cx.theme().foreground.opacity(0.5))
+                .child(header),
+        )
 }
 
 /// The ⌘F find bar: floats over the pane's top-right so the header and
@@ -504,13 +609,64 @@ fn find_bar(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         )
 }
 
-fn gutter(no: String, cx: &mut Context<AppView>) -> impl IntoElement {
+/// Gutter width for the file's largest line number, measured in the mono
+/// font at `text_sm`: the stock 36px (scaled) fits three digits, and a
+/// wider number would wrap into the next row (row heights are fixed).
+/// Floored at the stock width so small diffs don't shift.
+fn gutter_width(file: &DiffFile, window: &mut Window, cx: &mut Context<AppView>) -> Pixels {
+    let max_no = file
+        .hunks
+        .iter()
+        .flat_map(|h| h.lines.iter())
+        .filter_map(|l| l.old_no.max(l.new_no))
+        .max()
+        .unwrap_or(0);
+    let digits = max_no.to_string().len();
+    let sample: SharedString = "8".repeat(digits).into();
+    let run = TextRun {
+        len: sample.len(),
+        font: Font {
+            family: cx.theme().mono_font_family.clone(),
+            ..Default::default()
+        },
+        color: cx.theme().foreground,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let size = px(0.875 * f32::from(window.rem_size()));
+    let digits_w = window
+        .text_system()
+        .shape_line(sample, size, &[run], None)
+        .width();
+    // `pr_2` keeps the digits off the sign column, plus a pixel of slack.
+    (digits_w + px(8. + 1.)).max(px(scaled(36.)))
+}
+
+/// `1234567` → `1,234,567` (the truncation note's line budget).
+fn grouped(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn gutter(no: String, w: Pixels, cx: &mut Context<AppView>) -> impl IntoElement {
     div()
-        .w(px(36.))
+        .w(w)
         .flex_shrink_0()
         .text_right()
         .pr_2()
-        .text_xs()
+        // Fixed-height row: a number wider than the gutter clips instead
+        // of wrapping onto the next row (measured width prevents it).
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .text_sm()
         .pt(px(2.))
         .text_color(cx.theme().foreground.opacity(0.35))
         .child(no)

@@ -163,7 +163,7 @@ impl AppView {
         // so unpin the layer panel and let the next render apply it.
         self.diff_tree_height_seed = height
             .map(gpui::px)
-            .filter(|h| h.as_f32() >= TREE_MIN_H as f32 && h.as_f32() <= TREE_MAX_H as f32);
+            .filter(|h| h.as_f32() >= tree_min_h() && h.as_f32() <= tree_max_h());
         if self.diff_tree_height_seed.is_some() && self.show_diff_tree {
             self.sidebar_split_state.update(cx, |state, cx| {
                 if state.sizes().len() > 1 {

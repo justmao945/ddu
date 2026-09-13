@@ -661,7 +661,10 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .text_sm()
         .text_color(cx.theme().muted_foreground)
         .child(if no_projects {
-            "No projects — press ⌘O to add one".to_string()
+            format!(
+                "No projects — press {} to add one",
+                crate::app::accel_hint("O")
+            )
         } else if error.is_some() {
             "Unable to start session".to_string()
         } else if can_resume {

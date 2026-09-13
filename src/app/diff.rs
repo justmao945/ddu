@@ -36,11 +36,13 @@ impl DiffSearch {
     }
 }
 
+
 impl AppView {
     pub(super) fn reset_diff(&mut self) {
         self.diff = None;
         self.diff_error = None;
         self.diff_file = None;
+        self.diff_limits.clear();
         self.diff_tree_closed.clear();
         self.diff_search.matches.clear();
         self.diff_tree_scroll.set_offset(point(px(0.), px(0.)));
@@ -108,9 +110,27 @@ impl AppView {
     /// Point the scroll container at the current match's row.
     pub(crate) fn diff_search_jump(&mut self, cx: &mut Context<Self>) {
         if let Some(&row) = self.diff_search.matches.get(self.diff_search.current) {
-            self.diff_hunks_scroll.scroll_to_item(row);
+            self.diff_hunks_scroll
+                .scroll_to_item(row, ScrollStrategy::Nearest);
         }
         cx.notify();
+    }
+
+    /// Grow a truncated file's line budget ×4 and reload at once — the
+    /// pane's infinite-scroll step, kicked when the rendered range
+    /// reaches the cap note. No-op at the hard ceiling: the note stays.
+    pub(crate) fn expand_diff_limit(&mut self, path: &str, cx: &mut Context<Self>) {
+        let cur = self
+            .diff_limits
+            .get(path)
+            .copied()
+            .unwrap_or(crate::diff::MAX_LINES_PER_FILE);
+        if cur >= crate::diff::EXPAND_MAX_LINES {
+            return;
+        }
+        self.diff_limits
+            .insert(path.to_owned(), (cur * 4).min(crate::diff::EXPAND_MAX_LINES));
+        self.reload_diff(cx);
     }
 
     pub(super) fn apply_diff(&mut self, result: anyhow::Result<GitDiff>, cx: &mut Context<Self>) {
@@ -163,10 +183,11 @@ impl AppView {
             self.diff_error = None;
             return;
         };
+        let limits = self.diff_limits.clone();
         let this = cx.weak_entity();
         cx.spawn(async move |_, cx| {
             let result = cx
-                .background_spawn(async move { git::head_diff(&path) })
+                .background_spawn(async move { git::head_diff(&path, &limits) })
                 .await;
             if let Err(e) = &result {
                 eprintln!("[ddu] diff err: {e:#}");
@@ -194,8 +215,9 @@ impl AppView {
                 let (path, seq) = view.read_with(cx, |v, _| (v.current_session_cwd(), v.diff_seq));
                 // No active session this tick: nothing to poll.
                 let Some(path) = path else { continue };
+                let limits = view.read_with(cx, |v, _| v.diff_limits.clone());
                 let result = cx
-                    .background_spawn(async move { git::head_diff(&path) })
+                    .background_spawn(async move { git::head_diff(&path, &limits) })
                     .await;
                 this.update(cx, |v, cx| {
                     if v.diff_seq == seq {

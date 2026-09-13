@@ -163,8 +163,8 @@ pub(crate) fn button() -> impl IntoElement {
         .ghost()
         .small()
         .tab_stop(false)
-        .tooltip("Settings (⌘,)")
-        .accessibility_label("Settings (⌘,)")
+        .tooltip(format!("Settings ({})", crate::app::accel_hint(",")))
+        .accessibility_label(format!("Settings ({})", crate::app::accel_hint(",")))
         .on_click(|_, _, cx| open(cx))
 }
 

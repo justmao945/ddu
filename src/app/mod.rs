@@ -20,7 +20,7 @@ use crate::diff::{GitDiff, git};
 use crate::session::{AgentStatus, Project, initial_projects};
 use crate::terminal::{TermEvent, TermSession};
 use crate::ui;
-use crate::ui::diff_tree::{TREE_MAX_H, TREE_MIN_H};
+use crate::ui::diff_tree::{tree_max_h, tree_min_h};
 
 // Global keyboard actions: new session, dock toggles, close session.
 gpui_kit::actions!(
@@ -94,7 +94,7 @@ pub struct AppView {
     /// strip, so this divider never cuts through it (see `set_diff`).
     pub(crate) panes_state: Entity<ResizableState>,
     pub(crate) diff_tree_scroll: ScrollHandle,
-    pub(crate) diff_hunks_scroll: ScrollHandle,
+    pub(crate) diff_hunks_scroll: VirtualListScrollHandle,
     /// Project/session tree scroll (sidebar upper layer) — drives its
     /// auto-hide scrollbar.
     pub(crate) sessions_scroll: ScrollHandle,
@@ -113,6 +113,12 @@ pub struct AppView {
     /// toggle-open instead of snapping back to the default.
     pub(crate) last_sidebar_size: Option<Pixels>,
     pub(crate) last_diff_size: Option<Pixels>,
+    /// Resized events the render-time width re-assertion emits on
+    /// purpose: the subscription must not record those as user drags
+    /// (nothing changed semantically, and persisting a default would
+    /// pin it against later text-scale changes). Counted, since one
+    /// render pass can correct both splitters.
+    pub(crate) suppress_resize_records: u8,
     /// Session row currently under the mouse: reveals its delete button.
     pub(crate) hovered_session: Option<(usize, usize)>,
     /// The tree-selected file driving the right pane; `None` shows the
@@ -142,6 +148,10 @@ pub struct AppView {
     pub(crate) diff_search: diff::DiffSearch,
     /// Guards against stale poll results overwriting newer ones.
     diff_seq: u64,
+    /// Per-path line budgets for truncated files: reaching the cap note
+    /// grows the entry ×4 (see `expand_diff_limit`); empty = every file
+    /// at `diff::MAX_LINES_PER_FILE`. Runtime-only, cleared with the diff.
+    pub(crate) diff_limits: std::collections::HashMap<String, usize>,
     /// Graceful shutdown in flight: live agents were interrupted; when
     /// the last one exits, `finish_shutdown` closes the window (or
     /// exits the process for ⌘Q).
@@ -167,25 +177,76 @@ pub struct AppView {
 }
 
 /// Panel geometry (px): defaults, drag limits and collapse thresholds.
+/// All values are base sizes at text-scale factor 1.0 — geometry scales
+/// with the desktop text scale (`ui::scaled`), same as row heights.
 ///
 /// `size_range` min values are load-bearing twice: they clamp drags and
 /// emit CSS `min_w`, so a panel can never render below its min even when
 /// the window itself is squeezed (flex then shrinks the center pane).
-const SIDEBAR_DEFAULT: f32 = 200.;
+fn sidebar_default() -> f32 {
+    ui::scaled(200.)
+}
 /// Compact session list: rows are narrow, so dragging far past ~300px
-/// only starves the terminal for no gain.
-const SIDEBAR_MAX: f32 = 300.;
-const SIDEBAR_MIN: f32 = 150.;
-const DIFF_DEFAULT: f32 = 340.;
+/// (base) only starves the terminal for no gain.
+fn sidebar_max() -> f32 {
+    ui::scaled(300.)
+}
+fn sidebar_min() -> f32 {
+    ui::scaled(150.)
+}
+fn diff_default() -> f32 {
+    ui::scaled(340.)
+}
 /// Floor for the diff pane's adaptive max: even on a small window the
 /// pane may reach this wide.
-const DIFF_MAX: f32 = 600.;
-const DIFF_MIN: f32 = 200.;
+fn diff_max() -> f32 {
+    ui::scaled(600.)
+}
+fn diff_min() -> f32 {
+    ui::scaled(200.)
+}
 /// The terminal pane never shrinks below this while dragging a divider.
-const CENTER_MIN: f32 = 400.;
+fn center_min() -> f32 {
+    ui::scaled(400.)
+}
 /// Window minimum: all three panes at min plus two resize handles.
-pub(crate) const WINDOW_MIN_WIDTH: f32 = SIDEBAR_MIN + CENTER_MIN + DIFF_MIN + 8.;
-pub(crate) const WINDOW_MIN_HEIGHT: f32 = 400.;
+pub(crate) fn window_min_width() -> f32 {
+    sidebar_min() + center_min() + diff_min() + ui::scaled(8.)
+}
+pub(crate) fn window_min_height() -> f32 {
+    ui::scaled(400.)
+}
+
+/// Copy / paste / find, the three chords the terminal surface shares
+/// with the shell it runs. macOS keeps the ⌘ chords; elsewhere they
+/// move into the ⌃⇧ space, because ⌃C is the shell's SIGINT and ⌃V / ⌃F
+/// belong to readline — a terminal that swallowed those would be
+/// unusable. ⌃⇧* is exactly the space Linux terminals already reserve
+/// for their own actions.
+pub(crate) const COPY_ACCEL: &str = if cfg!(target_os = "macos") {
+    "cmd-c"
+} else {
+    "ctrl-shift-c"
+};
+pub(crate) const PASTE_ACCEL: &str = if cfg!(target_os = "macos") {
+    "cmd-v"
+} else {
+    "ctrl-shift-v"
+};
+pub(crate) const FIND_ACCEL: &str = if cfg!(target_os = "macos") {
+    "cmd-f"
+} else {
+    "ctrl-shift-f"
+};
+
+/// Shortcut label for user-facing text (`⌘N` on macOS, `Ctrl+N` elsewhere).
+pub(crate) fn accel_hint(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("⌘{key}")
+    } else {
+        format!("Ctrl+{key}")
+    }
+}
 
 /// The full key binding table, in one place so `bind_keys` and the
 /// routing regression test share it. Bindings for the same keystroke
@@ -193,52 +254,59 @@ pub(crate) const WINDOW_MIN_HEIGHT: f32 = 400.;
 /// (deepest matching context slice first, ties to the later entry)
 /// until one handler stops propagation — see gpui's
 /// `bindings_for_input` / `dispatch_key`.
+///
+/// Every app shortcut is a `secondary-` chord: ⌘ on macOS, ⌃ elsewhere.
+/// A chord a binding claims never reaches the PTY — gpui's bubble-phase
+/// action dispatch stops propagation before the terminal's key listener
+/// runs — so on Linux these override the shell's own readline keys while
+/// the terminal holds focus (`⌃R` toggles the changes pane, not reverse
+/// search); the shell keeps everything the app leaves unbound.
 fn key_bindings() -> Vec<KeyBinding> {
     vec![
-        // ⌘N spawns the default launcher in the active project
-        // (guarded: with no projects there is nothing to spawn
-        // into); ⌘O adds a project via the folder picker. ⌘T
-        // toggles the diff file tree under the project tree.
-        KeyBinding::new("cmd-n", NewSession, None),
-        KeyBinding::new("cmd-o", AddProject, None),
-        KeyBinding::new("cmd-t", ToggleDiffTree, None),
-        KeyBinding::new("cmd-b", ToggleSessions, None),
-        KeyBinding::new("cmd-r", ToggleDiff, None),
-        KeyBinding::new("cmd-w", CloseSession, None),
-        // ⌘+/⌘− (with their shifted variants) zoom the terminal
-        // font size; persisted like the settings field.
-        KeyBinding::new("cmd-=", FontLarger, None),
-        KeyBinding::new("cmd-+", FontLarger, None),
-        KeyBinding::new("cmd--", FontSmaller, None),
-        KeyBinding::new("cmd-_", FontSmaller, None),
-        // ⌘1..⌘9: select the Nth session in the current project.
-        // Prefixed "cmd" so bare digits keep reaching the PTY.
-        KeyBinding::new("cmd-1", SelectSession1, None),
-        KeyBinding::new("cmd-2", SelectSession2, None),
-        KeyBinding::new("cmd-3", SelectSession3, None),
-        KeyBinding::new("cmd-4", SelectSession4, None),
-        KeyBinding::new("cmd-5", SelectSession5, None),
-        KeyBinding::new("cmd-6", SelectSession6, None),
-        KeyBinding::new("cmd-7", SelectSession7, None),
-        KeyBinding::new("cmd-8", SelectSession8, None),
-        KeyBinding::new("cmd-9", SelectSession9, None),
+        // Secondary (⌘ / ⌃) + N spawns the default launcher in the
+        // active project (guarded: with no projects there is nothing
+        // to spawn into); + O adds a project via the folder picker;
+        // + T toggles the diff file tree under the project tree.
+        KeyBinding::new("secondary-n", NewSession, None),
+        KeyBinding::new("secondary-o", AddProject, None),
+        KeyBinding::new("secondary-t", ToggleDiffTree, None),
+        KeyBinding::new("secondary-b", ToggleSessions, None),
+        KeyBinding::new("secondary-r", ToggleDiff, None),
+        KeyBinding::new("secondary-w", CloseSession, None),
+        // Secondary +/− (with their shifted variants) zoom the
+        // terminal font size; persisted like the settings field.
+        KeyBinding::new("secondary-=", FontLarger, None),
+        KeyBinding::new("secondary-+", FontLarger, None),
+        KeyBinding::new("secondary--", FontSmaller, None),
+        KeyBinding::new("secondary-_", FontSmaller, None),
+        // Secondary 1..9: select the Nth session in the current
+        // project. Prefixed so bare digits keep reaching the PTY.
+        KeyBinding::new("secondary-1", SelectSession1, None),
+        KeyBinding::new("secondary-2", SelectSession2, None),
+        KeyBinding::new("secondary-3", SelectSession3, None),
+        KeyBinding::new("secondary-4", SelectSession4, None),
+        KeyBinding::new("secondary-5", SelectSession5, None),
+        KeyBinding::new("secondary-6", SelectSession6, None),
+        KeyBinding::new("secondary-7", SelectSession7, None),
+        KeyBinding::new("secondary-8", SelectSession8, None),
+        KeyBinding::new("secondary-9", SelectSession9, None),
         // Terminal-scoped: these beat gpui-component Root's global
         // Tab/Shift-Tab focus cycling (deeper key context wins), so
         // the PTY gets real tab/backtab bytes and focus never jumps
-        // to sidebar buttons mid-session. ⌘V is unbound globally.
+        // to sidebar buttons mid-session. Paste is unbound globally.
         KeyBinding::new("tab", TermTab, Some("Terminal")),
         KeyBinding::new("shift-tab", TermBacktab, Some("Terminal")),
-        KeyBinding::new("cmd-v", TermPaste, Some("Terminal")),
-        // ⌘C copies the mouse selection when one exists (the
+        KeyBinding::new(PASTE_ACCEL, TermPaste, Some("Terminal")),
+        // Copy grabs the mouse selection when one exists (the
         // handler propagates otherwise); PTYs never see it.
-        KeyBinding::new("cmd-c", TermCopy, Some("Terminal")),
-        // Outside the terminal, ⌘C copies the active diff-pane
+        KeyBinding::new(COPY_ACCEL, TermCopy, Some("Terminal")),
+        // Outside the terminal, copy grabs the active diff-pane
         // text selection (window-scoped `TextSelection`); the
         // handler propagates when nothing is selected.
-        KeyBinding::new("cmd-c", input::Copy, None),
-        // Two find bars share ⌘F by focus. gpui ranks a binding by
-        // the deepest stack slice its predicate needs: a named
-        // context sitting at the focused element scores len, a
+        KeyBinding::new(COPY_ACCEL, input::Copy, None),
+        // Two find bars share one chord by focus. gpui ranks a
+        // binding by the deepest stack slice its predicate needs: a
+        // named context sitting at the focused element scores len, a
         // predicate-less binding always scores len, and ties go to
         // the later binding — so a bare None here would permanently
         // out-rank the Terminal binding below. `!Terminal` matches
@@ -249,37 +317,37 @@ fn key_bindings() -> Vec<KeyBinding> {
         // else ("Terminal" absent from every slice). When a bar's
         // input already holds focus its own action refocuses it
         // with the query selected, matching platform find bars.
-        KeyBinding::new("cmd-f", TermSearch, Some("Terminal")),
-        KeyBinding::new("cmd-f", DiffSearch, Some("!Terminal")),
+        KeyBinding::new(FIND_ACCEL, TermSearch, Some("Terminal")),
+        KeyBinding::new(FIND_ACCEL, DiffSearch, Some("!Terminal")),
         // The diff pane's find bar: once its input holds focus the
         // "DiffSearch" context is on the dispatch path. Enter/
         // Shift-Enter come from the input itself (it dispatches
         // the `Enter` action), handled on the bar in
         // `ui::diff_panel`.
-        KeyBinding::new("cmd-g", DiffSearchNext, Some("DiffSearch")),
-        KeyBinding::new("cmd-shift-g", DiffSearchPrev, Some("DiffSearch")),
+        KeyBinding::new("secondary-g", DiffSearchNext, Some("DiffSearch")),
+        KeyBinding::new("secondary-shift-g", DiffSearchPrev, Some("DiffSearch")),
         // The terminal bar's match-cycling: its "TerminalSearch"
         // context (set on the bar in `ui::terminal`) is deeper
         // than the surface's "Terminal", so these win while its
         // input holds focus.
-        KeyBinding::new("cmd-g", TermSearchNext, Some("TerminalSearch")),
-        KeyBinding::new("cmd-shift-g", TermSearchPrev, Some("TerminalSearch")),
-        // The standalone settings window: Escape/⌘W close it (the
-        // deeper context beats the global ⌘W → CloseSession).
+        KeyBinding::new("secondary-g", TermSearchNext, Some("TerminalSearch")),
+        KeyBinding::new("secondary-shift-g", TermSearchPrev, Some("TerminalSearch")),
+        // The standalone settings window: Escape / secondary+W close
+        // it (the deeper context beats the global close-session one).
         KeyBinding::new("escape", CloseSettings, Some("SettingsWindow")),
-        KeyBinding::new("cmd-w", CloseSettings, Some("SettingsWindow")),
+        KeyBinding::new("secondary-w", CloseSettings, Some("SettingsWindow")),
     ]
 }
 
 #[cfg(test)]
 mod tests {
-    use super::key_bindings;
+    use super::{COPY_ACCEL, FIND_ACCEL, PASTE_ACCEL, key_bindings};
     use gpui_kit::{KeyContext, Keymap, Keystroke};
 
-    /// Highest-precedence action gpui would dispatch for `keystroke`
-    /// given a context stack (bottom → top, as the dispatch tree
-    /// builds it).
-    fn winner(keystroke: &str, stack: &[&str]) -> String {
+    /// The fallback chain gpui would dispatch for `keystroke`, in
+    /// precedence order, given a context stack (bottom → top, as the
+    /// dispatch tree builds it).
+    fn chain(keystroke: &str, stack: &[&str]) -> Vec<String> {
         let keymap = Keymap::new(key_bindings());
         let contexts = stack
             .iter()
@@ -288,74 +356,87 @@ mod tests {
         let keystrokes = vec![Keystroke::parse(keystroke).unwrap()];
         let (bindings, _) = keymap.bindings_for_input(&keystrokes, &contexts);
         bindings
-            .first()
-            .map(|b| b.action().name())
-            .unwrap_or_default()
-            .to_string()
+            .iter()
+            .map(|b| b.action().name().to_string())
+            .collect()
     }
 
-    /// ⌘F must open the search bar of whichever pane holds focus.
-    /// Regression: the diff binding used a predicate-less context,
-    /// which ties any named context on depth and wins the
-    /// later-binding tiebreak — so ⌘F in the terminal opened the
+    /// Highest-precedence action gpui would dispatch for `keystroke`.
+    fn winner(keystroke: &str, stack: &[&str]) -> String {
+        chain(keystroke, stack).first().cloned().unwrap_or_default()
+    }
+
+    /// The find chord must open the search bar of whichever pane holds
+    /// focus. Regression: the diff binding used a predicate-less
+    /// context, which ties any named context on depth and wins the
+    /// later-binding tiebreak — so the chord in the terminal opened the
     /// diff pane's bar.
     #[test]
-    fn cmd_f_routes_by_focus() {
+    fn find_routes_by_focus() {
         // Terminal surface focused.
-        assert_eq!(winner("cmd-f", &["Root", "Terminal"]), "ddu::TermSearch");
+        assert_eq!(winner(FIND_ACCEL, &["Root", "Terminal"]), "ddu::TermSearch");
         // Terminal find bar's input focused (its own context on top
         // of the surface's).
         assert_eq!(
-            winner("cmd-f", &["Root", "Terminal", "TerminalSearch"]),
+            winner(FIND_ACCEL, &["Root", "Terminal", "TerminalSearch"]),
             "ddu::TermSearch"
         );
         // Diff find bar's input focused.
-        assert_eq!(
-            winner("cmd-f", &["Root", "DiffSearch"]),
-            "ddu::DiffSearch"
-        );
+        assert_eq!(winner(FIND_ACCEL, &["Root", "DiffSearch"]), "ddu::DiffSearch");
         // Anything else (sidebar rows don't take focus, so the
         // gpui-component Root context stays on the path).
-        assert_eq!(winner("cmd-f", &["Root"]), "ddu::DiffSearch");
+        assert_eq!(winner(FIND_ACCEL, &["Root"]), "ddu::DiffSearch");
         // Note: gpui's `Not` predicate never evaluates against an
         // empty context stack (its eval guards on a non-empty slice),
         // but the dispatch path always includes at least the Root
         // context, so the unbound case can't occur in the app.
     }
 
-    /// ⌘C fallback chain: the diff-pane copy runs first and yields
+    /// Copy's fallback chain: the diff-pane copy runs first and yields
     /// to the terminal copy when a terminal selection exists.
     #[test]
-    fn cmd_c_falls_back_to_terminal() {
-        let names = |stack: &[&str]| {
-            let keymap = Keymap::new(key_bindings());
-            let contexts = stack
-                .iter()
-                .map(|c| KeyContext::parse(c).unwrap())
-                .collect::<Vec<_>>();
-            let keystrokes = vec![Keystroke::parse("cmd-c").unwrap()];
-            let (bindings, _) = keymap.bindings_for_input(&keystrokes, &contexts);
-            bindings
-                .iter()
-                .map(|b| b.action().name().to_string())
-                .collect::<Vec<_>>()
-        };
+    fn copy_falls_back_to_terminal() {
         assert_eq!(
-            names(&["Root", "Terminal"]),
+            chain(COPY_ACCEL, &["Root", "Terminal"]),
             vec!["input::Copy", "ddu::TermCopy"]
         );
-        assert_eq!(names(&["Root"]), vec!["input::Copy"]);
+        assert_eq!(chain(COPY_ACCEL, &["Root"]), vec!["input::Copy"]);
+    }
+
+    /// The terminal shares the keyboard with the shell it runs, so the
+    /// chords readline and the OS own must stay unbound inside it:
+    /// Ctrl-C is SIGINT, Ctrl-D ends input, Ctrl-Z suspends, and
+    /// Ctrl-V/ Ctrl-F/ Ctrl-\\ belong to readline. macOS is exempt —
+    /// the PTY never sees ⌘ chords, so the shared chords are already
+    /// out of the PTY's way.
+    #[test]
+    fn shell_control_keys_stay_with_the_shell() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        for key in ["ctrl-c", "ctrl-d", "ctrl-v", "ctrl-f", "ctrl-z", "ctrl-\\"] {
+            assert_eq!(
+                winner(key, &["Root", "Terminal"]),
+                "",
+                "{key} must reach the shell, not an app action"
+            );
+        }
+        // What the terminal surface does claim is copy/paste/find, in
+        // the shifted space no shell reads.
+        let term = ["Root", "Terminal"];
+        assert!(chain(COPY_ACCEL, &term).contains(&"ddu::TermCopy".to_string()));
+        assert!(chain(PASTE_ACCEL, &term).contains(&"ddu::TermPaste".to_string()));
+        assert_eq!(winner(FIND_ACCEL, &term), "ddu::TermSearch");
     }
 }
 
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // Global shortcuts: ⌘N new session, ⌘B sessions, ⌘T file tree,
-        // ⌘R changes, ⌘W close. (⌘, OpenSettings lives at app level in
-        // main.rs so the Settings menu item can resolve its ⌘, hint.)
+        // Global shortcuts: secondary+N new session, +B sessions, +T
+        // file tree, +R changes, +W close (⌘ on macOS, ⌃ elsewhere).
+        // (OpenSettings lives at app level in main.rs so the Settings
+        // menu item can resolve its hint.)
         cx.bind_keys(key_bindings());
-            // (guarded: with no projects there is nothing to spawn
-            // into); ⌘O adds a project via the folder picker. ⌘T
 
         let cfg = cx.global::<crate::config::Config>().clone();
         let state = cx.global::<crate::config::State>().clone();
@@ -402,7 +483,7 @@ impl AppView {
             shell_state: cx.new(|_| ResizableState::default()),
             panes_state: cx.new(|_| ResizableState::default()),
             diff_tree_scroll: ScrollHandle::new(),
-            diff_hunks_scroll: ScrollHandle::new(),
+            diff_hunks_scroll: VirtualListScrollHandle::new(),
             sessions_scroll: ScrollHandle::new(),
             sidebar_split_state: cx.new(|_| ResizableState::default()),
             show_diff_tree: state.show_diff_tree,
@@ -417,10 +498,12 @@ impl AppView {
             diff_seed_path: None,
             diff_tree_height_seed: None,
             session_seq: 0,
+            suppress_resize_records: 0,
             diff: None,
             diff_error: None,
             diff_search: diff::DiffSearch::new(window, cx),
             diff_seq: 0,
+            diff_limits: std::collections::HashMap::new(),
             shutting_down: false,
             quit_after_shutdown: false,
             window_placement: state.window,
@@ -460,6 +543,12 @@ impl AppView {
                     let resize = resize.clone();
                     cx.spawn(async move |this, cx| {
                         let _ = this.update(cx, |this, cx| {
+                            // Render-time re-assertion, not a drag:
+                            // don't record/persist it.
+                            if this.suppress_resize_records > 0 {
+                                this.suppress_resize_records -= 1;
+                                return;
+                            }
                             let sizes = resize.read(cx).sizes();
                             // Outer drag: slot 0 is the sidebar.
                             match resize.entity_id() == this.shell_state.entity_id() {
@@ -515,7 +604,7 @@ impl AppView {
                         if !this.diff_search.matches.is_empty() {
                             this.diff_search.current = 0;
                             this.diff_hunks_scroll
-                                .scroll_to_item(this.diff_search.matches[0]);
+                                .scroll_to_item(this.diff_search.matches[0], ScrollStrategy::Nearest);
                         }
                     }
                 },
@@ -578,7 +667,7 @@ impl AppView {
         this.diff_tree_closed = closed;
         this.diff_tree_height_seed = height
             .map(gpui::px)
-            .filter(|h| h.as_f32() >= TREE_MIN_H as f32 && h.as_f32() <= TREE_MAX_H as f32);
+            .filter(|h| h.as_f32() >= tree_min_h() && h.as_f32() <= tree_max_h());
 
         // Surface settings/state load failures once: bundled launches
         // lose stderr, so corrupt-file/backup warnings would otherwise
@@ -829,29 +918,79 @@ impl Render for AppView {
                 // Two nested splitters. The sidebar column owns a status
                 // strip, so the LEFT divider runs to the window's bottom
                 // edge; the terminal/changes region wraps its splitter
-                let panes_min = CENTER_MIN + if self.show_diff { DIFF_MIN } else { 0. } + 8.;
+                let panes_min = center_min() + if self.show_diff { diff_min() } else { 0. } + ui::scaled(8.);
                 // The diff pane flexes with the window: its drag cap
                 // scales with the viewport (a fixed cap reads cramped
                 // on a big display), floored at DIFF_MAX.
-                let diff_max = (window.viewport_size().width.as_f32() * 0.6).max(DIFF_MAX);
+                let diff_max = (window.viewport_size().width.as_f32() * 0.6).max(diff_max());
                 // A container (window) resize proportionally rescales
                 // every splitter panel that has a recorded size —
                 // gpui-base's `adjust_to_container_size` bails only
-                // while some panel is unpinned. Keep the region slot
-                // unpinned so the sidebar width survives window
-                // resizes; the region's flex absorbs the whole delta.
+                // while some panel is unpinned, and its
+                // `update_panel_size` pins EVERY slot at its first
+                // measured bounds. Keep the flex slots (the region,
+                // the center pane) unpinned so the recorded sidebar /
+                // diff widths survive window resizes verbatim; the
+                // flex slot absorbs the whole delta.
                 self.shell_state.update(cx, |state, cx| {
                     if state.sizes().len() > 1 {
                         state.reset_panel(1, cx);
                     }
                 });
+                self.panes_state.update(cx, |state, cx| {
+                    if state.sizes().len() > 1 {
+                        state.reset_panel(0, cx);
+                    }
+                });
+                // Heal drift baked in while every slot was still
+                // pinned (startup's resize burst): re-assert the
+                // recorded widths. Skipped when the window is too
+                // narrow to honor them — the clamped layout is then
+                // correct as-is, and retrying would emit a Resized
+                // event every frame.
+                if self.show_sessions {
+                    let sidebar_w = self.last_sidebar_w();
+                    let fits =
+                        sidebar_w + px(panes_min + 12.) <= self.shell_state.read(cx).container_size();
+                    if fits
+                        && self
+                            .shell_state
+                            .read(cx)
+                            .sizes()
+                            .first()
+                            .is_some_and(|cur| (*cur - sidebar_w).abs() > px(1.))
+                    {
+                        self.suppress_resize_records += 1;
+                        self.shell_state.update(cx, |state, cx| {
+                            state.resize_panel(0, sidebar_w, window, cx);
+                        });
+                    }
+                }
+                if self.show_diff {
+                    let diff_w = self.last_diff_w();
+                    let fits =
+                        diff_w + px(center_min() + 12.) <= self.panes_state.read(cx).container_size();
+                    if fits
+                        && self
+                            .panes_state
+                            .read(cx)
+                            .sizes()
+                            .last()
+                            .is_some_and(|cur| (*cur - diff_w).abs() > px(1.))
+                    {
+                        self.suppress_resize_records += 1;
+                        self.panes_state.update(cx, |state, cx| {
+                            state.resize_panel(1, diff_w, window, cx);
+                        });
+                    }
+                }
                 let mut shell = h_resizable("shell").with_state(&self.shell_state);
                 if self.show_sessions {
                     shell = shell.child(
                         resizable_panel()
                             .size(self.last_sidebar_w())
                             .flex_none()
-                            .size_range(px(SIDEBAR_MIN)..px(SIDEBAR_MAX))
+                            .size_range(px(sidebar_min())..px(sidebar_max()))
                             .child(
                                 v_flex()
                                     .size_full()
@@ -876,7 +1015,7 @@ impl Render for AppView {
                 let mut panes = h_resizable("panes").with_state(&self.panes_state);
                 panes = panes.child(
                     resizable_panel()
-                        .size_range(px(CENTER_MIN)..px(f32::MAX))
+                        .size_range(px(center_min())..px(f32::MAX))
                         .child(
                             div()
                                 .size_full()
@@ -893,7 +1032,7 @@ impl Render for AppView {
                     panes = panes.child(
                         resizable_panel()
                             .size(self.last_diff_w())
-                            .size_range(px(DIFF_MIN)..px(diff_max))
+                            .size_range(px(diff_min())..px(diff_max))
                             .child(
                                 div()
                                     .size_full()

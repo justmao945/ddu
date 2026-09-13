@@ -7,7 +7,7 @@ use super::{DiffFile, DiffHunk, DiffLine, GitDiff, MAX_LINES_PER_FILE};
 use git2::{DiffDelta, Repository};
 
 /// Diff the project against HEAD (staged + unstaged + untracked).
-pub fn head_diff(path: &Path) -> anyhow::Result<GitDiff> {
+pub fn head_diff(path: &Path, limits: &std::collections::HashMap<String, usize>) -> anyhow::Result<GitDiff> {
     let repo = Repository::discover(path)?;
     let branch = repo
         .head()
@@ -40,7 +40,8 @@ pub fn head_diff(path: &Path) -> anyhow::Result<GitDiff> {
         None,
         Some(&mut |_, hunk: git2::DiffHunk| {
             if let Some(file) = files.borrow_mut().last_mut() {
-                if file.lines_total >= MAX_LINES_PER_FILE {
+                let limit = limits.get(&file.path).copied().unwrap_or(MAX_LINES_PER_FILE);
+                if file.lines_total >= limit {
                     return true;
                 }
                 file.hunks.push(DiffHunk {
@@ -64,7 +65,8 @@ pub fn head_diff(path: &Path) -> anyhow::Result<GitDiff> {
                 '-' => file.removed += 1,
                 _ => {}
             }
-            if file.lines_total < MAX_LINES_PER_FILE {
+            let limit = limits.get(&file.path).copied().unwrap_or(MAX_LINES_PER_FILE);
+            if file.lines_total < limit {
                 if let Some(hunk) = file.hunks.last_mut() {
                     hunk.lines.push(DiffLine {
                         kind: origin,
@@ -120,7 +122,7 @@ mod tests {
         std::fs::write(&file, "line one\nline two changed\n").unwrap();
         std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
 
-        let diff = head_diff(&dir).expect("head_diff");
+        let diff = head_diff(&dir, &Default::default()).expect("head_diff");
         assert_eq!(diff.branch.as_deref(), repo.head().unwrap().shorthand());
 
         let hello = diff
@@ -153,13 +155,13 @@ mod tests {
 
         let nested = dir.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
-        assert_eq!(head_diff(&nested).unwrap(), diff);
+        assert_eq!(head_diff(&nested, &Default::default()).unwrap(), diff);
         std::fs::write(
             dir.join("large.txt"),
             "line\n".repeat(MAX_LINES_PER_FILE + 10),
         )
         .unwrap();
-        let large = head_diff(&dir)
+        let large = head_diff(&dir, &Default::default())
             .unwrap()
             .files
             .into_iter()
@@ -172,6 +174,18 @@ mod tests {
             large.hunks.iter().map(|h| h.lines.len()).sum::<usize>(),
             MAX_LINES_PER_FILE
         );
+        // A raised per-file budget lifts the cap: the same diff parses in
+        // full once the pane's scroll-driven expansion kicks in.
+        let mut limits = std::collections::HashMap::new();
+        limits.insert("large.txt".to_owned(), MAX_LINES_PER_FILE * 4);
+        let large = head_diff(&dir, &limits)
+            .unwrap()
+            .files
+            .into_iter()
+            .find(|f| f.path == "large.txt")
+            .unwrap();
+        assert!(!large.truncated);
+        assert_eq!(large.lines_total, MAX_LINES_PER_FILE + 10);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

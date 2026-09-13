@@ -78,13 +78,13 @@ impl AppView {
 
     pub(super) fn last_sidebar_w(&self) -> Pixels {
         self.last_sidebar_size
-            .filter(|w| *w >= px(SIDEBAR_MIN))
-            .unwrap_or(px(SIDEBAR_DEFAULT))
+            .filter(|w| *w >= px(sidebar_min()))
+            .unwrap_or(px(sidebar_default()))
     }
 
     pub(super) fn last_diff_w(&self) -> Pixels {
         self.last_diff_size
-            .filter(|w| *w >= px(DIFF_MIN))
-            .unwrap_or(px(DIFF_DEFAULT))
+            .filter(|w| *w >= px(diff_min()))
+            .unwrap_or(px(diff_default()))
     }
 }

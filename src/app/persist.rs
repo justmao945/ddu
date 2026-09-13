@@ -141,7 +141,7 @@ impl AppView {
                     s.closed_dirs.iter().cloned().collect();
                 let tree_height = s
                     .tree_height
-                    .filter(|h| *h >= TREE_MIN_H && *h <= TREE_MAX_H);
+                    .filter(|h| *h >= tree_min_h() && *h <= tree_max_h());
                 let (status, term) = if restores_running(&s, ix == current) {
                     let spec = match s.resume.as_deref() {
                         Some(id) if s.kind != "terminal" => cmd.resume_spec(&cwd, id),

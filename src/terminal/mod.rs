@@ -1088,13 +1088,24 @@ impl EntityInputHandler for TermSession {
         None
     }
 
+    /// A caret at offset 0 of that empty document. The platform's IME
+    /// placement pulls (`ime_candidate_bounds` / `selected_bounds`)
+    /// give up when there is no selection, so answering `None` leaves
+    /// the candidate popup unanchored: on Wayland no
+    /// `set_cursor_rectangle` is ever sent and fcitx5 keeps the popup
+    /// wherever it last drew it. Reporting an empty selection instead
+    /// routes those pulls into [`Self::bounds_for_range`], which answers
+    /// with the grid cursor's cell.
     fn selected_text_range(
         &mut self,
         _: bool,
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        None
+        Some(UTF16Selection {
+            range: 0..0,
+            reversed: false,
+        })
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {

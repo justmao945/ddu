@@ -11,15 +11,19 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::setting::SettingItem;
 use gpui_kit::*;
 
-/// Common macOS shells for the program dropdown. Only entries that
+/// Common shells for the program dropdown. Only entries that
 /// actually exist on this machine are listed — uninstalled shells
 /// would spawn-and-die with a cryptic PTY error.
 pub(super) const SHELLS: &[&str] = &[
-    "/bin/zsh",
     "/bin/bash",
+    "/usr/bin/bash",
+    "/bin/zsh",
+    "/usr/bin/zsh",
     "/bin/sh",
+    "/usr/bin/fish",
     "/opt/homebrew/bin/fish",
     "/usr/local/bin/fish",
+    "/usr/bin/nu",
     "/opt/homebrew/bin/nu",
     "/usr/local/bin/nu",
 ];

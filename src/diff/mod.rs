@@ -35,9 +35,15 @@ pub fn match_rows(file: &DiffFile, query: &str) -> Vec<usize> {
     rows
 }
 
-/// Hard cap on collected diff lines per file (docs/DESIGN.md §11); the stat
-/// counts keep going so `+a/-b` stays truthful.
+/// Initial cap on collected diff lines per file (docs/DESIGN.md §11); the
+/// stat counts keep going so `+a/-b` stays truthful. A truncated file's
+/// budget grows (×4, up to [`EXPAND_MAX_LINES`]) when the pane's scroll
+/// reaches the cap note — the virtualized list keeps large diffs cheap.
 pub const MAX_LINES_PER_FILE: usize = 5000;
+
+/// Hard ceiling for the scroll-driven budget growth: past this the
+/// truncation note stays and no more lines load.
+pub const EXPAND_MAX_LINES: usize = 200_000;
 
 /// One changed file with its hunks.
 #[derive(Debug, Clone, Default, PartialEq)]

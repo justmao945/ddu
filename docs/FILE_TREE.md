@@ -37,7 +37,7 @@
 | Model | `src/diff/mod.rs` | `GitDiff { branch, files }`, `DiffFile { path, added, removed, hunks, lines_total, truncated }`, `DiffLine { kind: ' ' \| '+' \| '-', old_no, new_no, text }`, `DiffFile::rows()` (= `Header`/`Line` walk), `match_rows`, `MAX_LINES_PER_FILE = 5000`, `SEARCH_MAX_MATCHES = 500` |
 | Query | `src/diff/git.rs::head_diff` | `Repository::discover` → `diff_tree_to_workdir_with_index(head_tree, opts)` with `include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true)`; per-file line cap |
 | Flow | `src/app/diff.rs` | 3 s poll (`DIFF_POLL_SECS`, `src/app/mod.rs`), `reload_diff` + `diff_seq` stale guard, `apply_diff` re-pins the selection **by path** through `diff_seed_path`, `DiffSearch` (⌘F) match list = child-row indices |
-| Tree UI | `src/ui/diff_tree.rs` | `TreeNode { files, dirs }` built in `render` from `&[DiffFile]`; `tree_stats` rollup; `flatten` → `TreeRow::{File,Dir}`; `guides(depth)` stripes; `dir_row`/`file_row`; collapse set = "present in `diff_tree_closed` means collapsed" (all-open default); `plus_minus`; `TREE_{DEFAULT,MIN,MAX}_H` |
+| Tree UI | `src/ui/diff_tree.rs` | `TreeNode { files, dirs }` built in `render` from `&[DiffFile]`; `tree_stats` rollup; `flatten` → `TreeRow::{File,Dir}`; `guides(depth)` stripes; `dir_row`/`file_row`; collapse set = "present in `diff_tree_closed` means collapsed" (all-open default); `plus_minus`; `tree_{default,min,max}_h()` (scale-aware) |
 | Pane UI | `src/ui/diff_panel.rs` | `panel_view!` → cached child view; `header` (path + `+a/−b`), `body` (scroll container whose **direct children are the rows**, `into_row(el, content_w)`), `diff_line` (two 36 px number gutters + 14 px sign column, green/red 0.12 tints, yellow search tints 0.30/0.13, `SelectableText` per line), `measure_content_width` (top 16 lines shaped exactly), `hunk_header`, `find_bar` |
 | State | `src/app/mod.rs` | `diff`, `diff_error`, `diff_file: Option<usize>`, `diff_seed_path`, `diff_tree_closed: HashSet<String>`, `diff_tree_scroll`, `diff_hunks_scroll`, `sidebar_split_state`, `show_diff_tree`, `diff_tree_height_seed`, `diff_search`, `diff_pane: Entity<...PanelView>` |
 | Mount | `src/app/mod.rs:1078`, `src/ui/session_panel.rs:83-129` | `diff_pane.cached(diff_panel::root_style())`; the tree layer is the sidebar's lower splitter slot, `.visible(show_diff_tree)` |
@@ -246,7 +246,7 @@ is persisted per session as today (`persist()` reads it into the session slot).
   subtrees; a user who opens a 20k-file folder pays for those rows only.
   Escape hatch if that still bites: `component::list::{List, ListDelegate,
   ListState}` (`list/delegate.rs:8`) virtualizes uniform-height rows — our rows
-  are all `ROW_PX` tall, so it is a drop-in, but it changes the band/scrollbar
+  are all `row_px()` tall, so it is a drop-in, but it changes the band/scrollbar
   look; only take it behind a measurement (tree render > ~8 ms p50, the same bar
   the terminal pacing uses).
 * Markdown: one parse per pane notify; keep the element id stable

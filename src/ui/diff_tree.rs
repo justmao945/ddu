@@ -2,7 +2,7 @@
 //! with rolled-up +/− stats, guide-line indentation, and a per-file
 //! context menu. Selecting a file drives the right pane's hunks view.
 
-use super::{PANEL_HEADER_PX, ROW_PX, diff_file_icon, hover_bg, meta_text, selection_bg};
+use super::{diff_file_icon, hover_bg, meta_text, panel_header_px, row_px, scaled, selection_bg};
 use gpui_kit::component::menu::{PopupMenuItem, *};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
@@ -12,13 +12,23 @@ use gpui_kit::*;
 use crate::app::AppView;
 use crate::diff::DiffFile;
 
-/// Layer height bounds and default for the sidebar's vertical splitter.
-pub(crate) const TREE_DEFAULT_H: f32 = 220.;
-pub(crate) const TREE_MIN_H: f32 = 80.;
-pub(crate) const TREE_MAX_H: f32 = 480.;
+/// Layer height bounds and default for the sidebar's vertical splitter
+/// (base sizes at factor 1.0 — see `scaled`).
+pub(crate) fn tree_default_h() -> f32 {
+    scaled(220.)
+}
+pub(crate) fn tree_min_h() -> f32 {
+    scaled(80.)
+}
+pub(crate) fn tree_max_h() -> f32 {
+    scaled(480.)
+}
 
-/// Indent added per nesting level (the guide wrapper's left margin).
-const LEVEL_INDENT: f32 = 14.;
+/// Indent added per nesting level, base at factor 1.0 (the guide
+/// wrapper's left margin).
+fn level_indent() -> f32 {
+    scaled(14.)
+}
 
 /// The sidebar's lower layer: the working tree's changed files.
 pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -48,7 +58,7 @@ pub(crate) fn render(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         // Summary strip: what the working tree changes in total.
         .child(
             div()
-                .h(px(PANEL_HEADER_PX))
+                .h(px(panel_header_px()))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
@@ -195,7 +205,7 @@ fn guides(depth: usize, color: Hsla) -> Vec<Div> {
         .map(|lvl| {
             div()
                 .absolute()
-                .left(px(LEVEL_INDENT * lvl as f32))
+                .left(px(level_indent() * lvl as f32))
                 .top_0()
                 .bottom_0()
                 .w(px(1.))
@@ -264,14 +274,14 @@ fn dir_row(
         )))
         .relative()
         .w_full()
-        .h(px(ROW_PX))
+        .h(px(row_px()))
         .flex_shrink_0()
         .flex()
         .items_center()
         .gap_1()
         // Indent is inner padding: the row (and its hover band) spans
         // the full layer width at every depth.
-        .pl(px(4. + LEVEL_INDENT * depth as f32))
+        .pl(px(4. + level_indent() * depth as f32))
         .pr_2()
         .cursor_pointer()
         .hover(move |el| el.bg(hov_bg))
@@ -295,7 +305,7 @@ fn dir_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_xs()
+                .text_sm()
                 .font_medium()
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -329,12 +339,12 @@ fn file_row(
         )))
         .relative()
         .w_full()
-        .h(px(ROW_PX))
+        .h(px(row_px()))
         .flex_shrink_0()
         .flex()
         .items_center()
         .gap_2()
-        .pl(px(4. + LEVEL_INDENT * depth as f32))
+        .pl(px(4. + level_indent() * depth as f32))
         .pr_2()
         .cursor_pointer()
         .map(|el| if active { el.bg(active_bg) } else { el })
@@ -366,7 +376,7 @@ fn file_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_xs()
+                .text_sm()
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
@@ -405,18 +415,18 @@ pub(crate) fn plus_minus(
         .flex_shrink_0()
         .flex()
         .justify_end()
-        .text_xs()
+        .text_sm()
         .font_family(mono)
         .child(
             div()
-                .min_w(px(34.))
+                .min_w(px(scaled(34.)))
                 .text_right()
                 .text_color(cx.theme().green)
                 .child(format!("+{added}")),
         )
         .child(
             div()
-                .min_w(px(34.))
+                .min_w(px(scaled(34.)))
                 .text_right()
                 .text_color(cx.theme().red)
                 .child(format!("−{removed}")),

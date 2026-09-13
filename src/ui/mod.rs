@@ -14,10 +14,39 @@ pub(crate) mod status_bar;
 pub(crate) mod terminal;
 pub(crate) mod title_bar;
 
-/// Shared height of the session/changes panel headers (Zed: ~28px).
-pub(crate) const PANEL_HEADER_PX: f32 = 32.;
+/// Shell geometry follows the desktop text scale: the text inside these
+/// rows already grows with it (through the rem root), so fixed-px
+/// geometry would shrink *relative to its text* on a scaled desktop.
+/// Base values are the design sizes at factor 1.0.
+pub(crate) fn scaled(base: f32) -> f32 {
+    base * crate::config::desktop_text_scale()
+}
+
+/// Shared height of the session/changes panel headers (Zed: ~28px at
+/// factor 1.0).
+pub(crate) fn panel_header_px() -> f32 {
+    scaled(32.)
+}
+
 /// Shared height of a selectable single-line list row.
-pub(crate) const ROW_PX: f32 = 26.;
+pub(crate) fn row_px() -> f32 {
+    scaled(26.)
+}
+
+/// Re-apply ddu's mono typography after `Theme::change` resets it to
+/// the registry defaults (stock size + platform family): the
+/// configured terminal face and size. The theme's mono family drives
+/// the terminal, the diff pane and the diff tree, so it must mirror
+/// `terminal_font` — otherwise they keep rendering in the registry's
+/// fallback face even when a terminal font is configured.
+pub(crate) fn apply_mono_typography(cx: &mut App) {
+    let config = cx.global::<crate::config::Config>();
+    let family: SharedString = config.mono_family().into();
+    let size = px(config.terminal_font_size());
+    let theme = Theme::global_mut(cx);
+    theme.mono_font_family = family;
+    theme.mono_font_size = size;
+}
 
 /// Dim count/meta text next to a panel label.
 pub(crate) fn meta_text(text: impl Into<SharedString>, cx: &App) -> Div {

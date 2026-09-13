@@ -129,11 +129,16 @@ fn main() {
             None,
             cx,
         );
-        Theme::global_mut(cx).font_size = px(14.);
-        // Terminal cells use the theme's mono size; `Theme::change`
-        // just reset it from the registry defaults, so re-apply the
-        // configured value (falls back to the stock 13px).
-        Theme::global_mut(cx).mono_font_size = px(config.terminal_font_size());
+        // UI base size: the designed 14px, scaled by the desktop's text
+        // scale (`omarchy display text size`, GTK's text-scaling-factor)
+        // so the chrome matches the rest of the desktop's text instead
+        // of sitting at stock size next to it.
+        Theme::global_mut(cx).font_size = px(config::ui_font_size());
+        // Mono typography (family + size) mirrors the terminal config;
+        // `Theme::change` just reset both from the registry defaults,
+        // so re-apply (family falls back to the platform stock mono,
+        // size to the stock 13px, scaled the same way).
+        crate::ui::apply_mono_typography(cx);
         // Overlay scrollbars reveal on hover, macOS-style. The terminal's
         // custom scrollbar already always hover-reveals; the Base scrollbars
         // (diff tree, diff pane) default to `ScrollbarMode::Scrolling` (the
@@ -146,15 +151,16 @@ fn main() {
         // route through the window's confirm dialog + graceful shutdown.
         cx.set_global(ExitHook(None));
 
-        // Application menu. The keymap binding for `Quit` (cmd-q) must
-        // exist before the menu is built — the menu item resolves its
-        // shortcut from the keymap — so it is registered at app level
-        // here. `OpenSettings` is too: `set_menus` runs before any window
-        // exists, so the per-window bindings in `AppView::new` are not yet
-        // in the keymap and the Settings item would lose its ⌘, hint.
+        // Application menu. The keymap binding for `Quit` (secondary-q)
+        // must exist before the menu is built — the menu item resolves
+        // its shortcut from the keymap — so it is registered at app
+        // level here. `OpenSettings` is too: `set_menus` runs before any
+        // window exists, so the per-window bindings in `AppView::new`
+        // are not yet in the keymap and the Settings item would lose
+        // its hint.
         cx.bind_keys([
-            KeyBinding::new("cmd-q", app::Quit, None),
-            KeyBinding::new("cmd-,", app::OpenSettings, None),
+            KeyBinding::new("secondary-q", app::Quit, None),
+            KeyBinding::new("secondary-,", app::OpenSettings, None),
         ]);
         cx.set_menus([Menu::new("ddu").items(vec![
             MenuItem::action("Settings…", app::OpenSettings),
@@ -227,7 +233,10 @@ fn open_main_window(cx: &mut gpui_kit::App) {
     };
     let options = WindowOptions {
         window_bounds: Some(window_bounds),
-        window_min_size: Some(size(px(app::WINDOW_MIN_WIDTH), px(app::WINDOW_MIN_HEIGHT))),
+        window_min_size: Some(size(
+            px(app::window_min_width()),
+            px(app::window_min_height()),
+        )),
         ..TitleBar::window_options()
     };
     cx.spawn(async move |cx| {
