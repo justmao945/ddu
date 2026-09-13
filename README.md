@@ -65,8 +65,15 @@ To install the app into `/Applications` under the official identity ("Day Day Up
 
 ## Under the hood
 
-[gpui](https://github.com/zed-industries/zed) via [gpui-kit](https://github.com/longbridge/gpui-kit) for UI, [alacritty_terminal](https://crates.io/crates/alacritty_terminal) for the terminal grid and ANSI parsing, [portable-pty](https://crates.io/crates/portable-pty) for PTYs, and [git2](https://crates.io/crates/git2) for diffs. Apache-2.0 throughout, GPL-free.
+[gpui](https://github.com/zed-industries/zed) via [gpui-kit](https://github.com/longbridge/gpui-kit) for UI, [alacritty_terminal](https://crates.io/crates/alacritty_terminal) for the terminal grid and ANSI parsing, [portable-pty](https://crates.io/crates/portable-pty) for PTYs, and [git2](https://crates.io/crates/git2) for diffs. Apache-2.0 throughout the app, GPL-free.
+
+## Beyond the app
+
+Two things in this repo are not part of the Rust build:
+
+- [`contrib/usage/`](contrib/usage/) — **UsageTray**: a macOS menu-bar tray (Swift) showing live plan usage for Kimi Code, Zhipu GLM Coding Plan, OpenCode Go and Command Code, plus an Omarchy bar-widget port of the same four providers. MIT-licensed, see [`contrib/usage/LICENSE`](contrib/usage/LICENSE).
+- [`docs/omarchy/`](docs/omarchy/) — notes on the Omarchy desktop tweaks ddu lives alongside: the text-size switch (the same one ddu's UI scale follows) and the fcitx5 input panel.
 
 ## License
 
-Apache-2.0
+Apache-2.0 for the app; `contrib/usage/` is MIT.

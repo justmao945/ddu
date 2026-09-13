@@ -4,7 +4,8 @@ Multi-agent workspace: left = projects + agent sessions, center = PTY terminal
 (runs `terminal` / `claude` / `codex` CLIs), right = live git diff. Rust +
 `gpui-kit = "0.6"` (re-exports `gpui-pre 0.3.3` + `gpui-component 0.6`).
 Targets macOS and Linux (X11/Wayland).
-License: Apache-2.0, GPL-free throughout. Design docs: `docs/DESIGN.md` (the app),
+License: Apache-2.0, GPL-free throughout (`contrib/usage/` is MIT — see
+`contrib/usage/LICENSE`). Design docs: `docs/DESIGN.md` (the app),
 `docs/AGENT_CORE.md` (in-process agent core — design, not yet implemented).
 
 ## Source map
@@ -43,6 +44,13 @@ License: Apache-2.0, GPL-free throughout. Design docs: `docs/DESIGN.md` (the app
   `config::desktop_text_scale()`, so layout tracks the GTK text scale
   the fonts already follow; selection = `foreground.opacity(0.12)`,
   accent reserved for activity).
+- `contrib/usage/` — UsageTray, a self-contained MIT-licensed subproject: a macOS
+  menu-bar tray (Swift) for subscription plan usage plus an Omarchy bar-widget
+  port (`omarchy/`). Not a cargo member; the Rust build never touches it.
+- `docs/omarchy/` — Omarchy desktop tweak notes (text size, fcitx5). The text-size
+  note documents the very switch `config::desktop_text_scale()` reads.
+- `.omp/agents/AGENTS.md` — the global agent-rules payload, deployed to
+  `~/.agents/AGENTS.md`; it is not ddu's own rules (these are).
 
 ## Running
 
