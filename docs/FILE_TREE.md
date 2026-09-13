@@ -28,7 +28,9 @@
 * No per-session worktrees / branch scoping (§7 stays project-level HEAD→workdir).
 * No syntax highlighting in v1 (see §8.4 — opt-in follow-up, cargo-feature gated).
 * No multi-file "review strip"; one selected file at a time.
-* Non-git directories keep today's behavior (no tree, "not a repository" note).
+* Non-git directories keep today's behavior — no tree, and today the raw
+  `Repository::discover` error text lands in `diff_error`; §5.3 gives it a
+  curated note instead.
 
 ## 3. As-is (what the upgrade has to preserve)
 
@@ -38,9 +40,9 @@
 | Query | `src/diff/git.rs::head_diff` | `Repository::discover` → `diff_tree_to_workdir_with_index(head_tree, opts)` with `include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true)`; per-file line cap |
 | Flow | `src/app/diff.rs` | 3 s poll (`DIFF_POLL_SECS`, `src/app/mod.rs`), `reload_diff` + `diff_seq` stale guard, `apply_diff` re-pins the selection **by path** through `diff_seed_path`, `DiffSearch` (⌘F) match list = child-row indices |
 | Tree UI | `src/ui/diff_tree.rs` | `TreeNode { files, dirs }` built in `render` from `&[DiffFile]`; `tree_stats` rollup; `flatten` → `TreeRow::{File,Dir}`; `guides(depth)` stripes; `dir_row`/`file_row`; collapse set = "present in `diff_tree_closed` means collapsed" (all-open default); `plus_minus`; `tree_{default,min,max}_h()` (scale-aware) |
-| Pane UI | `src/ui/diff_panel.rs` | `panel_view!` → cached child view; `header` (path + `+a/−b`), `body` (scroll container whose **direct children are the rows**, `into_row(el, content_w)`), `diff_line` (two 36 px number gutters + 14 px sign column, green/red 0.12 tints, yellow search tints 0.30/0.13, `SelectableText` per line), `measure_content_width` (top 16 lines shaped exactly), `hunk_header`, `find_bar` |
+| Pane UI | `src/ui/diff_panel.rs` | `panel_view!` → cached child view; `header` (path + `+a/−b`), `body` (scroll container whose **direct children are the rows**, `row_box(el, w, h)`), `diff_line` (two number gutters measured per file by `gutter_width()` + a sign column (`LINE_CHROME_EXTRAS`), green/red 0.12 tints, yellow search tints 0.30/0.13, `SelectableText` per line), `measure_content_width` (top 16 lines shaped exactly), `hunk_header`, `find_bar` |
 | State | `src/app/mod.rs` | `diff`, `diff_error`, `diff_file: Option<usize>`, `diff_seed_path`, `diff_tree_closed: HashSet<String>`, `diff_tree_scroll`, `diff_hunks_scroll`, `sidebar_split_state`, `show_diff_tree`, `diff_tree_height_seed`, `diff_search`, `diff_pane: Entity<...PanelView>` |
-| Mount | `src/app/mod.rs:1078`, `src/ui/session_panel.rs:83-129` | `diff_pane.cached(diff_panel::root_style())`; the tree layer is the sidebar's lower splitter slot, `.visible(show_diff_tree)` |
+| Mount | `src/app/mod.rs:1041`, `src/ui/session_panel.rs:118-130` | `diff_pane.cached(diff_panel::root_style())`; the tree layer is the sidebar's lower splitter slot, `.visible(show_diff_tree)` |
 | Persist | `src/config.rs`, `src/app/persist.rs` | per **session**: `selected_file: Option<String>`, `closed_dirs: Vec<String>`, `tree_height: Option<f32>`; `live_tree_height` reads splitter slot 1 |
 | Cache contract | `src/ui/mod.rs` `panel_view!`, `AppView::notify_panels` | stream frames notify the terminal pane alone; every other `cx.notify()` fans out to all panels — pinned by `panel_cache_tests` |
 
@@ -180,7 +182,7 @@ snapshot (render-time cost = visible rows only).
   plus the find bar overlay unchanged.
 * **Diff** mode = `file_rows` exactly as today.
 * **File** mode = the same row machinery over `FileView::Text` rows: same
-  gutters, same `LINE_CHROME`, same `SelectableText` per line and
+  gutters, same `LINE_CHROME_EXTRAS`, same `SelectableText` per line and
   `document_order`, `' '` rows untinted, `+`/`-` rows tinted 0.12. `Missing` /
   `Binary` / `TooLarge` fall back to Diff mode with the existing notice style
   (`empty()` / `hunk_header` band).
@@ -245,13 +247,13 @@ is persisted per session as today (`persist()` reads it into the session slot).
 * The default-collapse rule bounds the initial visible rows to the changed
   subtrees; a user who opens a 20k-file folder pays for those rows only.
   Escape hatch if that still bites: `component::list::{List, ListDelegate,
-  ListState}` (`list/delegate.rs:8`) virtualizes uniform-height rows — our rows
-  are all `row_px()` tall, so it is a drop-in, but it changes the band/scrollbar
-  look; only take it behind a measurement (tree render > ~8 ms p50, the same bar
-  the terminal pacing uses).
+  ListState}` (`list/list.rs:706` / `:70`, trait `list/delegate.rs:10`)
+  virtualizes uniform-height rows — ours are all `row_px()` tall, so it is a
+  drop-in, but it changes the band/scrollbar look; only take it behind a
+  measurement (tree render > ~8 ms p50, the same bar the terminal pacing uses).
 * Markdown: one parse per pane notify; keep the element id stable
   (`("md-preview", path)`) so gpui's element-state cache is reused, and fall back
-  to `TextViewState` (`gpui-base-0.6.0/src/text/state.rs:132`) if profiling shows
+  to `TextViewState` (`gpui-base-0.6.0/src/text/state.rs:86`) if profiling shows
   re-parsing per frame.
 
 ## 8. Implementation checklist
@@ -290,11 +292,15 @@ audit — `DESIGN.md` §13 mandates the check) and turning style ranges into
     mirroring the existing `match_rows` tests.
   * `panel_cache_tests` extension: a mode switch notifies the diff pane and not
     the sidebar/terminal.
-* Visual, through the `computer` device (`AGENTS.md`): drive the real window —
-  open the layer, set the query, screenshot, read element bounds — and expose
-  the tree's rows to AX the way the session rows already are (`div.role(..)`
-  plus `aria_label`/`aria_selected`), so the layout questions (row heights,
-  gutters, tint bands) are answered from the tree and pixels, not by eye.
+* Visual, through the `computer` device (macOS; `VERIFICATION.md`): drive the
+  real window — open the layer, set the query, screenshot, read element bounds —
+  and expose the tree's rows to AX the way the session rows already are
+  (`div.role(..)` plus `aria_label`/`aria_selected`), so the layout questions
+  (row heights, gutters, tint bands) are answered from the tree and pixels, not
+  by eye.
+* On Linux there is no AX tree: answer the same questions from observable state
+  (`hyprctl clients -j` for geometry, `grim -g "<x>,<y> <w>x<h>"` for pixels,
+  `DDU_STATE_PATH` for what persisted) — `VERIFICATION.md`.
 * Live acceptance: edit a tracked file in a real session → the tree's badge and
   the pane's rows update within ~3 s; open a `README.md` → Preview renders
   headings, lists, a fenced block and a table.
