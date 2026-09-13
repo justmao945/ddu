@@ -77,6 +77,8 @@ pub struct DiffLine {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GitDiff {
     /// Current branch shorthand, `None` on detached HEAD / non-repo.
+    /// Captured for the model (and asserted in `git.rs` tests); the UI
+    /// does not display it yet.
     pub branch: Option<String>,
     pub files: Vec<DiffFile>,
 }

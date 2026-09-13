@@ -368,7 +368,8 @@ The attention surface is new and required: in this model an agent can message
   `Session` enum with today's `Pty` arm and a new `Chat` arm bound to a
   `Conversation`. `AgentCmd` presets remain the spawn recipe for the `Pty` arm.
 - `src/terminal/` — `PtySpawn` / `TermSession`, unchanged, now only one arm.
-- `src/app.rs` — `AppView`, actions, global shortcuts (`⌘T`, `⌘N`, `⌘O`, …).
+- `src/app/mod.rs` — `AppView`, actions, global shortcuts (`⌘T`, `⌘N`, `⌘O`, …);
+  `src/app/persist.rs` — the `state.json` snapshot this design extends.
 - `src/ui/` — new `conversation_panel`, `transcript`, `roster`, `composer`,
   `inspector`; existing `session_panel`, `terminal`, `diff_panel` evolve.
 

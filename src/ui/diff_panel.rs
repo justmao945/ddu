@@ -1,8 +1,9 @@
-//! Right pane: the selected file's hunks. Header: branch + change
+//! Right pane: the selected file's hunks. Header: file path + change
 //! stats. The file tree lives in the sidebar's lower layer
-//! ([`super::diff_tree`]); this pane always shows the current
-//! selection. Diff lines never truncate — long lines scroll
-//! horizontally with a visible scrollbar.
+//! ([`super::diff_tree`]), whose summary strip carries the
+//! working-tree totals; this pane always shows the current selection.
+//! Diff lines never truncate — long lines scroll horizontally with a
+//! visible scrollbar.
 
 use std::rc::Rc;
 
