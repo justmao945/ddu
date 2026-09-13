@@ -25,7 +25,7 @@ The value is a Pango description `"<family> <point size>"`, for example
 guess the real size from the number, change it and look. The upstream default is
 `Sans 10`.
 
-The panel font size inside X11 clients (an Edge moved to X11, say) does not follow
+The panel font size inside X11 clients (a browser moved to X11, say) does not follow
 this path — see "The X11 candidate popup is smaller than Wayland's" at the end.
 
 ## Theme
@@ -119,11 +119,70 @@ busctl --user call org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1 \
 
 The output is one long line; look for the `AltTriggerKeys` part.
 
-## Edge (Chromium) candidate popup misplaced → Edge on X11
+## Simplified vs Traditional: `Ctrl+Shift+F`
 
-**Symptom**: in Wayland mode, Edge's candidate popup floats above the input box or
-at the top of the window and does not line up with the cursor; native Wayland apps
-such as foot are fine.
+No separate input method is involved. The `chttrans` module post-processes
+whatever the active engine produces, through OpenCC, and it is attached to the
+pinyin IM by name:
+
+`~/.config/fcitx5/conf/chttrans.conf`
+
+```
+[EnabledIM]
+0=pinyin
+```
+
+That is the whole switch — the pinyin IM here is called `pinyin` (not
+`pinyin-simp`), and `[EnabledIM]` lists the IMs the converter is enabled on. The
+toggle key is `chttrans`'s own `Hotkey`, default `Control+Shift+F`, so **it is the
+converter that flips, not the engine**: after a toggle you keep typing pinyin and
+the candidates come out Traditional (a notification says
+"Traditional Chinese is enabled." / "Simplified Chinese is enabled.").
+
+The state is runtime-only — it is not written to `profile` — so it does not
+survive a restart of fcitx5 and a stray keypress is the usual cause of a sudden
+switch to Traditional.
+
+To turn it off for good, write an **empty** section in the same file — commenting
+the keys out is not enough, because a missing key falls back to the compiled-in
+default and you keep the `Ctrl+Shift+F` toggle:
+
+```
+[Hotkey]
+
+[EnabledIM]
+0=pinyin
+```
+
+Either empty `[Hotkey]` (the binding goes away, the converter stays attached) or
+drop `0=pinyin` from `[EnabledIM]` (nothing is converted even if the key is
+pressed) — verified 2026-09-13 by reading the running config back after
+`ReloadAddonConfig`: both settle to `""`. Reload without a restart:
+
+```
+busctl --user call org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1 \
+  ReloadAddonConfig s "chttrans"
+```
+
+(Or `systemctl --user restart omarchy-fcitx5.service`.)
+
+To read the values actually in effect:
+
+```
+busctl --user call org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1 \
+  GetConfig s "fcitx://config/addon/chttrans"
+```
+
+(Note this is `.../addon/chttrans`, not `.../global` as for `AltTriggerKeys`.)
+Useful profiles for `OpenCCS2TProfile`: `s2t.json` (plain), `s2tw.json` (Taiwan
+phrases), `s2hk.json` (Hong Kong).
+
+## Chromium-family candidate popup misplaced → the browser on X11
+
+**Symptom**: in Wayland mode, the candidate popup floats above the input box or at
+the top of the window and does not line up with the cursor; native Wayland apps
+such as foot are fine. Hits every Chromium-family browser (Edge, Chromium, Chrome,
+Brave); `~/.config/chromium-flags.conf` carries the same fix as Edge's file below.
 
 **Root cause** (probed 2026-09-13 with `WAYLAND_DEBUG=1` plus CDP injection):
 Chromium's text-input-v3 implementation waits for the compositor's `done` serial to
@@ -138,20 +197,46 @@ the window. foot sends the cursor rectangle unconditionally, so it is unaffected
 Both sides are known upstream bugs and unfixed: Chromium issue 384531043,
 sway#8884, Hyprland #15258 (closed not_planned).
 
-**Local fix**: Edge moved to X11 (XWayland),
-`~/.config/microsoft-edge-stable-flags.conf`:
+**The obvious-looking way out — wayland text-input-v1 — does not work.** Chromium
+still ships `zwp_text_input_v1` and `--enable-wayland-ime
+--wayland-text-input-version=1` switches to it, and v1 has no `done` handshake at
+all, so its `set_cursor_rectangle` is sent unconditionally (measured: 42 sends where
+v3 sent 0). But Hyprland's v1 popup repositioning is driven **only** by the client's
+`commit_state` (`CTextInputV1::m_events.onCommit` has exactly one producer —
+`setCommitState`), and Chromium's v1 implementation never sends it: `zwp_text_input_v1.cc`
+has no `commit_state` call, and the packet log confirms 47 `set_cursor_rectangle`
+against 0 `commit_state`. The popup is therefore positioned once at focus time and
+never follows the caret as the preedit grows — tried 2026-09-13, visibly worse than
+v3: the panel drifts out from under the text and lags behind every keystroke. Do
+not retry this.
+
+**Local fix**: the browser moved to X11 (XWayland),
+`~/.config/microsoft-edge-stable-flags.conf` (and `chromium-flags.conf` for Chromium
+itself):
 
 ```
 --ozone-platform=x11
 --force-device-scale-factor=1.5
 ```
 
-Under X11 Edge speaks the ibus protocol (fcitx5 ships an ibus compatibility
-frontend), and the popup is positioned with X11 global coordinates, so it lands
-correctly. `--force-device-scale-factor=1.5` combined with Hyprland's
+Under X11 the popup lands correctly because the cursor rectangle travels a
+different path: the browser drives fcitx5's input context itself over D-Bus
+(`org.freedesktop.portal.Fcitx` → `/org/freedesktop/portal/inputcontext/N`,
+interface `org.fcitx.Fcitx.InputContext1`; watch it with
+`busctl --user monitor org.freedesktop.portal.Fcitx`) and `SetCursorRect` carries
+**X11 global coordinates**, so Hyprland is not in the loop at all — no `done`
+handshake to stall on. `--force-device-scale-factor=1.5` combined with Hyprland's
 `force_zero_scaling=true` renders at physical pixels, so the UI is not blurry.
 Window management (tiling / workspaces / keybindings) still applies to XWayland
 windows as usual.
+
+**It is not ibus.** An earlier version of this note said X11 goes through the ibus
+protocol; that is wrong. Probed 2026-09-13: the browser process maps
+`im-fcitx5.so` (the GTK immodule) and `libgtk-3.so` and **no** `libibus*`; fcitx5
+registers the X11 client as `frontend:dbus`, not ibus; and on
+`org.freedesktop.IBus` there is no traffic at all — fcitx5 merely owns the bus
+name (`libibusfrontend.so`) so that programs hardwired to ibus find *something*.
+The real interface is fcitx's own D-Bus frontend.
 
 **The flags file must not contain comments** (learned the hard way, 2026-09-13):
 the launch script `microsoft-edge-stable` does `EDGE_USER_FLAGS="$(cat ...)"` and
@@ -163,8 +248,8 @@ nothing else; the explanation belongs here.
 
 ## The X11 candidate popup is smaller than Wayland's → Xft.dpi=144
 
-**Symptom**: after Edge moved to X11, the candidate popup's font inside X11 is only
-about 2/3 the size of the Wayland panel's.
+**Symptom**: after a Chromium-family browser moved to X11, the candidate popup's
+font inside X11 is only about 2/3 the size of the Wayland panel's.
 
 **Root cause**: classicui's Wayland panel renders at output scale 1.5 (144 DPI
 equivalent); the X11 panel goes through DPI computation: Xft.dpi (unset) → the X
@@ -184,4 +269,5 @@ every login.
 144 = 96 × 1.5, following Hyprland's monitor scale; change one and you must change
 the other. Side effect: every X11 app that reads Xft.dpi (GTK3 / Qt on X11, …) also
 renders at 1.5x — they were undersized at 96 DPI too, so this fixes them on the
-side. Edge uses its own `--force-device-scale-factor` and is unaffected.
+side. A browser running on X11 uses its own `--force-device-scale-factor` and is
+unaffected.
