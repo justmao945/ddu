@@ -122,3 +122,12 @@ path: a machine that cannot reach an identity fails the build, because signing
 ad-hoc would drop the app's grants on its next install. `make-bundle.sh` ends
 by reading the sealed binary's requirement back and refusing to ship a
 `cdhash` one.
+
+`DDU_OPENSSL` points `make-signing-identity.sh` at the OpenSSL 3 binary it
+generates the certificate with. It has to be 3.x — `req -addext` and
+`pkcs12 -export -legacy` do not exist in LibreSSL, which is what macOS ships as
+`/usr/bin/openssl`, and `/usr/bin` usually precedes Homebrew on `PATH`. The
+script tries `DDU_OPENSSL` first, then `command -v openssl`, then
+`/opt/homebrew/bin`, `/usr/local/bin` and the versioned `openssl@3` kegs, and
+takes the first candidate that reports 3.x; it fails rather than silently
+falling back to a LibreSSL one.

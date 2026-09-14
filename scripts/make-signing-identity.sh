@@ -50,6 +50,24 @@ done
 [ "$(uname -s)" = Darwin ] || { echo "make-signing-identity: macOS only" >&2; exit 1; }
 umask 077
 
+# OpenSSL 3 specifically: `req -addext` and the `-legacy` PBES1 export below
+# do not exist in LibreSSL, which is what /usr/bin/openssl is on macOS — and
+# /usr/bin normally precedes Homebrew on PATH, so a bare `openssl` resolves to
+# the one that cannot do this (it dies on `pkcs12 -export -legacy` with a bare
+# usage dump, after the password has already been stored). Resolve 3.x here.
+OPENSSL=
+for c in "${DDU_OPENSSL:-}" "$(command -v openssl 2>/dev/null)" \
+         /opt/homebrew/bin/openssl /usr/local/bin/openssl \
+         /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@3/bin/openssl; do
+  [ -n "$c" ] && [ -x "$c" ] || continue
+  case "$("$c" version 2>/dev/null)" in "OpenSSL 3."*) OPENSSL="$c"; break ;; esac
+done
+[ -n "$OPENSSL" ] || {
+  echo "make-signing-identity: no OpenSSL 3.x found (macOS ships LibreSSL) —" >&2
+  echo "  install one (brew install openssl@3) or set DDU_OPENSSL=/path/to/openssl-3.x" >&2
+  exit 1
+}
+
 # The password, from the environment (first run on a machine that got the
 # keychain from elsewhere) or from the login keychain.
 pw() {
@@ -90,22 +108,22 @@ PW="$(pw)"
 if [ ! -f "$KC" ]; then
   echo "make-signing-identity: provisioning '$SIGN_ID'"
   if [ -z "$PW" ]; then
-    PW="$(openssl rand -hex 16)"
+    PW="$("$OPENSSL" rand -hex 16)"
     store_pw "$PW"
   else
-    echo "make-signing-identity: using DDU_SIGN_KEYCHAIN_PW and remembering it in the login keychain"
+    echo "make-signing-identity: reusing the stored keychain password"
     store_pw "$PW"
   fi
   # OpenSSL 3 defaults to PBES2, whose MAC macOS Security cannot verify
   # ("MAC verification failed during PKCS12 import") — hence -legacy. The
   # intermediate key/p12 files live only in this 0700 temp dir.
-  openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+  "$OPENSSL" req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
     -keyout "$tmp/key.pem" -out "$tmp/cert.pem" \
     -subj "/CN=$SIGN_ID/O=ddu/C=CN" \
     -addext "basicConstraints=critical,CA:FALSE" \
     -addext "keyUsage=critical,digitalSignature" \
     -addext "extendedKeyUsage=critical,codeSigning"
-  openssl pkcs12 -export -legacy -out "$tmp/identity.p12" \
+  "$OPENSSL" pkcs12 -export -legacy -out "$tmp/identity.p12" \
     -inkey "$tmp/key.pem" -in "$tmp/cert.pem" -passout "pass:$PW"
   security create-keychain -p "$PW" "$KC"
   security set-keychain-settings -lut 21600 "$KC"
