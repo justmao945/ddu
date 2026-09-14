@@ -77,7 +77,7 @@ mod tests {
     // Selective imports only: `use super::*` would pull gpui's `test`
     // proc-macro re-export into scope, shadowing the built-in `#[test]`
     // and recursing forever at expansion.
-    use crate::terminal::harness::spawn_cat;
+    use crate::terminal::harness::{shutdown, spawn_cat};
     use gpui_kit::{TestAppContext, gpui};
 
 
@@ -129,6 +129,7 @@ mod tests {
                 cx.run_until_parked();
                 assert_eq!(paints.get(), 3, "idle wakeup repaints immediately");
 
+                shutdown(&session, cx);
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();
                     cx.quit();
@@ -225,6 +226,7 @@ mod tests {
                 cx.run_until_parked();
                 assert_eq!(paints.get(), 2, "the stretched interval flushes its tail");
 
+                shutdown(&session, cx);
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();
                     cx.quit();

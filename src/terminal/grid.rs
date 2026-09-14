@@ -461,6 +461,60 @@ pub fn search_grid(
     hits
 }
 
+/// How long the waiter keeps offering the child's exit code to a full
+/// channel before dropping it (see the waiter thread in [`spawn_pump`]).
+/// A live forwarder drains within one frame; this only has to outlast a
+/// repaint throttle, and give up on a session that was torn down.
+const EXIT_SEND_PATIENCE: Duration = Duration::from_millis(1500);
+
+/// The pump threads' handles, for a caller that has to *prove* they are
+/// gone (see [`PumpThreads::join`]).
+///
+/// Only a test reads them: production drops the handles, which detaches
+/// the threads — exactly the lifecycle a bare `spawn` had before they
+/// were returned — so a non-test build has no reader for either field.
+#[allow(dead_code)]
+pub struct PumpThreads {
+    reader: std::thread::JoinHandle<()>,
+    waiter: std::thread::JoinHandle<()>,
+}
+
+impl PumpThreads {
+    /// Wait for both pumps, but never indefinitely.
+    ///
+    /// A pump is *normally* already on its way out by the time a test gets
+    /// here — the child is dead, so the waiter reaped it and the reader's
+    /// read fails — but nothing guarantees it, and a test must never hang on
+    /// a thread that is only hygiene: the wake it guards against is what
+    /// `allow_parking` tolerates (`TermSession::spawn`), and that is the
+    /// part the scheduler cares about. So this gives up after
+    /// [`JOIN_PATIENCE`] and detaches: a thread still running ends on its
+    /// own, just later.
+    #[cfg(test)]
+    pub fn join(self) {
+        join_bounded(self.reader);
+        join_bounded(self.waiter);
+    }
+}
+
+/// How long a test waits for a pump thread before leaving it to exit on its
+/// own. Generous next to a thread that is already finishing (microseconds),
+/// short next to a test suite.
+#[cfg(test)]
+const JOIN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(test)]
+fn join_bounded(handle: std::thread::JoinHandle<()>) {
+    let deadline = std::time::Instant::now() + JOIN_PATIENCE;
+    while !handle.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let _ = handle.join();
+}
+
 /// Spawn the two pump threads for a freshly started [`PtyProcess`].
 ///
 /// * Reader thread: `read → parse per byte → paced Wakeup`, exits on
@@ -470,7 +524,11 @@ pub fn search_grid(
 ///   (the pump throttles repaints further). The poll deadline
 ///   guarantees a trailing wakeup for the final chunk before a pause,
 ///   so a suppressed tail never waits for more output.
-/// * Waiter thread: blocks on `child.wait()`, then reports `Exit`.
+/// * Waiter thread: blocks on `child.wait()`, then reports `Exit` —
+///   retrying against a full channel rather than blocking on it, since
+///   a session being torn down stops draining (see the thread itself).
+///
+/// Both handles come back in a [`PumpThreads`].
 pub fn spawn_pump(
     term: Arc<FairMutex<Term<EventProxy>>>,
     wake: async_channel::Sender<PumpMsg>,
@@ -478,9 +536,9 @@ pub fn spawn_pump(
     mut reader: Box<dyn Read + Send>,
     poll_fd: Option<i32>,
     mut child: Box<dyn Child + Send + Sync>,
-) {
+) -> PumpThreads {
     let reader_wake = wake.clone();
-    std::thread::Builder::new()
+    let reader_thread = std::thread::Builder::new()
         .name("ddu-pty-read".into())
         .spawn(move || {
             let mut parser: Processor<StdSyncHandler> = Processor::new();
@@ -538,21 +596,48 @@ pub fn spawn_pump(
         })
         .expect("spawn pty reader thread");
 
-    std::thread::Builder::new()
+    let waiter_thread = std::thread::Builder::new()
         .name("ddu-pty-wait".into())
         .spawn(move || {
             let code = child
                 .wait()
                 .map(|status| status.exit_code() as i32)
                 .unwrap_or(-1);
-            let _ = wake.send_blocking(PumpMsg::Exit(code));
+            // `send_blocking` would park this thread for good whenever
+            // nobody drains the channel: capacity is one message, a
+            // pending `Wakeup` can hold the exit at the door, and a
+            // session being torn down (its forwarder cancelled — how a
+            // test ends one) stops draining altogether. Retry instead,
+            // for longer than any live forwarder needs (it drains within
+            // a frame) and then give up: a session nobody is listening to
+            // has nobody to tell.
+            let mut msg = PumpMsg::Exit(code);
+            let deadline = Instant::now() + EXIT_SEND_PATIENCE;
+            loop {
+                match wake.try_send(msg) {
+                    Ok(()) => break,
+                    Err(async_channel::TrySendError::Full(returned)) => {
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        msg = returned;
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(async_channel::TrySendError::Closed(_)) => break,
+                }
+            }
         })
         .expect("spawn pty waiter thread");
+
+    PumpThreads {
+        reader: reader_thread,
+        waiter: waiter_thread,
+    }
 }
 
 /// Convenience: spawn a process and its pumps in one go, returning the
-/// grid plus the master handle. `scrollback` caps the grid's history
-/// (lines; older output is dropped).
+/// grid, the master handle and the pump threads' handles. `scrollback`
+/// caps the grid's history (lines; older output is dropped).
 pub fn spawn_session(
     cmd: &PtySpawn,
     cols: u16,
@@ -560,10 +645,10 @@ pub fn spawn_session(
     wake: async_channel::Sender<PumpMsg>,
     colors: super::palette::DefaultColors,
     scrollback: usize,
-) -> anyhow::Result<(TermGrid, PtyProcess)> {
+) -> anyhow::Result<(TermGrid, PtyProcess, PumpThreads)> {
     let (process, reader, child) = PtyProcess::spawn(cmd, cols, rows)?;
     let grid = TermGrid::new(cols, rows, process.writer().clone(), wake.clone(), scrollback, colors);
-    spawn_pump(
+    let pumps = spawn_pump(
         grid.term.clone(),
         wake,
         grid.recent.clone(),
@@ -571,7 +656,7 @@ pub fn spawn_session(
         process.poll_fd(),
         child,
     );
-    Ok((grid, process))
+    Ok((grid, process, pumps))
 }
 
 #[cfg(test)]
@@ -667,7 +752,7 @@ mod tests {
             args: vec![],
             cwd: std::env::temp_dir(),
         };
-        let (grid, _process) =
+        let (grid, _process, pumps) =
             spawn_session(&cmd, 80, 24, wake, test_colors(), 1000).expect("spawn sh");
 
         assert!(
@@ -697,6 +782,13 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+
+        // The shell is gone, so both pumps end on their own — but a test
+        // must not *leave* them finishing: a pump thread that outlives
+        // its test wakes the local foreground task from its own thread,
+        // which gpui's test scheduler calls non-determinism
+        // ([`PumpThreads::join`]).
+        pumps.join();
     }
 
 }

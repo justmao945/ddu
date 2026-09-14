@@ -19,9 +19,24 @@ impl TermSession {
     /// (`Settings → Terminal → Scrollback`).
     pub fn spawn(cmd: &PtySpawn, cx: &mut App) -> anyhow::Result<Entity<Self>> {
         let (cols, rows) = (80, 24);
+        // A real child is non-deterministic IO: its output — and the
+        // channel closing when its pumps exit — wakes this session's
+        // forwarder *from the pump thread*, which gpui's test scheduler
+        // reports as "activity on thread ddu-pty-read … Your test is not
+        // deterministic" in whichever test happens to be running when the
+        // wake lands (one executor serves the whole test process). The
+        // scheduler's per-test escape hatch is upstream's answer to
+        // exactly this case — "a mix of deterministic and
+        // non-deterministic async behavior, such as when interacting with
+        // I/O in an otherwise deterministic test" — and being per-test it
+        // weakens no other test's checks. Every test that spawns a
+        // session opts in here, once, instead of each call site
+        // remembering to (`harness::shutdown` still ends the pumps).
+        #[cfg(test)]
+        cx.background_executor().allow_parking();
         let scrollback = cx.global::<crate::config::Config>().terminal_scrollback();
         let (wake_tx, wake_rx) = async_channel::bounded::<grid::PumpMsg>(1);
-        let (grid, process) = grid::spawn_session(
+        let (grid, process, pumps) = grid::spawn_session(
             cmd,
             cols,
             rows,
@@ -43,6 +58,8 @@ impl TermSession {
             Self {
                 grid,
                 process: Some(process),
+                pumps: Some(pumps),
+                pump_task: None,
                 focus: cx.focus_handle().tab_stop(false),
                 exit: None,
                 resume_id: None,
@@ -76,12 +93,16 @@ impl TermSession {
         // immediately, the rest are flushed once per interval by a
         // trailing timer.
         let weak = entity.downgrade();
-        cx.spawn(async move |cx| {
+        let pump_task = cx.spawn(async move |cx| {
             // `last_frame` is read through the (fake-clock-aware)
             // executor clock so throttle behavior is testable; the
             // cells are single-threaded foreground state.
             let last_frame = Rc::new(Cell::new(None::<Instant>));
             let flush_armed = Rc::new(Cell::new(false));
+            // The one trailing flush in flight, held for the same reason
+            // as the forwarder itself: a detached timer would outlive the
+            // task that armed it (and, in a test, wake a dead one).
+            let mut flush_task: Option<Task<()>> = None;
             while let Ok(msg) = wake_rx.recv().await {
                 match msg {
                     grid::PumpMsg::Wakeup => {
@@ -105,7 +126,11 @@ impl TermSession {
                             let last_frame = last_frame.clone();
                             let flush_armed = flush_armed.clone();
                             let delay = interval - now.duration_since(prev.unwrap());
-                            cx.spawn(async move |cx| {
+                            // Arming a new flush supersedes the old handle
+                            // (`flush_armed` allows only one in flight):
+                            // dropping it is what cancels the timer.
+                            flush_task.take();
+                            flush_task = Some(cx.spawn(async move |cx| {
                                 cx.background_executor().timer(delay).await;
                                 flush_armed.set(false);
                                 last_frame.set(Some(cx.background_executor().now()));
@@ -113,8 +138,7 @@ impl TermSession {
                                     cx.notify();
                                     cx.emit(TermEvent::Wakeup);
                                 });
-                            })
-                            .detach();
+                            }));
                         }
                     }
                     grid::PumpMsg::Exit(code) => {
@@ -135,8 +159,10 @@ impl TermSession {
                 }
             }
             anyhow::Ok(())
-        })
-        .detach();
+        });
+        // Held, not detached: dropping the handle is what cancels the
+        // forwarder (see [`TermSession::pump_task`]).
+        entity.update(cx, |session, _| session.pump_task = Some(pump_task));
 
         Ok(entity)
     }
@@ -262,6 +288,32 @@ impl TermSession {
         }
     }
 
+    /// Kill the child and wait for both pump threads to exit. The
+    /// production path only kills: the pumps end on their own once the
+    /// child is dead (the reader's `read` fails, the waiter's `wait`
+    /// returns), and the UI thread must not wait on a process.
+    ///
+    /// A test must join, because a pump thread that outlives its test
+    /// wakes the local foreground task from its own thread — gpui's test
+    /// scheduler calls that non-determinism, and one executor serves the
+    /// whole process, so the report lands on whichever test happens to
+    /// be running (see `harness::shutdown`).
+    ///
+    /// The forwarder task dies **first**: its future owns the channel's
+    /// receiver, and while that is alive the pumps' own teardown (the
+    /// last sender dropping closes the channel) wakes a `!Send` task
+    /// from the pump's thread — the one wake the join cannot outrun.
+    /// Cancelling the task drops the receiver, so the pumps' sends find
+    /// nowhere to go, and the join is then a plain thread join.
+    #[cfg(test)]
+    pub(crate) fn kill_and_join(&mut self) {
+        self.pump_task.take();
+        self.kill();
+        if let Some(pumps) = self.pumps.take() {
+            pumps.join();
+        }
+    }
+
     /// One control byte into the PTY (Esc/^C/^D …): ^C is SIGINT to
     /// the foreground process group, ^D EOF on the input. No-op on an
     /// already-exited child.
@@ -300,7 +352,7 @@ mod tests {
     // and recursing forever at expansion.
     use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
 
-    use crate::terminal::harness::spawn_cat;
+    use crate::terminal::harness::{shutdown, spawn_cat};
     use gpui_kit::{TestAppContext, gpui};
 
 
@@ -348,6 +400,8 @@ mod tests {
                     wakeups >= 3,
                     "begin/scroll/end each emit Wakeup, got {log:?}"
                 );
+                drop(log);
+                shutdown(&session, cx);
             }),
         );
     }

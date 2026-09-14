@@ -119,7 +119,7 @@ mod tests {
     // and recursing forever at expansion.
     use std::time::{Duration, Instant};
 
-    use crate::terminal::harness::{TestRoot, grid_text, spawn_cat};
+    use crate::terminal::harness::{TestRoot, grid_text, shutdown, spawn_cat};
     use gpui_kit::{AnyWindowHandle, AppContext as _, EntityInputHandler as _, TestAppContext, gpui};
 
 
@@ -170,6 +170,7 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 cx.run_until_parked();
+                shutdown(&session, cx);
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();
                     cx.quit();

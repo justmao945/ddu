@@ -109,7 +109,7 @@ mod tests {
     // Selective imports only: `use super::*` would pull gpui's `test`
     // proc-macro re-export into scope, shadowing the built-in `#[test]`
     // and recursing forever at expansion.
-    use crate::terminal::harness::{TestRoot, spawn_cat};
+    use crate::terminal::harness::{TestRoot, shutdown, spawn_cat};
     use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
     use alacritty_terminal::selection::{Selection, SelectionType};
     use gpui_kit::{
@@ -176,7 +176,9 @@ mod tests {
                             Some("sentinel")
                         );
                     });
-                });
+                })
+                .unwrap();
+                shutdown(&session, cx);
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();
                     cx.quit();
@@ -249,6 +251,7 @@ mod tests {
                 })
                 .unwrap();
 
+                shutdown(&session, cx);
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();
                     cx.quit();
@@ -390,6 +393,7 @@ mod tests {
                     vcx.update(|_, cx| session.read(cx).grid.term.lock().selection_to_string());
                 assert_eq!(copied.as_deref(), Some("-abcde"));
 
+                shutdown(&session, cx);
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();
                     cx.quit();

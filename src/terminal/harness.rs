@@ -10,7 +10,7 @@
 use gpui_kit::component::theme::Theme;
 use gpui_kit::{
     App, Context, Entity, IntoElement, Render, Styled as _,
-    Window, div,
+    TestAppContext, Window, div,
 };
 
 use super::{PtySpawn, TermSession};
@@ -38,6 +38,23 @@ pub(super) fn spawn_cat(cx: &mut App) -> Entity<TermSession> {
         cx,
     )
     .expect("spawn cat")
+}
+
+/// End a session the way the app's close path does — kill the child —
+/// and wait for its pump threads.
+///
+/// Every test that spawns a PTY must call this before it ends. A pump
+/// thread that outlives its test wakes the *local* foreground task from
+/// its own thread, and gpui's test scheduler reports that as
+/// non-determinism ("Your test is not deterministic") — attributing it
+/// to whichever test is running when the wake lands, because one test
+/// executor serves the whole process. `cat` alone is not enough: it
+/// keeps the reader blocked, so the wake comes from the thread's *exit*
+/// (idle pump, teardown) or from the child's echo, and either can fall
+/// inside the next test's window.
+pub(super) fn shutdown(session: &Entity<TermSession>, cx: &mut TestAppContext) {
+    cx.update(|cx| session.update(cx, |s, _| s.kill_and_join()));
+    cx.run_until_parked();
 }
 
 /// The grid's visible text, one line per displayed row. Wide chars

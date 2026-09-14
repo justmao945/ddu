@@ -60,6 +60,19 @@ pub enum TermEvent {
 pub struct TermSession {
     grid: grid::TermGrid,
     process: Option<pty::PtyProcess>,
+    /// The pump threads' handles. Production drops them (the threads are
+    /// detached and exit on their own once the child is gone); tests
+    /// join them through [`TermSession::kill_and_join`].
+    #[allow(dead_code)]
+    pumps: Option<grid::PumpThreads>,
+    /// The foreground forwarder: pump messages → `TermEvent`s. Held, not
+    /// detached, so the task dies with the session — its future owns the
+    /// channel's *receiver*, and while that is alive a pump thread's send
+    /// (or its exit closing the channel) wakes a `!Send` task from the
+    /// pump's thread, which gpui's test scheduler reports as
+    /// non-determinism. Dropping the handle cancels the task, and a
+    /// cancelled task's waker is inert: no task, no wake.
+    pump_task: Option<Task<anyhow::Result<()>>>,
     pub(crate) focus: FocusHandle,
     exit: Option<i32>,
     /// Agent session id captured from the startup banner (`session id:

@@ -210,3 +210,12 @@ editing, and where the long form lives.
   `DDU_SETTINGS_PATH`, never the working tree.
 - Prove liveness by state change (edit a tracked file → the diff panel shows it
   within ~3 s).
+- **A test that spawns a PTY owns its pumps**: end it with
+  `harness::shutdown` (kill the child, cancel the forwarder, join both
+  threads); `TermSession::spawn` additionally calls the executor's per-test
+  `allow_parking()`. A pump thread's wake reaches a `!Send` task from its own
+  thread, which gpui's test scheduler reports as non-determinism in whichever
+  test is running then — and one executor serves the whole test process, so
+  the binary aborts (SIGABRT) rather than failing one test. Measured ~10% of
+  runs before the fix; prove it with a 20× loop, never a single green run
+  (`docs/VERIFICATION.md`).
