@@ -574,6 +574,158 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The pane's scroll region must be able to put the file's first row
+    /// back at the top: the wheel over the rows, the wheel over the
+    /// scrollbar's own column (where the overview marks live), and the
+    /// thumb dragged to the top of the track.
+    #[test]
+    fn the_pane_returns_to_the_top() {
+        let (root, mut changed) = workspace("scroll-top");
+        // A file long enough that the pane really scrolls, and changed, so
+        // the overview strip is drawn in the scrollbar's own column.
+        let long: String = (0..400).map(|i| format!("let x{i} = {i};\n")).collect();
+        std::fs::write(root.join("src/long.rs"), &long).expect("write");
+        changed.push(DiffFile {
+            path: "src/long.rs".to_owned(),
+            added: 1,
+            removed: 1,
+            hunks: vec![DiffHunk {
+                header: "@@ -100,3 +100,3 @@".into(),
+                // The file already holds the workdir side (that is what a
+                // diff means): the deleted line's text is HEAD's, and the
+                // added one's is the file's own.
+                lines: vec![
+                    DiffLine {
+                        kind: ' ',
+                        old_no: Some(100),
+                        new_no: Some(100),
+                        text: "let x99 = 99;".into(),
+                    },
+                    DiffLine {
+                        kind: '-',
+                        old_no: Some(101),
+                        new_no: None,
+                        text: "let x100 = OLD;".into(),
+                    },
+                    DiffLine {
+                        kind: '+',
+                        old_no: None,
+                        new_no: Some(101),
+                        text: "let x100 = 100;".into(),
+                    },
+                    DiffLine {
+                        kind: ' ',
+                        old_no: Some(102),
+                        new_no: Some(102),
+                        text: "let x101 = 101;".into(),
+                    },
+                ],
+            }],
+            lines_total: 400,
+            truncated: false,
+        });
+        let root_for_closure = root.clone();
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let root = root_for_closure;
+                let (mut cx0, view, mut vcx) =
+                    app(dispatcher, "scroll_top", root.clone(), changed.clone());
+                let cx = &mut cx0;
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        v.show_diff = true;
+                        v.select_path("src/long.rs".to_owned());
+                        v.file_view = Some(std::rc::Rc::new(
+                            crate::diff::file_view::FileView::build(
+                                &root,
+                                "src/long.rs",
+                                Some(&changed[2]),
+                            ),
+                        ));
+                        v.file_view_key = Some(("src/long.rs".to_owned(), v.diff_gen));
+                        v.apply_pending_scroll();
+                        cx.notify();
+                    });
+                    let _ = window.draw(cx);
+                });
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                let top = point(px(0.), px(0.));
+                let pane = vcx.debug_bounds("pane-diff").expect("the pane is on screen");
+                let inside = point(pane.left() + px(30.), pane.center().y);
+                let offset = |vcx: &mut VisualTestContext| {
+                    vcx.update(|_, cx| view.update(cx, |v, _| v.diff_hunks_scroll.offset()))
+                };
+                let wheel = |vcx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>, dy: f32| {
+                    vcx.simulate_event(gpui::ScrollWheelEvent {
+                        position: at,
+                        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(dy))),
+                        ..Default::default()
+                    });
+                };
+                let draw = |vcx: &mut VisualTestContext| {
+                    vcx.update(|window, cx| {
+                        let _ = window.draw(cx);
+                    });
+                };
+                let overlay = vcx
+                    .debug_bounds("scrollbar-overlay")
+                    .expect("the pane's scrollbar is on screen");
+                // The strip is in the scrollbar's own column, which is what
+                // makes a press in that column ambiguous.
+                let marks = vcx.debug_bounds("diff-overview").expect("the change marks");
+                assert!(marks.right() > overlay.right() - px(12.), "marks sit in the track's column");
+
+                // Down, then up past the top: the wheel over the rows.
+                wheel(&mut vcx, inside, -50000.);
+                assert!(offset(&mut vcx).y < px(-1000.), "the wheel scrolled down");
+                wheel(&mut vcx, inside, 50000.);
+                assert_eq!(offset(&mut vcx), top, "the wheel returns to the top");
+                // … and over the scrollbar's own column.
+                wheel(&mut vcx, inside, -50000.);
+                wheel(&mut vcx, point(overlay.right() - px(6.), overlay.center().y), 50000.);
+                assert_eq!(offset(&mut vcx), top, "the wheel over the track returns to the top");
+
+                // The thumb: grab it at the bottom of the track, drag to
+                // the very top.
+                wheel(&mut vcx, inside, -50000.);
+                draw(&mut vcx);
+                let track_x = overlay.right() - px(6.);
+                let thumb = point(track_x, overlay.bottom() - px(20.));
+                vcx.simulate_mouse_move(thumb, None, gpui::Modifiers::default());
+                draw(&mut vcx);
+                let deep = offset(&mut vcx);
+                vcx.simulate_mouse_down(thumb, gpui::MouseButton::Left, gpui::Modifiers::default());
+                assert_eq!(
+                    offset(&mut vcx),
+                    deep,
+                    "the press grabbed the thumb instead of jumping the track"
+                );
+                let top_of_track = point(track_x, overlay.top() + px(2.));
+                vcx.simulate_mouse_move(
+                    top_of_track,
+                    Some(gpui::MouseButton::Left),
+                    gpui::Modifiers::default(),
+                );
+                vcx.simulate_mouse_up(
+                    top_of_track,
+                    gpui::MouseButton::Left,
+                    gpui::Modifiers::default(),
+                );
+                assert_eq!(offset(&mut vcx), top, "the thumb dragged to the top");
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Switching files and coming back lands where the file was left, and
     /// each mode keeps its own place: the hunks' row and the whole file's
     /// are different addresses.
