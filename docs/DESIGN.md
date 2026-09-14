@@ -251,6 +251,17 @@ struct AgentCmd { program: String, args: Vec<String> }
   subcommand, the others `--resume <id>`. Restart always uses `spec`, ignoring
   the row's `resume_id`.
 * kill = an escalating graceful stop (`escalate_close`): Esc, then 2× Ctrl-C 400 ms apart, then 2× Ctrl-D, then a hard kill at ~5 s — whatever ignored all of that still fires the Exit event. The pump exits with the reader. Restart re-spawns the preset into the same row.
+* Closing a row is one rule (`AppView::request_close_session`). A **live agent**
+  gets a confirm dialog, and the confirm *stops* it while **keeping** the row:
+  it stays as a resumable `Done` entry carrying the session id the dialog
+  promised to save, so the row's *next* close — a dead row by then — is the one
+  that removes it (`stop_live_agent` never falls through to the removal).
+  A **dead row** and a **plain shell row** close at once: no dialog, nothing
+  kept (a shell holds no conversation). The row's `kind` decides, not what the
+  PTY runs — an agent the user started by hand inside a `Terminal` row is a
+  shell row to this rule — and the click decides, not the status at confirm
+  time: a dialog left open while the agent finishes on its own still keeps the
+  row rather than quietly deleting it.
 * Output parsing: the byte stream is not interpreted as agent events. The one
   exception is the resume id, extracted from the tail of the output (see §6.2)
   and from the persisted `resume_id` on restore.

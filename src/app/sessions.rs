@@ -247,8 +247,21 @@ impl AppView {
         cx.notify();
     }
 
-    /// Close-session entry point: a live agent first gets the confirm
-    /// dialog (stopping is disruptive); a dead row goes right away.
+    /// Close-session entry point — the one rule, so that a click on `×`
+    /// (or ⌘W) always does the same thing:
+    ///
+    /// * **A live agent** asks first (stopping it is disruptive), and the
+    ///   confirm *stops* it: the row stays, now a resumable `Done` entry.
+    ///   Closing it again — a dead row by then — removes it. That is the
+    ///   two-step: the first close ends a conversation you can come back
+    ///   to, the second throws the row away.
+    /// * **A dead row, and a plain shell of any state**, just goes: a
+    ///   dead agent has nothing left to stop, and a shell holds no
+    ///   conversation at all.
+    ///
+    /// A row's *kind* is what decides, not what is running inside it: an
+    /// agent started by hand in a `Terminal` row is a shell row here, so
+    /// it closes without a question and leaves nothing behind.
     pub(crate) fn request_close_session(
         &mut self,
         p: usize,
@@ -277,7 +290,7 @@ impl AppView {
                     let this = this.clone();
                     move |_, window, cx| {
                         if let Some(this) = this.upgrade() {
-                            this.update(cx, |v, cx| v.close_session(p, six, window, cx));
+                            this.update(cx, |v, cx| v.stop_live_agent(p, six, window, cx));
                         }
                         true
                     }
@@ -286,7 +299,7 @@ impl AppView {
                     let this = this.clone();
                     move |_, window, cx| {
                         if let Some(this) = this.upgrade() {
-                            this.update(cx, |v, cx| v.close_session(p, six, window, cx));
+                            this.update(cx, |v, cx| v.stop_live_agent(p, six, window, cx));
                         }
                         window.close_dialog(cx);
                     }
@@ -294,15 +307,62 @@ impl AppView {
         });
     }
 
-    /// Close session `six` of project `p`. A live agent is stopped
-    /// gracefully: the escalation (Esc → 2×Ctrl-C → 2×Ctrl-D → kill)
-    /// makes the child exit and print its resume banner; the id is
-    /// captured and saved — and the row STAYS as a resumable Done
-    /// entry. A plain terminal just gets one Ctrl-C (stops a
-    /// foreground job) before its PTY drops. Dead rows and closed
-    /// terminals are removed outright; removing a current session
-    /// shifts the selection to the nearest neighbor.
-    pub(crate) fn close_session(
+    /// Confirmed close of a live agent: stop it gracefully and KEEP its
+    /// row.
+    ///
+    /// Deliberately not [`Self::close_session`], and deliberately not
+    /// re-reading `is_running`: this path exists because the user closed
+    /// a *live* agent, and the row that survives is the one carrying the
+    /// resume id — the id the dialog just promised to save, which is the
+    /// whole point of keeping the row. The dialog can sit open while the
+    /// agent finishes on its own, and a status read at that later moment
+    /// used to send the click down the dead-row path instead — the row
+    /// (and with it the conversation) silently gone, sometimes. What the
+    /// user asked for decides; the row's state at confirm time does not.
+    fn stop_live_agent(
+        &mut self,
+        p: usize,
+        six: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self
+            .projects
+            .get(p)
+            .and_then(|pr| pr.sessions.get(six))
+            .cloned()
+        else {
+            return;
+        };
+        // A `Running` row always has a live PTY; one whose term is gone
+        // has nothing to stop and keeps nothing either, so it is a dead
+        // row after all.
+        let Some(term) = session.term.clone() else {
+            self.remove_session_row(p, six, window, cx);
+            return;
+        };
+        // Save the resume id BEFORE the stop sequence: if the agent dies
+        // without printing its banner (the kill at the end of the
+        // escalation), the id from its earlier output is already on disk.
+        term.update(cx, |s, _| s.capture_resume_id());
+        self.persist(cx);
+        // An agent that finished while the dialog was open has nothing
+        // left to interrupt: its exit already settled the row.
+        if session.status.is_running() {
+            Self::escalate_close(vec![term], cx);
+        }
+        cx.notify();
+    }
+
+    /// Close a session that needs no confirmation — a dead row (its
+    /// process is already out; only `×` is left to act on) or a plain
+    /// shell (a terminal holds no conversation state).
+    ///
+    /// A live shell's foreground job gets one Ctrl-C before its PTY
+    /// drops, and the row goes at once. A live *agent* never arrives
+    /// here: [`Self::request_close_session`] sends it through the dialog
+    /// to [`Self::stop_live_agent`], whose row survives the stop.
+    fn close_session(
         &mut self,
         p: usize,
         six: usize,
@@ -318,33 +378,20 @@ impl AppView {
             return;
         };
         if let (Some(term), true) = (&session.term, session.status.is_running()) {
-            if session.kind == "terminal" {
-                // Plain shell: nothing resumable at stake. One Ctrl-C
-                // stops a foreground job, then the PTY drops — no
-                // agent stop escalation; the row is removed at once.
-                term.update(cx, |s, _| s.ctrl(0x03));
-                let term = term.clone();
-                cx.spawn(async move |this, cx| {
-                    // A beat so the Ctrl-C lands before the PTY dies.
-                    cx.background_executor()
-                        .timer(Duration::from_millis(200))
-                        .await;
-                    this.update(cx, |_, cx| term.update(cx, |s, _| s.kill()))?;
-                    anyhow::Ok(())
-                })
-                .detach();
-            } else {
-                // Save the resume id BEFORE the stop sequence: if the
-                // agent dies without printing its banner (the kill at
-                // the end of the escalation), the id from its earlier
-                // output is already on disk.
-                term.update(cx, |s, _| s.capture_resume_id());
-                self.persist(cx);
-                // The exit event persists the row again with the banner id.
-                Self::escalate_close(vec![term.clone()], cx);
-                cx.notify();
-                return;
-            }
+            // Plain shell: nothing resumable at stake. One Ctrl-C
+            // stops a foreground job, then the PTY drops — no
+            // agent stop escalation; the row is removed at once.
+            term.update(cx, |s, _| s.ctrl(0x03));
+            let term = term.clone();
+            cx.spawn(async move |this, cx| {
+                // A beat so the Ctrl-C lands before the PTY dies.
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+                this.update(cx, |_, cx| term.update(cx, |s, _| s.kill()))?;
+                anyhow::Ok(())
+            })
+            .detach();
         }
 
         // Dead rows and closed terminals: drop the row outright.
@@ -560,12 +607,202 @@ pub(super) fn index_after_removal(selected: usize, removed: usize, remaining: us
 #[cfg(test)]
 mod tests {
     use super::index_after_removal;
+    use gpui_kit::{Entity, TestAppContext, VisualTestContext, gpui};
     #[test]
     pub(super) fn removal_keeps_selection_or_nearest_neighbor() {
         assert_eq!(index_after_removal(2, 0, 3), 1);
         assert_eq!(index_after_removal(1, 2, 3), 1);
         assert_eq!(index_after_removal(3, 3, 3), 2);
         assert_eq!(index_after_removal(0, 0, 0), 0);
+    }
+
+    /// An app with one session row backed by a live `/bin/cat` PTY, whose
+    /// launcher *kind* the caller states — the close paths turn on the
+    /// kind, not on what the PTY runs, so a test never needs an agent
+    /// binary installed to be an agent row.
+    ///
+    /// The window context comes back *cloned*: `add_window_view` hands out
+    /// a borrow of the one it built, which cannot outlive the context that
+    /// owns it.
+    ///
+    /// The app goes under `gpui_component::Root` exactly as `main.rs`
+    /// mounts it — without that first layer there is no dialog stack, and
+    /// `open_alert_dialog` panics instead of asking.
+    fn app_with_one_session(
+        dispatcher: gpui::TestDispatcher,
+        kind: &str,
+        name: &'static str,
+    ) -> (Entity<crate::app::AppView>, VisualTestContext) {
+        use crate::app::AppView;
+        use crate::config::{Config, LoadWarnings, ProjectConfig, ShellConfig, State};
+        use gpui_kit::AppContext as _;
+        use gpui_kit::component::Root;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let mut cx = TestAppContext::build(dispatcher, Some(name));
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            cx.set_app_identity("dev.just.ddu", "Day Day Up");
+            cx.set_global(Config {
+                shell: ShellConfig {
+                    program: "/bin/cat".into(),
+                },
+                ..Default::default()
+            });
+            cx.set_global(LoadWarnings(vec![]));
+            cx.set_global(State {
+                projects: Some(vec![ProjectConfig {
+                    name: "proj".into(),
+                    path: std::env::temp_dir(),
+                    expanded: true,
+                    sessions: vec![],
+                }]),
+                ..Default::default()
+            });
+        });
+        let built: Rc<RefCell<Option<Entity<AppView>>>> = Rc::new(RefCell::new(None));
+        let slot = built.clone();
+        let (_root, vcx) = cx.add_window_view(move |window, cx| {
+            let view = cx.new(|cx| AppView::new(window, cx));
+            *slot.borrow_mut() = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let view = built.borrow().clone().expect("the app view");
+        // A workspace with no saved sessions is seeded by `AppView::new`
+        // itself with the default launcher — one `terminal` row running
+        // `/bin/cat` here. The close paths turn on the row's *kind*, so
+        // the test relabels that row instead of spawning a second one.
+        vcx.update(|_, cx| {
+            view.update(cx, |v, _| {
+                assert_eq!(
+                    v.projects[0].sessions.len(),
+                    1,
+                    "the launch seeds one session"
+                );
+                v.projects[0].sessions[0].kind = kind.to_string();
+            });
+        });
+        let vcx = vcx.clone();
+        cx.run_until_parked();
+        (view, vcx)
+    }
+
+    /// Closing a *live agent* asks first, and the confirm stops it without
+    /// taking the row: that row is what carries the resume id the dialog
+    /// just promised to save, and a second close — a dead row by then — is
+    /// what removes it.
+    ///
+    /// The decision belongs to the click, not to the status at confirm
+    /// time: a dialog left open while the agent finishes on its own must
+    /// not send the confirmed close down the dead-row path and delete the
+    /// row (and the conversation) instead of stopping it.
+    #[test]
+    fn closing_a_live_agent_asks_first_and_keeps_its_row() {
+        use crate::session::AgentStatus;
+        use gpui_kit::component::WindowExt as _;
+
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let (view, mut vcx) =
+                    app_with_one_session(dispatcher, "omp", "close_live_agent_asks");
+                let term = vcx.update(|_, cx| {
+                    view.read(cx).projects[0].sessions[0]
+                        .term
+                        .clone()
+                        .unwrap()
+                });
+
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| v.request_close_session(0, 0, window, cx));
+                    assert!(
+                        window.has_active_dialog(cx),
+                        "a live agent is asked about first"
+                    );
+                });
+                assert_eq!(
+                    vcx.update(|_, cx| view.read(cx).projects[0].sessions.len()),
+                    1,
+                    "and nothing is closed behind the dialog"
+                );
+
+                // The agent exits while the dialog sits open, and only then
+                // does the user confirm.
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        v.projects[0].sessions[0].status = AgentStatus::Done(0);
+                        v.stop_live_agent(0, 0, window, cx);
+                    });
+                });
+                assert_eq!(
+                    vcx.update(|_, cx| view.read(cx).projects[0].sessions.len()),
+                    1,
+                    "the confirmed close keeps the row it promised to keep"
+                );
+
+                // The second close: a dead row now, gone outright.
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| v.request_close_session(0, 0, window, cx));
+                });
+                assert_eq!(
+                    vcx.update(|_, cx| view.read(cx).projects[0].sessions.len()),
+                    0,
+                    "closing the stopped row is what removes it"
+                );
+
+                vcx.update(|_, cx| term.update(cx, |s, _| s.kill_and_join()));
+                vcx.update(|_, cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                vcx.run_until_parked();
+            }),
+        );
+    }
+
+    /// A plain shell closes at once, no question and nothing left behind:
+    /// a terminal row holds no conversation state, so there is nothing to
+    /// save and nothing to come back to. (An agent the user started by
+    /// hand inside a `Terminal` row is a shell row to this rule — which is
+    /// the other half of why two closes can look different.)
+    #[test]
+    fn a_shell_row_closes_at_once_without_asking() {
+        use gpui_kit::component::WindowExt as _;
+
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let (view, mut vcx) =
+                    app_with_one_session(dispatcher, "terminal", "close_shell_row");
+                let term = vcx.update(|_, cx| {
+                    view.read(cx).projects[0].sessions[0]
+                        .term
+                        .clone()
+                        .unwrap()
+                });
+
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| v.request_close_session(0, 0, window, cx));
+                    assert!(
+                        !window.has_active_dialog(cx),
+                        "a shell is not worth a confirm dialog"
+                    );
+                });
+                assert_eq!(
+                    vcx.update(|_, cx| view.read(cx).projects[0].sessions.len()),
+                    0,
+                    "its row goes in the same click"
+                );
+
+                vcx.update(|_, cx| term.update(cx, |s, _| s.kill_and_join()));
+                vcx.update(|_, cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                vcx.run_until_parked();
+            }),
+        );
     }
 
     /// A graceful quit must leave the rows that were alive marked for the
