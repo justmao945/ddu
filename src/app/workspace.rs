@@ -92,6 +92,9 @@ impl AppView {
         let removed = self.projects.remove(project);
         for session in removed.sessions {
             if let Some(term) = session.term {
+                // Its title memory goes with the row (see
+                // `remove_session_row`).
+                self.row_titles.remove(&term.entity_id());
                 term.update(cx, |s, _| s.kill());
             }
         }

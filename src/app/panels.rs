@@ -270,7 +270,8 @@ mod panel_cache_tests {
     /// a stream would rebuild them (the whole point of the split; the
     /// changes pane re-renders per frame either way, but nothing may make
     /// it *rebuild* a stream frame — that is the terminal pane's job
-    /// alone). A background session repaints nothing at all.
+    /// alone). A background session with an unchanged title repaints
+    /// nothing at all.
     #[test]
     fn stream_wakeup_repaints_only_the_terminal_pane() {
         gpui::run_test_once(
@@ -304,6 +305,76 @@ mod panel_cache_tests {
                     seen(&counts),
                     [0, 0, 1],
                     "a background row's stream repaints nothing"
+                );
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    /// A background row's spinner is on screen even though its grid is
+    /// not: the row shows the OSC title, agent CLIs spin it, and a cached
+    /// row that is only refreshed by the 1 Hz ui tick reads as jerky the
+    /// moment the user switches away from the session doing the work.
+    /// Its title change must therefore reach the sidebar from a
+    /// background session too — and reach nothing else: the grid is off
+    /// screen, so the pane has nothing to repaint, and an *unchanged*
+    /// title must notify nobody (an alive-but-silent agent drives no
+    /// frames).
+    #[test]
+    fn a_background_rows_title_follows_its_own_stream() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let (mut cx0, view, counts) =
+                    app_with_panel_counters(dispatcher, 2, "background_title_reaches_the_row");
+                let cx = &mut cx0;
+                let background = cx.update(|cx| {
+                    view.read(cx).projects[0].sessions[1]
+                        .term
+                        .clone()
+                        .unwrap()
+                });
+                let seen = |counts: &[Rc<Cell<usize>>; 3]| counts.clone().map(|c| c.get());
+                let title = |text: &str, cx: &mut gpui_kit::App| {
+                    background.update(cx, |term, _| {
+                        term.inject_bytes(format!("\x1b]0;{text}\x07").as_bytes());
+                    });
+                };
+
+                // Each injection is a burst of its own: the pump paints the
+                // first wakeup of a burst at once, so the clock has to move
+                // past the interval between them (the spawn's own wakeups
+                // already set the last-frame mark).
+                cx.executor().advance_clock(crate::terminal::STREAM_FRAME_MIN);
+                cx.update(|cx| title("⠋ working", cx));
+                cx.run_until_parked();
+                assert_eq!(
+                    seen(&counts),
+                    [1, 0, 0],
+                    "a background row's new title repaints the row alone                      (sidebar, changes pane, terminal pane)"
+                );
+
+                cx.executor().advance_clock(crate::terminal::STREAM_FRAME_MIN);
+                cx.update(|cx| title("⠋ working", cx));
+                cx.run_until_parked();
+                assert_eq!(
+                    seen(&counts),
+                    [1, 0, 0],
+                    "the same title again leaves the cached row alone"
+                );
+
+                cx.executor().advance_clock(crate::terminal::STREAM_FRAME_MIN);
+                cx.update(|cx| title("⠙ working", cx));
+                cx.run_until_parked();
+                assert_eq!(
+                    seen(&counts),
+                    [2, 0, 0],
+                    "the next spinner glyph reaches the row again"
                 );
 
                 cx.update(|cx| {

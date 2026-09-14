@@ -412,6 +412,11 @@ impl AppView {
         let became_empty;
         {
             let project = self.projects.get_mut(p).unwrap();
+            // The row's title memory goes with it: nothing will ever
+            // read this entry again, and the entity id is not reused.
+            if let Some(term) = project.sessions[six].term.as_ref() {
+                self.row_titles.remove(&term.entity_id());
+            }
             project.sessions.remove(six);
             became_empty = project.sessions.is_empty();
         }
@@ -469,14 +474,15 @@ impl AppView {
     /// Subscribe the app to one session's terminal events: wakeups
     /// repaint, exit settles the row.
     ///
-    /// Only a wakeup from the session the center pane renders may
-    /// repaint: a background row keeps parsing (its grid must be current
-    /// when the row is selected) but changes nothing on screen, so N
+    /// A wakeup repaints the center pane only for the session it
+    /// renders: a background row keeps parsing (its grid must be current
+    /// when the row is selected) but changes nothing *there*, so N
     /// streaming agents must not each drive a full-window redraw — that
     /// multiplies the frame rate the pump's throttle exists to bound.
-    /// Background rows pick up their OSC title/status on the next
-    /// repaint (the 1 Hz tick); exit, the diff poll and interaction
-    /// all keep their own notify.
+    /// Its OSC title is the exception: the sidebar row shows it whether
+    /// or not the grid is on screen, so a title change notifies the
+    /// sidebar from a background row too (`note_row_title`). Exit, the
+    /// diff poll and interaction all keep their own notify.
     pub(super) fn subscribe_term(
         &mut self,
         term: &Entity<TermSession>,
@@ -493,9 +499,10 @@ impl AppView {
                     // The pane is the repaint unit for a stream: notifying
                     // the app would fan out to the cached panels and
                     // rebuild them for output that cannot change them.
-                    // Background rows repaint nothing (see
-                    // `is_visible_term`).
-                    if this.is_visible_term(emitter) {
+                    // A background row's grid is not on screen, so it
+                    // paints nothing (see `is_visible_term`).
+                    let visible = this.is_visible_term(emitter);
+                    if visible {
                         this.terminal_pane.update(cx, |_, cx| cx.notify());
                         // An assistive client reads the sidebar and the
                         // breadcrumb too, and gpui rebuilds its tree from
@@ -510,12 +517,17 @@ impl AppView {
                             this.sidebar.update(cx, |_, cx| cx.notify());
                             this.breadcrumb.update(cx, |_, cx| cx.notify());
                         }
-                        // The one stream output that *is* visible
-                        // outside the pane: the OSC title, which agent
-                        // CLIs spin, shown in the row and the window
-                        // breadcrumb. Follow it, and nothing else.
-                        if this.note_shown_title(emitter, cx) {
-                            this.sidebar.update(cx, |_, cx| cx.notify());
+                    }
+                    // The one stream output that *is* visible outside
+                    // the pane: the OSC title, which agent CLIs spin,
+                    // shown in the row and the window breadcrumb. Follow
+                    // it wherever it moves — a background row's spinner
+                    // is on screen (in the sidebar) just the same, and
+                    // only the visible session's also reaches the
+                    // breadcrumb.
+                    if this.note_row_title(emitter, cx) {
+                        this.sidebar.update(cx, |_, cx| cx.notify());
+                        if visible {
                             this.breadcrumb.update(cx, |_, cx| cx.notify());
                         }
                     }

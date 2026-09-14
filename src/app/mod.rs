@@ -103,12 +103,14 @@ pub struct AppView {
     pub(crate) expanded: Vec<bool>,
     pub(crate) current_project: usize,
     pub(crate) current_session: usize,
-    /// The visible session's OSC title as last painted, with the
-    /// session it belongs to: a stream frame that changes the title
-    /// (agent CLIs spin it) has to reach the sidebar row and the
-    /// breadcrumb, which are otherwise cached/replayed off their own
-    /// notifications only.
-    pub(crate) shown_title: Option<(gpui::EntityId, Option<String>)>,
+    /// Every session's OSC title as the sidebar row last showed it,
+    /// keyed by the term entity: a stream frame that changes a title
+    /// (agent CLIs spin it) has to reach the sidebar, which is otherwise
+    /// cached/replayed off its own notifications only — the *visible*
+    /// session's change also reaches the breadcrumb. Keyed per session
+    /// because a row whose title moves is a row the user can see whether
+    /// or not its grid is on screen (see `note_row_title`).
+    pub(crate) row_titles: std::collections::HashMap<gpui::EntityId, Option<String>>,
     pub(crate) show_sessions: bool,
     pub(crate) show_diff: bool,
     /// Outer splitter: [sidebar | center+diff region]. The sidebar
@@ -347,7 +349,7 @@ impl AppView {
             expanded,
             current_project,
             current_session: 0,
-            shown_title: None,
+            row_titles: Default::default(),
             show_sessions: !state.hidden_sessions,
             // Diff visibility is per-session live, but the last saved
             // value seeds the restored window.
@@ -614,39 +616,40 @@ impl AppView {
     /// True when `term` is the session the center pane renders.
     ///
     /// Only that session's grid is in the element tree, so only its
-    /// output can change what a frame shows: background rows keep
+    /// output can change what the *pane* shows: background rows keep
     /// parsing (their grid must be current when the row is selected)
-    /// but must not ask for repaints — several streaming agents would
-    /// otherwise each drive a full-window redraw and multiply the
-    /// frame rate the pump's throttle exists to bound.
+    /// but never repaint for it — several streaming agents would
+    /// otherwise each drive a full-window redraw and multiply the frame
+    /// rate the pump's throttle exists to bound. The one exception is a
+    /// row's OSC title, which is on screen for a background session too
+    /// (`note_row_title`).
     pub(crate) fn is_visible_term(&self, term: &Entity<TermSession>) -> bool {
         self.current_term().is_some_and(|current| current == *term)
     }
 
-    /// Record the visible session's OSC title; true when it changed
-    /// since the last stream frame.
+    /// Record `term`'s OSC title; true when the sidebar row showing it
+    /// moved.
     ///
-    /// The sidebar row and the breadcrumb mirror the title, and agent
-    /// CLIs animate it (a spinner glyph). Both are outside the terminal
-    /// pane, so a stream frame has to notify them — but nothing else:
-    /// output that does not change the title must not rebuild them.
-    /// Keyed on the session so a switch (same title, other session)
-    /// still counts as a change.
-    pub(super) fn note_shown_title(
-        &mut self,
-        term: &Entity<TermSession>,
-        cx: &mut App,
-    ) -> bool {
+    /// The row mirrors the title and agent CLIs animate it (a spinner
+    /// glyph), so a stream frame that changes it has to notify the
+    /// *cached* sidebar. This holds for a background session as much as
+    /// for the one on screen: the row is visible either way, and letting
+    /// only the visible session's title through left a background
+    /// spinner stepping at the 1 Hz ui tick — visibly jerky — while the
+    /// grid it belongs to was off screen and cost nothing to skip. An
+    /// unchanged title notifies nobody, so an agent that is alive but
+    /// silent still drives no repaints.
+    pub(super) fn note_row_title(&mut self, term: &Entity<TermSession>, cx: &mut App) -> bool {
         let title = term.read(cx).title();
-        let id = term.entity_id();
-        if self
-            .shown_title
-            .as_ref()
-            .is_some_and(|(prev_id, prev)| *prev_id == id && *prev == title)
-        {
+        // A session that has never set a title reads `None` here *and* on
+        // the row (which falls back to the launcher's name), so a row
+        // seen for the first time is not a change — while the first real
+        // title, arriving after any number of titleless frames, is one.
+        let shown = self.row_titles.entry(term.entity_id()).or_default();
+        if *shown == title {
             return false;
         }
-        self.shown_title = Some((id, title));
+        *shown = title;
         true
     }
 

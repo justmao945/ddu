@@ -327,8 +327,10 @@ struct AgentCmd { program: String, args: Vec<String> }
   grows, EWMA-fed). Keystrokes, scrolling and selection bypass the throttle, so
   interactive latency is unchanged.
 * Panels are cached child views: a stream frame notifies the terminal pane
-  alone, an OSC-title change adds the sidebar row and the title-bar breadcrumb,
-  and every other `cx.notify()` fans out through `AppView::notify_panels`. This
+  alone, an OSC-title change adds the sidebar row and the title-bar breadcrumb
+  (a *background* row's, the sidebar row alone — the spinner it shows is on
+  screen while its grid is not), and every other `cx.notify()` fans out
+  through `AppView::notify_panels`. This
   is what keeps a streaming agent from rebuilding the *sidebar and breadcrumb*
   20×/s; the changes pane re-renders per frame by design (it is the app's only
   selectable surface — `UI.md`), and mounting it cached cost *more*: the sweep
