@@ -148,6 +148,10 @@ fn image_run(text: &str, ix: usize) -> AnyElement {
     TextView::markdown(id, text.to_owned())
         .selectable(false)
         .scrollable(false)
+        // The paragraph's own style, size and heading scale included: a
+        // run rendered beside an image must not drift from the one the
+        // document body renders (see [`super::document_text_style`]).
+        .style(super::document_text_style())
         .into_any_element()
 }
 

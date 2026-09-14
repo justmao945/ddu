@@ -41,3 +41,17 @@ shlex = "1.3"
 # Enables gpui's TestAppContext/run_test_once for headless app tests
 # (terminal IME regression); feature-unifies only into test builds.
 gpui-kit = { version = "0.6", features = ["test-support"] }
+
+# The gpui stack is pinned to the commit that fixes the rendered document's
+# double wrap, which 0.6.1 (the newest release) still carries: `InlineFlow`
+# measured each fragment and then gave its nested text element exactly that
+# measured width, so a lost f32 bit left it narrower than its own text, the
+# element wrapped its last break opportunity onto a second line, and the tail
+# landed on the line below while the flow's line count stayed one short
+# (`docs/UI.md`, "The rendered document's text"). `bfd72443` — "text: prevent
+# inline-code fragments from wrapping twice" (#3046), merged 2026-09-11 — adds
+# `whitespace_nowrap()` to that fragment container; the whole family rides the
+# one rev, so the git checkout stays internally consistent. Drop this section
+# (and `cargo update -p gpui-kit`) once a release past 0.6.1 lands.
+[patch.crates-io]
+gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "bfd7244371ff58db1b01b54cc8858b64ee106108" }

@@ -67,11 +67,41 @@ pub(crate) fn apply_mono_typography(cx: &mut App) {
     base.tokens.typography.mono_md.line_height = px(code * 1.5);
 }
 
+/// The rendered document's text style: the component's own style (its
+/// colors and its code-block, table and inline-code refinements all come
+/// from the theme — [`TextView::style`] folds this onto the themed base,
+/// so a field left at its default keeps the themed value) with one
+/// override.
+///
+/// gpui-base's stock heading base is a *bare* 14px, so on a desktop whose
+/// text scale is not 1.0 a document's headings stop tracking the prose
+/// they head: at factor 1.33 the body is 18.6px, while `h4` (rems(1.125)
+/// of 14) and `h5`/`h6` (rems(1.) of 14) came out *smaller* than the
+/// paragraph under them. The document's prose rides
+/// [`crate::config::ui_font_size`], so the heading base must too — that
+/// is the ratio the library itself ships (13px of a 14px body).
+pub(crate) fn document_text_style() -> gpui_kit::component::text::TextViewStyle {
+    gpui_kit::component::text::TextViewStyle {
+        heading_base_font_size: px(crate::config::ui_font_size()),
+        ..Default::default()
+    }
+}
+
 /// Monospace detection. Font registries expose no `is_monospace` flag, so
 /// match on the family name: anything saying "mono" (minus the proportional
 /// "propo" Nerd Font variants), plus a substring list of known mono families
 /// whose names don't say it. One heuristic, two callers: the settings
 /// picker lists with it, and `resolve_mono_family` falls back with it.
+///
+/// A **virtual** name — `.SystemUIFont`, `.ZedMono`, `.ZedSans`, the
+/// aliases gpui mixes into `all_font_names()` beside the platform's real
+/// faces — is never a family: `.ZedMono` names *Lilex* and `.ZedSans` names
+/// *IBM Plex Sans*, neither of which the machine has to have. Matching one
+/// is how the fallback picked `.ZedMono` (alphabetically the first alias,
+/// and the only name in the list saying "mono") on a desktop without the
+/// stock `DejaVu Sans Mono`: gpui then resolved that name to nothing, fell
+/// back to the *UI* face, and rendered the terminal and every code row
+/// proportional.
 pub(crate) fn is_mono_family(family: &str) -> bool {
     const MONO_NAME_HINTS: &[&str] = &[
         "menlo",
@@ -89,7 +119,7 @@ pub(crate) fn is_mono_family(family: &str) -> bool {
         "sarasa term",
     ];
     let f = family.to_ascii_lowercase();
-    if f.contains("propo") {
+    if f.starts_with('.') || f.contains("propo") {
         return false;
     }
     f.contains("mono") || MONO_NAME_HINTS.iter().any(|h| f.contains(h))
@@ -98,7 +128,9 @@ pub(crate) fn is_mono_family(family: &str) -> bool {
 /// The mono face to actually render with: the configured family when it is
 /// installed, else an installed face whose name says monospace, else the
 /// configured name unchanged (a headless environment with no font list
-/// keeps the caller's value rather than inventing one).
+/// keeps the caller's value rather than inventing one). "Installed" is
+/// decided by the name, since gpui's list also carries its own aliases —
+/// see [`is_mono_family`], which rejects them.
 ///
 /// This is not decoration. gpui matches a family by **exact name** against
 /// the faces it loaded — no fontconfig substitution — and a family it
@@ -418,4 +450,27 @@ pub(crate) fn figures(added: usize, removed: usize, sep: char) -> String {
         out.push_str(&format!("−{removed}"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_mono_family;
+
+    /// gpui's `all_font_names()` mixes its own aliases in with the
+    /// platform's faces, and the mono fallback scans that list — so a
+    /// virtual name winning the scan is the bug that rendered the terminal
+    /// and every code row in the UI face on a desktop without the stock
+    /// `DejaVu Sans Mono` (`.ZedMono` says "mono" and sorts first).
+    #[test]
+    fn the_mono_heuristic_rejects_gpui_virtual_names() {
+        assert!(!is_mono_family(".ZedMono"));
+        assert!(!is_mono_family(".ZedSans"));
+        assert!(!is_mono_family(".SystemUIFont"));
+
+        // Real faces still match, in any case.
+        assert!(is_mono_family("JetBrainsMono Nerd Font"));
+        assert!(is_mono_family("DejaVu Sans Mono"));
+        assert!(is_mono_family("Menlo"));
+        assert!(!is_mono_family("Helvetica"));
+    }
 }

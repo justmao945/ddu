@@ -2,7 +2,9 @@
 
 Multi-agent workspace: left = projects + agent sessions, center = PTY terminal
 (runs `terminal` / `claude` / `codex` CLIs), right = live git diff. Rust +
-`gpui-kit = "0.6"` (re-exports `gpui-pre 0.3.3` + `gpui-component 0.6`).
+`gpui-kit = "0.6"` (re-exports `gpui-pre 0.3.3` + `gpui-component 0.6`),
+pinned to the upstream commit that fixes the rendered document's double wrap
+until a release carries it (`docs/RUNNING.md`, `docs/UI.md`).
 Targets macOS and Linux (X11/Wayland). Apache-2.0, GPL-free throughout
 (`contrib/usage/` is MIT). This file is the short form: the rules to obey while
 editing, and where the long form lives.
@@ -126,7 +128,11 @@ editing, and where the long form lives.
   `DejaVu Sans Mono` rendered the terminal and every code row in a proportional
   font. `ui::resolve_mono_family` (called from `apply_mono_typography`, i.e.
   after every `Theme::change`) corrects it, and `ui::is_mono_family` is the one
-  monospace heuristic (the settings picker lists with it too).
+  monospace heuristic (the settings picker lists with it too). That heuristic
+  rejects gpui's *virtual* names — `.ZedMono`/`.ZedSans` name Lilex and IBM
+  Plex Sans, which the machine need not have — because `all_font_names()`
+  carries them and `.ZedMono` is otherwise the first list entry saying "mono"
+  (`docs/UI.md`).
 - **Highlighting is per row, off the file** (`diff/file_view.rs` + `ui/code_text.rs`):
   `ViewRow::offset` is the row's byte offset in the file (`None` for a spliced
   deletion, which is never colored), and `RowStream::row_styles` clips a
@@ -166,9 +172,11 @@ editing, and where the long form lives.
   which expands into itself ("recursion limit reached while expanding
   `#[test]`"). Name the imports the test needs.
 - **Repaint**: never poll-render — `PumpMsg` events drive it; `subscribe_term`
-  is the single subscription point and repaints only the visible session; the
-  adaptive `stream_interval` steps must sit above a real frame's paint cost
-  (`docs/UI.md`).
+  is the single subscription point, and a wakeup repaints the pane only for the
+  visible session while an OSC-title change notifies the sidebar row from a
+  *background* session too (its spinner is on screen even when its grid is not;
+  a row refreshed only by the 1 Hz tick reads as jerky). The adaptive
+  `stream_interval` steps must sit above a real frame's paint cost (`docs/UI.md`).
 - **Keyboard**: app shortcuts are `secondary-` chords (copy/paste/find are
   `⌃⇧` on Linux); a chord a binding claims never reaches the PTY — `⌃P` (the
   quick open) trades readline's previous-history for a file search, pinned by

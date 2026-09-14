@@ -157,6 +157,9 @@ fn preview_body(this: &AppView) -> impl IntoElement {
             )
             .selectable(true)
             .scrollable(true)
+            // Headings follow the desktop's text scale, not gpui-base's
+            // stock 14px base (see [`crate::ui::document_text_style`]).
+            .style(crate::ui::document_text_style())
             .plugin(crate::ui::markdown::LocalImages::new(base))
             // Prose needs margins: the rows carry their own `p_2`, and a
             // document rendered flush against the pane's edges reads as

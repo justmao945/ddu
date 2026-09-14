@@ -4,6 +4,18 @@
 > the macOS launch constraints, and why they exist. Signing and TCC grants are
 > in `SIGNING.md`.
 
+## The gpui stack is pinned to one commit
+
+`Cargo.toml` carries a `[patch.crates-io]` entry pinning `gpui-kit` — and with
+it the four crates that then resolve from that checkout (`gpui-base`,
+`gpui-component`, `gpui-kit-assets`, `gpui-component-macros`) — to `bfd72443`
+on `longbridge/gpui-kit`: the commit that stops a rendered document's inline
+code from wrapping twice (`docs/UI.md`, "The rendered document's text").
+crates.io's newest release, 0.6.1, predates it, so the first build fetches the
+rev from GitHub and needs the network; `Cargo.lock` records the rev, so every
+build after that is offline and byte-reproducible. When a release past 0.6.1
+lands, delete the section and `cargo update -p gpui-kit`.
+
 ## Linux (X11 / Wayland)
 
 - **Dev**: `scripts/linux.sh run` — builds `--release`, then runs the binary

@@ -185,7 +185,8 @@ Three halves to keep in sync, all pinned by tests in `src/app/panels.rs`
 * a stream frame that *changes the OSC title* (the spinner glyph in the
   sidebar row and the breadcrumb) additionally notifies those two — and
   nothing else, or an agent's spinner tick would rebuild the cached panels 20
-  times a second;
+  times a second; a *background* row's title change notifies the sidebar alone
+  (its row is on screen, its grid is not);
 * every other `cx.notify()` on `AppView` fans out through
   `AppView::notify_panels` (an app-level `observe_self`), or a panel whose
   state changed would keep its stale frame.
@@ -204,13 +205,17 @@ Wakeups never poll-render: the reader thread pushes `PumpMsg` events through a
 subscriber channel.
 
 `AppView::subscribe_term` is the single subscription point for every spawn
-path (new/restart/restore). It repaints only for the session the center pane
+path (new/restart/restore). It repaints the center pane only for the session it
 renders (`is_visible_term`): a background row keeps parsing — selecting it
-must show current output — but its output changes nothing on screen, and
+must show current output — but its grid changes nothing on screen, and
 several streaming agents would otherwise each add a full-window redraw per
-frame (measured 47 fps vs 1 fps with two background streams). Exit, the diff
-poll and interaction notify on their own; a background row picks up its OSC
-title/status on the next repaint.
+frame (measured 47 fps vs 1 fps with two background streams). Its OSC title is
+the exception, and it is on screen either way: the sidebar row shows it, so a
+title change notifies the sidebar from a background row too
+(`AppView::note_row_title`) — a row left to the 1 Hz ui tick stepped its
+spinner there and read as jerky the moment the user switched to a quiet
+session. Nothing else follows a background row, and an *unchanged* title
+notifies nobody. Exit, the diff poll and interaction notify on their own.
 
 Stream repaint pacing is adaptive: the pump spaces output-driven repaints by
 `stream_interval(paint_ms)` — 50 ms (20 fps) while the terminal element's own
@@ -331,3 +336,58 @@ Confirm dialogs: never hand-roll `DialogFooter` button pairs — use
 `ui::dialog_footer(label, id, on_confirm)` (`src/ui/mod.rs`: Cancel-outline +
 danger-small shared recipe). Set `.on_ok(...)` alongside the footer when Enter
 should confirm. One-off informational dialogs (no footer) are fine inline.
+
+## The rendered document's text
+
+**A virtual font name is not a family.** `all_font_names()` mixes gpui's own
+aliases — `.SystemUIFont`, `.ZedMono`, `.ZedSans` — in with the platform's
+real faces, and a name the machine does not have is no font at all: gpui
+matches a family by exact name against the faces it loaded (no fontconfig
+substitution) and silently falls back to the *UI* face. The mono fallback
+scans that same list, so on a desktop without the stock `DejaVu Sans Mono` it
+picked `.ZedMono` — alphabetically the first alias, and the only name in the
+list saying "mono" — which names *Lilex*, an installed family almost nowhere:
+the terminal, the diff rows and every inline-code span rendered
+**proportional** while the rest of the panels looked normal. `is_mono_family`
+now rejects a name that starts with `.` (which is also how that alias left
+the settings picker), pinned by
+`ui::tests::the_mono_heuristic_rejects_gpui_virtual_names`.
+
+**Inline code can wrap twice — upstream, pending a release.** `InlineFlow`
+shapes, wraps and positions each fragment, then hands that fragment's text to
+a nested text element whose available width is *exactly* the fragment's
+measured width (the code padding is added to size the box and taken straight
+back off for the text), and the bounds are device-pixel snapped besides — so
+one lost f32 bit in that round-trip (measured: 86.274216px of text, 86.27421px
+of width) leaves the nested element a hair narrower than the text it must
+hold. It then wraps its *last* break opportunity onto a second line and paints
+it at the fragment's own x: the tail lands on the line below (overlapping the
+next block, or clipped away) while the line the flow measured stays one line
+short. Which spans break is float luck — the same
+document breaks different spans when the font changes, and a macOS window
+usually breaks none — so it reads as "some text overlaps on Linux only", and
+the wrapped line can be *prose*, not just code (a list item's last fragment
+wraps the same way). Fixed upstream in longbridge/gpui-kit#3046
+(`bfd72443`, `crates/base/src/text/inline_flow.rs`: `whitespace_nowrap()` on
+the fragment container, landed 2026-09-11), and the crate is **pinned to that
+commit** in `Cargo.toml` — 0.6.1, the newest release, still carries the bug —
+which is what the pane renders with (`docs/RUNNING.md`). Verify a future
+release's fix the same way the pin was checked: render a document with inline
+code inside a wrapped paragraph (this repository's own `AGENTS.md` does) and
+look for a span's tail sitting on the line below its box.
+
+**A heading base is a bare px, so headings do not follow the desktop scale.**
+`TextViewStyle::heading_base_font_size` is `Pixels`, not `Rems` — gpui-base
+ships 14 — and every level is a multiple of it (`h1` `rems(2.)`, `h2`
+`rems(1.5)`, `h3` `rems(1.25)`, `h4` `rems(1.125)`, `h5`/`h6` `rems(1.)`,
+`base/src/text/node.rs`). A document's prose rides `config::ui_font_size()`
+(the theme's font size), so on any desktop whose text scale is not 1.0 the
+headings stop tracking the text they head: measured at factor 1.33 — body
+18.6px, `h4` 15.75px, `h5`/`h6` 14px, i.e. the levels a document uses for its
+sub-sub-sections rendered *smaller* than their own paragraphs.
+`ui::document_text_style()` is the component style with the base at the UI
+size, and both text-view call sites use it (`diff_panel/body.rs`, plus the
+image plugin's prose runs in `markdown.rs` — a run rendered beside an image
+must not drift from the document around it). Verify at
+`DDU_TEXT_SCALE=1.33`: `h1` is 2× the body, `h4` 1.125×, `h5`/`h6` level with
+it (they used to sit below it).
