@@ -179,9 +179,12 @@ editing, and where the long form lives.
   them (`docs/UI.md`). Any action shown in a menu must wire
   `PopupMenuItem::action` — that is what makes the item show the chord that
   runs it, so an item wired only to `on_click` reads as a command the keyboard
-  cannot reach. The tree's and the pane's copy commands follow it (⌥⌘C /
-  `⌃⌥C` path, ⌥⇧⌘C / `⌃⌥⇧C` contents), and a tree right-click selects its row
-  first, so the menu and the chord always act on the same file
+  cannot reach — and it must be that chord's *winning* binding, not a fallback
+  in its chain (a predicate-less binding ties a named context at the focused
+  element and wins the later-binding tiebreak). The tree's and the pane's copy
+  commands follow it (⌥⌘C / `⌃⌥C` path, ⌥⇧⌘C / `⌃⌥⇧C` contents), and a tree
+  right-click selects its row first, so the menu and the chord always act on
+  the same file
   (`docs/UI.md`).
 - **Modal dialogs**: pickers go through `rfd::AsyncFileDialog` deferred with
   `window.spawn`; confirm dialogs use `ui::dialog_footer(...)`, never a

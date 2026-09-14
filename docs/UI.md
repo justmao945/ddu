@@ -239,6 +239,15 @@ with no chord at all, which reads as a command the keyboard cannot reach
 (the tree's and the pane's copy commands were exactly that: they now carry
 `CopyFilePath` / `CopyFileContents`, bound in the `⌃⌥` space, and a tree
 right-click selects its row so the item and the chord name the same file).
+The item's action must also be the chord's **winner**, not merely one of its
+bindings: the menu asks for the highest-precedence binding for that action and
+renders nothing when the chord's top binding is a different action. The
+terminal's Copy item printed no chord at all while its Paste item printed `⌘V`
+for exactly that reason — the pane's `input::Copy` sat on the same chord
+predicate-less, which ties a named context at the focused element and wins the
+later-binding tiebreak; bound `!Terminal` the two are mutually exclusive and
+`TermCopy` is the winner inside the terminal
+(`app::keys::tests::copy_routes_by_focus`).
 
 Copy/paste/find are the exception to `secondary-`: a terminal shares those
 keys with the shell, so on Linux they live in the `⌃⇧` space (`Ctrl+C` must

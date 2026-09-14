@@ -114,10 +114,23 @@ pub(super) fn key_bindings() -> Vec<KeyBinding> {
         // Copy grabs the mouse selection when one exists (the
         // handler propagates otherwise); PTYs never see it.
         KeyBinding::new(COPY_ACCEL, TermCopy, Some("Terminal")),
-        // Outside the terminal, copy grabs the active diff-pane
-        // text selection (window-scoped `TextSelection`); the
-        // handler propagates when nothing is selected.
-        KeyBinding::new(COPY_ACCEL, input::Copy, None),
+        // Outside the terminal, copy grabs the active diff-pane text
+        // selection (window-scoped `TextSelection`); the handler
+        // propagates when nothing is selected.
+        //
+        // `!Terminal`, never a bare `None`: a predicate-less binding
+        // always scores the full context stack, so it *ties* the named
+        // context at the focused element and then wins the
+        // later-binding tiebreak. With a `None` here the terminal's
+        // ⌘C dispatched the pane's copy first — and the terminal's
+        // right-click menu, which hints an item from the action it
+        // carries and accepts only the chord's *winner*
+        // (`PopupMenuItem::action`), printed no chord for `TermCopy` at
+        // all. `!Terminal` (true only while the terminal is nowhere on
+        // the dispatch path) makes the two bindings mutually exclusive,
+        // so the winner needs no tiebreak at all — the same fix, for the
+        // same reason, as `FIND_ACCEL` below.
+        KeyBinding::new(COPY_ACCEL, input::Copy, Some("!Terminal")),
         // The two file-copy commands the tree's and the pane's context
         // menus carry: both act on the pane's selected file, so the
         // menus can show the chord they run. App-level (no key
@@ -228,13 +241,24 @@ mod tests {
         // context, so the unbound case can't occur in the app.
     }
 
-    /// Copy's fallback chain: the diff-pane copy runs first and yields
-    /// to the terminal copy when a terminal selection exists.
+    /// Copy routes by focus, like find: the terminal's own copy is the
+    /// chord wherever the terminal is on the dispatch path (its surface
+    /// and its find bar alike — the pane's window selection is not the
+    /// terminal's business), and the pane's copy is the chord everywhere
+    /// else. Being the *winner* is what the menu needs, not merely being
+    /// bound: `PopupMenu` hints an item from the action it carries and
+    /// accepts only the chord's highest-precedence binding, so while the
+    /// pane's binding was predicate-less the terminal's right-click menu
+    /// showed a "Copy" item with no ⌘C at all.
     #[test]
-    fn copy_falls_back_to_terminal() {
+    fn copy_routes_by_focus() {
         assert_eq!(
             chain(COPY_ACCEL, &["Root", "Terminal"]),
-            vec!["input::Copy", "ddu::TermCopy"]
+            vec!["ddu::TermCopy"]
+        );
+        assert_eq!(
+            chain(COPY_ACCEL, &["Root", "Terminal", "TerminalSearch"]),
+            vec!["ddu::TermCopy"]
         );
         assert_eq!(chain(COPY_ACCEL, &["Root"]), vec!["input::Copy"]);
     }
