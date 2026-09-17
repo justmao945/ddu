@@ -23,8 +23,8 @@ impl AppView {
         self.diff_search.matches.clear();
         self.pending_scroll = None;
         // The quick open's path list belongs to the working tree the
-        // session that owned it; the next open rebuilds it.
-        self.file_search.paths.clear();
+        // session that owned it; the next open walks for the new one.
+        self.file_search.forget_paths();
         self.file_search.matches.clear();
         self.file_search.current = 0;
         self.diff_tree_scroll.set_offset(point(px(0.), px(0.)));
@@ -166,6 +166,13 @@ impl AppView {
             self.tree_index = None;
             return;
         };
+        // The repository is what names the tree's root: a session may sit
+        // in a subdirectory, and the paths the diff and the poll carry are
+        // workdir-relative.
+        let Some(workdir) = repo.workdir().map(std::path::Path::to_path_buf) else {
+            self.tree_index = None;
+            return;
+        };
         let Some(snapshot) = self.snapshot.as_ref() else {
             self.tree_index = None;
             return;
@@ -175,18 +182,18 @@ impl AppView {
             self.tree_seeded = true;
             crate::ui::file_tree::seed_open(&mut self.diff_tree_open, &changes);
         }
-        // Field-level borrows: the listing closure reads the repo and the
-        // diff while the rows land in `tree_index`.
+        // Field-level borrows: the listing closure reads the diff while the
+        // rows land in `tree_index`.
         let open = &self.diff_tree_open;
         let index = crate::ui::file_tree::build_index(open, |dir| {
-            crate::diff::listing::list_dir(&repo, dir, &changes)
+            crate::diff::listing::list_dir(&workdir, dir, &changes)
         });
         self.tree_index = Some(index);
     }
 
     /// The project's repository handle, discovered once per directory and
-    /// kept for the tree's listings. `None` when the path is not in a
-    /// repository — the tree then shows the poll's error, as before.
+    /// kept for the session. `None` when the path is not in a repository —
+    /// the tree then shows the poll's error, as before.
     pub(crate) fn repo_for(&mut self, root: &std::path::Path) -> Option<Rc<git2::Repository>> {
         if let Some((key, repo)) = &self.repo {
             if key == root {
@@ -489,10 +496,10 @@ mod tests {
         );
     }
 
-    /// The quick open searches the working tree's own paths — the index's
-    /// tracked files *and* the untracked ones only the poll knows — and
-    /// committing a hit selects the file with its ancestors opened in the
-    /// tree, so the row is where the search left it.
+    /// The quick open answers on its first frame from the paths git knows
+    /// — the index's tracked files *and* the untracked ones only the poll
+    /// knows — and committing a hit selects the file with its ancestors
+    /// opened in the tree, so the row is where the search left it.
     #[test]
     fn quick_open_searches_the_working_tree_and_opens_the_hit() {
         let (root, changed) = workspace("quick-open");
@@ -506,7 +513,7 @@ mod tests {
                 vcx.update(|window, cx| {
                     view.update(cx, |v, cx| {
                         v.open_file_search(window, cx);
-                        let paths = &v.file_search.paths;
+                        let paths = v.file_search.search.paths();
                         assert!(paths.iter().any(|p| p == "src/other.rs"), "tracked");
                         assert!(paths.iter().any(|p| p == "fresh.txt"), "untracked");
                     });
@@ -563,6 +570,94 @@ mod tests {
                         cursor,
                         "enter opens the file the cursor is on"
                     );
+                });
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The quick open's universe is the walk of the working tree, not git's
+    /// view of it: a file the ignore rules hide — and the directories on
+    /// the way to it — becomes searchable when the walk lands, the query
+    /// re-ranks under it, and the cursor stays on its own path rather than
+    /// being sent back to the top. A landing for a bar that has closed, or
+    /// one kicked before this open, is dropped.
+    #[test]
+    fn the_walk_lands_under_the_palette_and_the_cursor_keeps_its_path() {
+        let (root, changed) = workspace("walk-ignored");
+        // Ignored, and absent from the poll's diff: the walk is the only
+        // thing that can reach it.
+        std::fs::write(root.join(".gitignore"), "ignored/\n").expect("write");
+        std::fs::create_dir_all(root.join("ignored")).expect("mkdir");
+        std::fs::write(root.join("ignored/secret.rs"), "fn secret() {}\n").expect("write");
+        let walked = crate::diff::listing::walk_files(&root);
+        assert!(
+            walked.iter().any(|p| p == "ignored/secret.rs"),
+            "the walk reaches what git hides"
+        );
+        let root_for_app = root.clone();
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let (mut cx0, view, mut vcx) = app(dispatcher, "walk_ignored", root_for_app, changed);
+                let cx = &mut cx0;
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        v.open_file_search(window, cx);
+                        assert!(
+                            !v.file_search
+                                .search
+                                .paths()
+                                .iter()
+                                .any(|p| p == "ignored/secret.rs"),
+                            "git's view is what the palette opens on"
+                        );
+                        let seq = v.file_search.paths_seq;
+                        v.file_search.input.update(cx, |input, cx| input.set_value("secret", window, cx));
+                        v.refresh_file_search(cx);
+                        assert_eq!(v.file_search.matches.len(), 0, "nothing git knows matches");
+
+                        v.apply_file_paths(seq, walked.clone(), cx);
+                        assert_eq!(
+                            v.file_search.current_path(),
+                            Some("ignored/secret.rs"),
+                            "the landed walk is searched, and it reaches the ignored file"
+                        );
+
+                        // Stepped, then landed again: the cursor keeps its
+                        // own path instead of being reset to the best hit.
+                        v.file_search.input.update(cx, |input, cx| input.set_value("rs", window, cx));
+                        v.refresh_file_search(cx);
+                        v.file_search_step(false, cx);
+                        let cursor = v.file_search.current_path().map(str::to_owned);
+                        assert_eq!(v.file_search.current, 1, "stepped off the best hit");
+                        v.apply_file_paths(seq, walked.clone(), cx);
+                        assert_eq!(v.file_search.current_path().map(str::to_owned), cursor);
+                        assert_eq!(v.file_search.current, 1, "the path kept its place");
+
+                        // A landing kicked before this open, and one that
+                        // arrives after the bar closed: both are dropped.
+                        v.file_search.search.set_paths(vec!["sentinel.rs".to_owned()]);
+                        v.apply_file_paths(seq + 1, walked.clone(), cx);
+                        assert_eq!(
+                            v.file_search.search.paths(),
+                            ["sentinel.rs"],
+                            "a landing from an older open is not this bar's answer"
+                        );
+                        v.open_file_search(window, cx);
+                        let seq = v.file_search.paths_seq;
+                        v.close_file_search(window, cx);
+                        v.apply_file_paths(seq, walked.clone(), cx);
+                        assert!(
+                            v.file_search.search.paths().is_empty(),
+                            "a closed bar is not answered"
+                        );
+                    });
                 });
                 cx.update(|cx| {
                     cx.background_executor().forbid_parking();

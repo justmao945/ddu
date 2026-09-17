@@ -133,3 +133,10 @@ The diff find bar ("Find in diff") needs a selected file first: ⌘T drops the
 file-tree layer in under the sessions, ⌘R opens the changes pane, then click a
 row in the tree and ⌘F. The layer toggles make the whole sequence replayable
 from a fresh state.
+
+An **ignored** file proves both listings at once: put `ignored/secret.rs` behind
+a `.gitignore` rule in the scratch repo (with `show_diff` and `show_diff_tree`
+preset in the state file, so no chords are needed to see the layer) and the tree
+lists `ignored/` beside `.gitignore` with no figures, while ⌃P `secret` (then
+Enter) finds and opens it — the walk is the only thing that can reach a path git
+hides, so a hit there proves the palette is not reading the index.

@@ -250,11 +250,11 @@ fn list(this: &AppView, cx: &mut Context<AppView>) -> AnyElement {
                         .unwrap_or_default();
                     range
                         .filter_map(|hit| {
-                            let path = this.file_search.paths.get(*this.file_search.matches.get(hit)?)?;
+                            let path = this.file_search.search.path(*this.file_search.matches.get(hit)?)?;
                             Some(hit_row(
                                 hit,
                                 path,
-                                changed.get(path.as_str()).copied(),
+                                changed.get(path).copied(),
                                 hit == this.file_search.current,
                                 cx,
                             ))

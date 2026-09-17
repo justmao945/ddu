@@ -204,7 +204,7 @@ Agent CLIs (claude/codex/omp) daily need streaming output, ANSI colors, line-wra
 
 * Data: `Repository::discover(project.path)` → `diff_tree_to_workdir_with_index(head, opts)` with `include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true)` — staged, unstaged and untracked in one pass, no subprocess. Refreshed by the 3 s poll (every session switch reloads immediately); there is **no** `notify`-crate `.git` watcher and no manual refresh control.
 * Truncation: a file's collected lines are capped at `MAX_LINES_PER_FILE` (5 000) with the stat counts still counted in full; the pane renders a cap note and reaching it grows that file's budget ×4 up to `EXPAND_MAX_LINES` (200 000).
-* View: the file list is the sidebar's **file tree** (`ui/file_tree/`), read **lazily**: `TreeIndex` (`AppView::tree_index`) is the root plus the directories the user has expanded, and each of those is listed on demand (`diff/listing.rs::list_dir` — one `read_dir`, gitignore through libgit2, one diff lookup per entry) with the poll's changes merged in as it is read. Nothing else is read, so a 40k-file repository draws a few hundred rows; a `v_virtual_list` then builds only the visible slice.
+* View: the file list is the sidebar's **file tree** (`ui/file_tree/`), read **lazily**: `TreeIndex` (`AppView::tree_index`) is the root plus the directories the user has expanded, and each of those is listed on demand (`diff/listing.rs::list_dir` — one `read_dir`, nothing filtered but `.git`, one diff lookup per entry) with the poll's changes merged in as it is read. Nothing else is read, so a 40k-file repository draws a few hundred rows; a `v_virtual_list` then builds only the visible slice.
   * **Default expansion**: on the first snapshot of a session, `seed_open` expands every directory on the way to a changed file, so a large repository opens on its changes and their ancestors. Explicit toggles win from then on, and a file changing later only moves badges — never the expansion state, so the tree does not jump under the user.
   * **Order and figures**: directories come first, then files, each name-sorted
     **case-insensitively** (`tree::by_name`: `README.md` sits with `readme.md`, not
@@ -229,10 +229,15 @@ Agent CLIs (claude/codex/omp) daily need streaming output, ANSI colors, line-wra
   lower splitter slot, the **diff file tree layer** (§7): today it lists the
   changed files as a directory tree, toggled with ⌘T and resizable per session.
 * The layer now lists the whole working tree, lazily expanded and
-  `.gitignore`-respecting (`FILE_TREE.md`), rather than only the changed files:
-  it replaces the changed-only build instead of sitting beside it. No `walkdir`
-  or `ignore` crate was needed — the listing is `read_dir` plus libgit2's own
-  ignore rules. The earlier `explorer.rs` sketch in this document is superseded.
+  **unfiltered** (`FILE_TREE.md`: nothing is hidden but `.git`), rather than
+  only the changed files: it replaces the changed-only build instead of sitting
+  beside it. No `walkdir`/`ignore` crate was needed — the listing is `read_dir`,
+  and so is the quick open's whole-workdir walk (`diff/listing.rs::walk_files`,
+  on the background executor, one pass per palette open). The palette's ranking
+  is likewise its own index rather than a scan per keystroke: `PathSearch`
+  memoizes the typed prefixes and scores a keystroke against the survivors of
+  the last one (`docs/UI.md`). The earlier `explorer.rs` sketch in this document
+  is superseded.
 
 ## 9. Agent Backend Abstraction
 
@@ -374,7 +379,7 @@ struct AgentCmd { program: String, args: Vec<String> }
 * ~~M4 Session management~~ ✅ shipped: open / kill / restart / exit status / confirmations / **persistence** — `state.json` restores projects, layout and per-session state, and rows that were still running come back running, agents resumed from their captured id.
 * M5 File tree + worktree + polish — partly shipped:
   * ✅ the view panel: the whole-file surface (diff merged in, `diff/file_view.rs`), Markdown rendering and the `⌘⇧M` / icon-button switch, all on a virtualized row stream;
-  * ✅ the file tree: every file in the working tree, `.gitignore` respected, listed **lazily** (one directory at a time, on expansion) with the diff merged in — no filter, no counts, `TreeIndex` + `v_virtual_list`, defaulting to the changes and their ancestors;
+  * ✅ the file tree: every file in the working tree, `.gitignore` not consulted (an ignored path is listed like any other), listed **lazily** (one directory at a time, on expansion) with the diff merged in — no filter, no counts, `TreeIndex` + `v_virtual_list`, defaulting to the changes and their ancestors;
   * ✅ the pane's surfaces: Diff ⇄ whole file (⌘⇧M / the header's far-right icon button), Markdown rendered as the document, images drawn (document images through `ui/markdown.rs`, image files fitted to the pane);
   * open: per-session worktrees (one branch + one directory per session) — sessions share the project diff today;
   * ✅ syntax highlighting in the whole-file surface: c/c++, java, html, css, js/jsx, ts/tsx, rust, go, python, swift, bash/sh, json (`FILE_TREE.md` §8.4; `tree-sitter-*` features, all MIT). Diff mode's hunks stay plain — they are fragments with no offsets into the file.

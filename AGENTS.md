@@ -160,6 +160,20 @@ editing, and where the long form lives.
   `AppView::selection` (a path) instead. A file nobody changed renders as the
   file itself (`AppView::surface` folds Diff into File), and a zero figure is
   never printed (`+8`, not `+8 −0`).
+- **Nothing is filtered but `.git`** (`diff/listing.rs::list_dir`): the tree is
+  the filesystem's, so `.gitignore` is not read at all — `target/`, `.env`, a
+  build output are listed like anything else, in the tree's own text color with
+  no figures (git's view of a file is its *badge*, not a gate on the listing).
+  A symlink is classified by what it points at (`entry_kind`): `DirEntry`'s own
+  kind reports the link, which would otherwise vanish from the listing.
+- **The quick open's universe is a walk, and its ranking is a memo over it**
+  (`diff/listing.rs`): `walk_files` — not the git index — is what a palette
+  query searches (background executor, once per open, `.git` the only skip;
+  `docs/UI.md`), and `PathSearch` re-ranks a keystroke against the survivors of
+  the typed prefix instead of the whole list. That memo and its tier pruning
+  rest on every tier being **monotone in the needle** (a longer needle can only
+  rank a path the same or worse): a new, non-monotone tier (a fuzzy score) must
+  stay off the pruned path, or the fast path is wrong, not slow.
 - **A restore of the pane's scroll position waits for its own rows**: rows
   mount in stages (the poll's hunks, then the whole-file view), and the virtual
   list clamps an offset to whatever is mounted — applied early, a deep position

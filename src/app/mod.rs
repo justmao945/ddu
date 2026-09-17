@@ -137,10 +137,11 @@ pub struct AppView {
     /// The tree's rows + totals, rebuilt when the diff, the expansion or
     /// the listing changes (never per frame — see `build_index`).
     pub(crate) tree_index: Option<crate::ui::file_tree::TreeIndex>,
-    /// The project's repository, opened once and kept for the tree's
-    /// listings (`list_dir` needs git's own ignore rules). Keyed by the
-    /// directory it was discovered from: a session switch to another
-    /// project re-discovers.
+    /// The project's repository, opened once and kept for the session: its
+    /// workdir names the root both listings read (the tree's, the quick
+    /// open's walk), its index is the quick open's instant answer, and no
+    /// repository at all means no tree. Keyed by the directory it was
+    /// discovered from: a session switch to another project re-discovers.
     pub(crate) repo: Option<(std::path::PathBuf, Rc<git2::Repository>)>,
     pub(crate) hovered_project: Option<usize>,
     /// Project whose `...` menu is open: keeps the row's buttons mounted

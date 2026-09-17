@@ -306,6 +306,52 @@ card would render as a field with no hits under it. The card is mounted as the
 last child of `#app-root` and before `Root::render_dialog_layer`, so it paints
 over every panel and under any dialog opened from it.
 
+**Its universe is a walk of the working tree, not git's view of it**
+(`diff/listing.rs::walk_files`): an ignored path (`target/`, `node_modules/`,
+`.env`) and any depth of directory are searchable, because "open the file I have
+in mind" is not the question `git ls-files` answers. The walk runs on the
+**background executor** once per palette open — measured: this repository's 44k
+files in ~30 ms, ~4.5 MB of paths, freed when the bar closes — so the bar
+answers its first frame from the paths git already knows (the index plus the
+poll's diff) and re-ranks under the query as it reads then. A walk that lands
+under a user who has already stepped keeps the cursor on its own path; a walk
+for a bar that has closed or been reopened since is dropped; and the list goes
+with the bar, so a build output tree's tens of thousands of paths are never a
+session-long cost.
+
+**Ranking is an index over that list, and it is what keeps a keystroke cheap**
+(`PathSearch`). Every tier of the ranking — name prefix, name substring, name
+subsequence, path substring, path subsequence — is a substring or subsequence
+test, so a needle that extends a prefix can only match a subset of what that
+prefix matched, **and can only rank a path the same or worse**: dropping a
+needle's tail only loosens a test. So a keystroke is scored against the previous
+keystroke's survivors, and skips the tiers those survivors had already failed —
+a path that only ever matched as a subsequence of the path is tested for that
+one thing, not five. The memo keeps up to `MEMO_DEPTH` prefixes of the branch
+being typed (`(needle, survivors)` with each survivor's tier), so backspace
+lands on a level instead of the whole list, a re-typed query is a lookup, and
+anything that extends nothing memoized (a paste, a cleared field, another word)
+falls back to a full pass — **the ranking is identical either way; only the
+scan's size changes**, pinned by
+`diff::listing::tests::the_prefix_memo_ranks_like_a_search_from_scratch` against
+a from-scratch search.
+
+Measured on this repository's 44k paths, one typed query:
+
+| | per keystroke |
+| --- | --- |
+| no memo (a full pass each) | 63 ms total (`listing.rs`), 73 ms (`diff_panel`), peak 8.4 ms |
+| with the memo | **13 ms total**, peak 4.7 ms, last keystrokes 5–60 µs (1 path left of 43,874) |
+
+The remaining costs are honest and bounded: the **first** keystroke of a branch
+is a full pass (~2 ms here, ~14 ms at 300k paths), a **pasted** query is one
+full pass at its length (~7 ms here), and the memo itself is ≤ 8 levels ×
+survivors × 8 B (≈ 1 MB for a real query here, ~2.8 MB worst case, freed with
+the list). A repository with a few hundred thousand paths on disk is where the
+first keystroke would show (~14 ms, under a frame but not free) — the answer
+there is to rank on the background executor with a debounce, as the terminal's
+find bar already does, never a smaller universe.
+
 ## Terminal glyphs
 
 Box-drawing chars are all vector-drawn except the three diagonals

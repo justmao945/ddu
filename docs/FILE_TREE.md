@@ -33,6 +33,14 @@
 > are fragments with no offsets into the file). Caps came out at
 > `MAX_VIEW_BYTES` 8 MiB / `MAX_VIEW_LINES` 200 000 (not the 1 MiB / 5 000
 > guessed here): the pane virtualizes, so a large file costs one build pass.
+> **Landed (2026-09-17):** the listing is **unfiltered** — `.gitignore` is not
+> read at all, so `target/`, `node_modules/` and a `.env` are listed like
+> anything else, in the tree's own text color with no figures (the diff's
+> figures are a file's badge, not a gate on the listing), and a symlink is
+> classified by what it points at. §1's "`.gitignore` respected", §4.1's
+> "ignored never enter" and §9's `…_skips_ignored` are superseded by it. The
+> quick open went the other way — see §5.1's quick-open bullet, which now walks
+> the whole workdir (`listing::walk_files`) rather than copying git's view.
 > Framework: `gpui-kit = "0.6"` only. License: Apache-2.0, **GPL-free throughout**.
 
 ## 1. Goal
@@ -99,7 +107,9 @@ Two facts drive the whole design:
 > read. Measured on a 40k-file repository: the poll drops from 70.7 ms to
 > 57 ms (the tree's share, 17.8 ms, plus the snapshot comparison it forced,
 > ~2 ms), and the ~5 MB of paths the eager `FileTree` held are gone. The sketch
-> below is kept as the design that led there.
+> below is kept as the design that led there. *(2026-09-17: the listing reads no
+> ignore rules either — see the header — and the one whole-tree read left in the
+> app is the quick open's `walk_files`, on the background executor.)*
 
 Replace `head_diff(path) -> GitDiff` with:
 
@@ -220,9 +230,23 @@ the layer's cost is the visible tree, not the repository.
   answer "any file in the project") nor a layer that swaps in for it. It is a
   floating palette over the workspace (`ui/palette.rs`): the tree stays exactly
   as it was, and committing a hit opens the cursor's file with its ancestors
-  expanded in the tree, so the tree is where the search left it. It searches the
-  working tree's own path list (the index's tracked files plus the poll's
-  untracked ones — the same universe the tree can show) with `tree::search`: a
+  expanded in the tree, so the tree is where the search left it.
+* **What it searches is a walk of the working tree**
+  (`listing::walk_files`, on the background executor — 44k files in ~30 ms),
+  unioned with the paths git knows (the index plus the poll's diff, so a file
+  deleted in the workdir stays reachable through its hunks). Git's view alone
+  answers the palette's first frame; the walk lands a beat later and re-ranks
+  under the query as it reads then, keeping the cursor on its own path when that
+  path survived. Nothing is filtered but `.git` — the same universe the tree
+  lists — and the list is dropped when the bar closes.
+* **The ranking is an index over that list, not a scan per keystroke**
+  (`listing::PathSearch`): every tier is a substring or subsequence test, so a
+  longer needle can only match a subset of what its prefix matched *and* can
+  only rank it the same or worse — a keystroke is scored against the previous
+  keystroke's survivors, skipping the tiers they already failed, with up to
+  `MEMO_DEPTH` typed prefixes memoized (backspace and re-typed queries are
+  lookups; a paste is one full pass). Same answer either way, ~5× less work on
+  a typed query (measured; `docs/UI.md`). Ranking is `listing::PathSearch::rank`: a
   case-insensitive subsequence match, ranked by where it lands (name prefix →
   name hit → name subsequence → path hit → path subsequence), ties to the
   shorter path, capped at 200 hits.
@@ -369,9 +393,22 @@ rows, so a render never parses. What the sketch did not foresee:
 
 * `cargo test`, extending the existing hermetic style (`src/diff/git.rs` tests use
   a temp repo built with `RepositoryInitOptions`):
-  * `snapshot_lists_tracked_untracked_and_skips_ignored` — tracked file, untracked
-    file, `.gitignore`d file and directory; exactly the first two are listed,
-    with correct statuses.
+  * `listing::tests::list_dir_reads_the_directory_as_the_filesystem_has_it` —
+    the listing is the filesystem's: `.gitignore` is not read (`target/` and
+    `ignored.log` are listed, `.git` never is), a directory's badge counts what
+    changed under it, and a link is what it points at.
+    `listing::tests::walk_files_reaches_what_git_hides` — the quick open's walk:
+    any depth, `.git` out wherever it sits, a linked file in and a linked
+    directory not descended.
+  * `listing::tests::search_ranks_the_file_name_first` and
+    `listing::tests::the_prefix_memo_ranks_like_a_search_from_scratch` — the
+    ranking tier by tier, the cap, and the memo's tiers/pruning against a
+    from-scratch search (typing forward, backspacing, pasting, another word, a
+    cleared field, a new list).
+  * `app::diff::tests::the_walk_lands_under_the_palette_and_the_cursor_keeps_its_path`
+    — a landed walk re-ranks under the typed query, reaches an ignored file,
+    keeps the stepped cursor on its own path, and is dropped for a bar that has
+    closed or been reopened since.
   * `view_merges_hunks_into_whole_file` — modified file: line numbers, added and
     removed placement, the trailing-deletion anchor, insertion-only hunks, and
     the `rows.len()` invariant.
