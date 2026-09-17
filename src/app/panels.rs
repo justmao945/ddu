@@ -318,7 +318,7 @@ mod panel_cache_tests {
 
     /// A background row's spinner is on screen even though its grid is
     /// not: the row shows the OSC title, agent CLIs spin it, and a cached
-    /// row that is only refreshed by the 1 Hz ui tick reads as jerky the
+    /// row left to the duration tick reads as jerky the
     /// moment the user switches away from the session doing the work.
     /// Its title change must therefore reach the sidebar from a
     /// background session too — and reach nothing else: the grid is off
@@ -440,6 +440,71 @@ mod panel_cache_tests {
                     seen(&counts),
                     [2, 0, 3],
                     "the next spinner glyph reaches the row again"
+                );
+
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    /// The sidebar's duration reading turns over in `m`/`h`/`d` units, so
+    /// the tick that keeps it fresh sleeps to that boundary and notifies
+    /// the sidebar alone.
+    ///
+    /// Regression: the tick used to notify the *app* once a second, and
+    /// the app-level fan-out (`AppView::notify_panels`) carried that to
+    /// every cached panel — the terminal grid and the changes pane were
+    /// rebuilt 60 times for a string that had not moved (once an hour for
+    /// a run past its first hour), which is where an idle window's ~4% of
+    /// a core went. The waits below are the other half: a fresh run is
+    /// two minutes from its next reading, and the tick must look that
+    /// far, not at the next second.
+    #[test]
+    fn the_duration_tick_wakes_the_sidebar_alone() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let (mut cx0, view, counts) =
+                    app_with_panel_counters(dispatcher, 2, "duration_tick_wakes_the_sidebar");
+                let cx = &mut cx0;
+                let seen = |counts: &[Rc<Cell<usize>>; 3]| counts.clone().map(|c| c.get());
+
+                let now = std::time::Instant::now();
+                view.update(cx, |v, _| {
+                    // Row 0 reads "1m" and turns over in a second; row 1
+                    // reads "15m" and turns over in a minute.
+                    v.projects[0].sessions[0].started = now - std::time::Duration::from_secs(119);
+                    v.projects[0].sessions[1].started = now - std::time::Duration::from_secs(900);
+                });
+                assert_eq!(
+                    cx.update(|cx| view.read(cx).next_label_change(now)),
+                    std::time::Duration::from_secs(1),
+                    "the soonest row's boundary is the wait"
+                );
+                view.update(cx, |v, _| v.projects[0].sessions[0].started = now);
+                assert_eq!(
+                    cx.update(|cx| view.read(cx).next_label_change(now)),
+                    std::time::Duration::from_secs(60),
+                    "a fresh run is two minutes out; re-reading the rows waits a minute"
+                );
+
+                // Whatever the tick armed at spawn, a minute of clock
+                // carries it past a boundary.
+                cx.executor().advance_clock(std::time::Duration::from_secs(61));
+                cx.run_until_parked();
+                let [sidebar, changes, pane] = seen(&counts);
+                assert!(
+                    sidebar >= 1,
+                    "the duration turn-over must reach the sidebar row"
+                );
+                assert_eq!(
+                    (changes, pane),
+                    (0, 0),
+                    "and nothing else: a fan-out redraws the grid and the changes pane                      for a reading that did not move (sidebar, changes pane, terminal pane)"
                 );
 
                 cx.update(|cx| {

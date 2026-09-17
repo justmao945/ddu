@@ -3,7 +3,7 @@
 
 use gpui_kit::Entity;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::terminal::{PtySpawn, TermSession};
 
@@ -24,6 +24,72 @@ impl AgentStatus {
 #[cfg(test)]
 mod session_tests {
     use super::*;
+
+    /// A session that has been running for `secs`, as of `now`.
+    fn running_for(now: Instant, secs: u64) -> AgentSession {
+        AgentSession {
+            id: "s".into(),
+            title: "bash".into(),
+            status: AgentStatus::Running,
+            cmd: AgentCmd {
+                program: "bash".into(),
+                args: vec![],
+            },
+            resume_id: None,
+            was_live: false,
+            kind: "terminal".into(),
+            started: now - Duration::from_secs(secs),
+            ended: None,
+            term: None,
+            cwd: PathBuf::new(),
+            diff_selected: None,
+            diff_open: Default::default(),
+            diff_tree_height: None,
+            view_mode: None,
+        }
+    }
+
+    /// The label a run of `secs` reads (frozen at that reading, so the
+    /// assertion does not race the wall clock).
+    fn label_of(secs: u64) -> String {
+        let now = Instant::now();
+        let mut s = running_for(now, 0);
+        s.ended = Some(now + Duration::from_secs(secs));
+        s.elapsed_label()
+    }
+
+    /// The boundary the tick sleeps to has to be the instant the label
+    /// reads differently — short of it is a repaint for a reading that
+    /// did not move, past it a row that lies about its run.
+    #[test]
+    fn a_label_boundary_is_the_labels_next_reading() {
+        for secs in [
+            0, 1, 59, 60, 119, 120, 121, 3_599, 3_600, 7_199, 7_200, 86_399, 86_400, 86_401,
+        ] {
+            let now = Instant::now();
+            let wait = running_for(now, secs)
+                .label_change_in(now)
+                .expect("a running run has a boundary")
+                .as_secs();
+            let at = secs + wait;
+            assert_ne!(
+                label_of(secs),
+                label_of(at),
+                "a run at {secs}s reads the same {wait}s later"
+            );
+            assert_eq!(
+                label_of(secs),
+                label_of(at - 1),
+                "and it already moved before that boundary"
+            );
+        }
+
+        // A finished run keeps its last reading; nothing to schedule.
+        let now = Instant::now();
+        let mut done = running_for(now, 5);
+        done.ended = Some(now);
+        assert_eq!(done.label_change_in(now), None);
+    }
 
     #[test]
     fn resume_spec_uses_agent_proper_flag() {
@@ -165,6 +231,34 @@ impl AgentSession {
         } else {
             format!("{}d", secs / 86_400)
         }
+    }
+
+    /// How long until [`Self::elapsed_label`] reads differently — what the
+    /// ui tick sleeps, so a label that moves once a minute is not
+    /// repainted once a second. `None` once the run has ended: its label
+    /// is frozen and nothing has to be scheduled for it.
+    ///
+    /// Exact, and never zero: the label turns over at the unit boundary
+    /// its own thresholds use (`1m` at the 2-minute mark, since a run
+    /// under a minute already reads `1m`), and the tick that lands on it
+    /// shows the same second the old per-second tick did.
+    pub fn label_change_in(&self, now: Instant) -> Option<Duration> {
+        if self.ended.is_some() {
+            return None;
+        }
+        let secs = now.saturating_duration_since(self.started).as_secs();
+        let next = if secs < 60 {
+            // `1m` spans both sides of the 60 s mark: the first reading
+            // that differs is the two-minute one.
+            120
+        } else if secs < 3600 {
+            (secs / 60 + 1) * 60
+        } else if secs < 86_400 {
+            (secs / 3600 + 1) * 3600
+        } else {
+            (secs / 86_400 + 1) * 86_400
+        };
+        Some(Duration::from_secs(next - secs))
     }
 }
 

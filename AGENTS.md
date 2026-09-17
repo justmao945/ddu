@@ -189,8 +189,13 @@ editing, and where the long form lives.
   is the single subscription point, and a wakeup repaints the pane only for the
   visible session while an OSC-title change notifies the sidebar row from a
   *background* session too (its spinner is on screen even when its grid is not;
-  a row refreshed only by the 1 Hz tick reads as jerky). The adaptive
-  `stream_interval` steps must sit above a real frame's paint cost (`docs/UI.md`).
+  a row left to the duration tick reads as jerky). The adaptive
+  `stream_interval` steps must sit above a real frame's paint cost. The one
+  wall-clock repaint — the sidebar's `m`/`h`/`d` duration reading — sleeps to
+  that reading's own turn-over (`AgentSession::label_change_in`, capped by
+  `LABEL_TICK_CAP`) and notifies the *sidebar alone*: a per-second notify on the
+  app sends the fan-out through every cached panel, redrawing the terminal grid
+  and the changes pane for a string that did not move (`docs/UI.md`).
 - **Keyboard**: app shortcuts are `secondary-` chords (copy/paste/find are
   `⌃⇧` on Linux); a chord a binding claims never reaches the PTY — `⌃P` (the
   quick open) trades readline's previous-history for a file search, pinned by

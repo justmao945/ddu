@@ -212,10 +212,24 @@ several streaming agents would otherwise each add a full-window redraw per
 frame (measured 47 fps vs 1 fps with two background streams). Its OSC title is
 the exception, and it is on screen either way: the sidebar row shows it, so a
 title change notifies the sidebar from a background row too
-(`AppView::note_row_title`) — a row left to the 1 Hz ui tick stepped its
+(`AppView::note_row_title`) — a row left to the duration tick stepped its
 spinner there and read as jerky the moment the user switched to a quiet
 session. Nothing else follows a background row, and an *unchanged* title
 notifies nobody. Exit, the diff poll and interaction notify on their own.
+
+The sidebar's duration reading is the one thing that moves with no input at
+all, and it reads in `m`/`h`/`d` units (`AgentSession::elapsed_label`): the tick
+sleeps to that reading's next turn-over (`AgentSession::label_change_in`, capped
+at a minute by `LABEL_TICK_CAP`, which is what notices a row that appeared since
+the last wake) and notifies the **sidebar alone**. It used to notify the app once
+a second, and the fan-out above carried that into every cached panel: the
+terminal grid and the changes pane were re-rendered 60 times for a string that
+had not moved (3 600 times for a two-hour run). Measured on a visible 1 261×1 381
+window of this repository, nothing running: **0.58% → 0.08%** of a core, and the
+per-second signature — a ~10 ms repaint every second, sixty times the label's own
+resolution — is gone from the timeline. The launch seconds cost ~0.2 s in total,
+so an idle window that has been up for minutes says nothing about the frames the
+user's own scrolling and typing spent.
 
 Stream repaint pacing is adaptive: the pump spaces output-driven repaints by
 `stream_interval(paint_ms)` — 50 ms (20 fps) while the terminal element's own

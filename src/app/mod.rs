@@ -83,6 +83,12 @@ pub(crate) struct Selection {
 /// Seconds between working-tree diff polls.
 const DIFF_POLL_SECS: u64 = 3;
 
+/// Longest the duration tick sleeps before re-reading the session set: a
+/// session that appears between two turn-overs is then honoured within a
+/// minute. The label's own boundaries are still hit exactly — this caps
+/// how long the *look* at the rows waits, not where they land.
+const LABEL_TICK_CAP: Duration = Duration::from_secs(60);
+
 mod diff;
 mod keys;
 mod pane;
@@ -636,7 +642,7 @@ impl AppView {
     /// *cached* sidebar. This holds for a background session as much as
     /// for the one on screen: the row is visible either way, and letting
     /// only the visible session's title through left a background
-    /// spinner stepping at the 1 Hz ui tick — visibly jerky — while the
+    /// spinner stepping at the duration tick — visibly jerky — while the
     /// grid it belongs to was off screen and cost nothing to skip. An
     /// unchanged title notifies nobody, so an agent that is alive but
     /// silent still drives no repaints.
@@ -660,8 +666,11 @@ impl AppView {
     /// their last frame until they are notified, so anything that
     /// changes what a panel shows has to come through here or the panel
     /// keeps rendering stale content. Installed as an app-level
-    /// observer, so every `cx.notify()` on `AppView` reaches all three
-    /// without touching the ~20 call sites.
+    /// observer, so every `cx.notify()` on `AppView` reaches all four
+    /// without touching the ~20 call sites. A repaint that concerns one
+    /// panel (the duration tick, a stream frame) notifies that panel
+    /// directly instead — a full fan-out costs a terminal grid and a
+    /// changes pane for content that did not move.
     pub(crate) fn notify_panels(&mut self, cx: &mut Context<Self>) {
         self.sidebar.update(cx, |_, cx| cx.notify());
         self.diff_pane.update(cx, |_, cx| cx.notify());
@@ -669,17 +678,45 @@ impl AppView {
         self.breadcrumb.update(cx, |_, cx| cx.notify());
     }
 
-    /// One notify per second so elapsed times in the sidebar tick even
-    /// while a session produces no output.
+    /// Repaint the sidebar when a run's duration reading turns over.
+    ///
+    /// The reading is minute-resolution (`AgentSession::elapsed_label`):
+    /// a per-second notify — and the app-level fan-out
+    /// ([`Self::notify_panels`]) carried that to *every* cached panel —
+    /// redrew the terminal grid and the changes pane 60 times for a
+    /// string that had not moved, and once an hour for a run past its
+    /// first hour. The tick now sleeps to the soonest boundary and
+    /// notifies the sidebar alone, the one panel that shows it: measured
+    /// 0.58% → 0.08% of a core on an idle visible window, with the
+    /// per-second signature gone from the timeline (`docs/UI.md`).
     fn start_ui_tick(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                let wait = this
+                    .update(cx, |this, _| this.next_label_change(std::time::Instant::now()))
+                    .unwrap_or(LABEL_TICK_CAP);
+                cx.background_executor().timer(wait).await;
+                let woken = this
+                    .update(cx, |this, cx| this.sidebar.update(cx, |_, cx| cx.notify()));
+                if woken.is_err() {
                     break;
                 }
             }
         })
         .detach();
+    }
+
+    /// Time to the soonest `m`/`h`/`d` turn-over in the sidebar, capped
+    /// at [`LABEL_TICK_CAP`]: the cap is what notices a session that
+    /// appeared since the last wake (or a clock that jumped), and since
+    /// the narrowest unit is a minute it costs a wakeup, never a repaint.
+    pub(crate) fn next_label_change(&self, now: std::time::Instant) -> Duration {
+        self.projects
+            .iter()
+            .flat_map(|project| project.sessions.iter())
+            .filter_map(|session| session.label_change_in(now))
+            .min()
+            .unwrap_or(LABEL_TICK_CAP)
+            .min(LABEL_TICK_CAP)
     }
 }

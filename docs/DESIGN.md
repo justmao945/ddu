@@ -342,6 +342,12 @@ struct AgentCmd { program: String, args: Vec<String> }
   of its selection participants rebuilt the pane on every stream frame and
   painted the window twice per frame (measured 5.5% → 3% CPU, 2× → 1× root
   renders with a document open).
+* The one wall-clock repaint is the sidebar's run duration, and it follows that
+  reading rather than the clock: the tick sleeps to the next `m`/`h`/`d`
+  turn-over and notifies the sidebar alone (measured 0.58% → 0.08% of a core on
+  an idle visible window, where a per-second app-level notify rebuilt the
+  terminal grid and the changes pane sixty times for a string that had not
+  moved).
 * The terminal element paints only the visible window; large diffs are capped per
   file (§7) and both the pane and the tree are virtual lists: only the visible
   slice is built per frame (a 3 000-row tree builds ~8 rows), with row heights
