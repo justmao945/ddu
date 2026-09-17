@@ -1,6 +1,6 @@
 # Day Day Up
 
-**ddu** is a native workspace for AI coding agents — macOS and Linux: run **claude**, **codex**, or a plain shell session in any project — several at once — and watch the working tree's git diff update live in the next pane. One window, three panes, everything in view.
+**ddu** is a native workspace for AI coding agents — macOS and Linux: run **claude**, **codex**, **omp**, or a plain shell session in any project — several at once — and watch the working tree's git diff update live in the next pane. One window, three panes, everything in view.
 
 > Inspired by [Zed](https://zed.dev) — for the feel of a fast, native UI, not its code. Built on [gpui](https://github.com/zed-industries/zed) and [gpui-kit](https://github.com/longbridge/gpui-kit).
 
@@ -15,9 +15,34 @@
 - **Live git diff** — working tree vs. HEAD: modified, staged, and untracked files with per-file `+`/`−` stats, refreshed automatically as your agents edit.
 - **The file, not just the diff** — the changes pane shows the whole file with the diff tinted in place (and `@@` hunks a keystroke away), syntax-highlighted per row for c/c++, Java, HTML, CSS, JS/JSX, TS/TSX, Rust, Go, Python, Swift, shell and JSON. Markdown renders as a document (images included); an image file is drawn as one. A thin overview strip beside the rows marks every added and removed run and shows where the viewport sits — click a mark to jump to that change — and each file reopens where you left it.
 - **The whole working tree, findable** — the sidebar lists every file (git's ignore rules respected, changed files carrying their `+/−` figures), sorted case-insensitively, and `⌘P`/`Ctrl+P` opens a floating quick open over the workspace: type a fragment like `difpan`, step the ranked hits with the arrows, and Enter opens the file with its ancestors expanded in the tree.
-- **Session lifecycle** — spawn, kill, and restart sessions; a run that finishes or fails is reported on its own row (status and duration). ddu keeps each session's conversation id, so an agent chat can be resumed later (`claude --resume` / `codex resume`) — and the sessions that were still running when you quit come back running on the next launch, agents resumed from that id.
+- **Session lifecycle** — spawn, kill, and restart sessions; a run that finishes or fails is reported on its own row (status and duration). ddu keeps each session's conversation id, so an agent chat can be resumed later — the forms are in [Agent sessions](#agent-sessions) — and the sessions that were still running when you quit come back running, agents resumed from that id.
 - **Settings window** — theme, shell, and terminal font, in a dedicated window (`⌘,` / `Ctrl+,`).
 - **Persistent workspace** — projects, panel layout, and per-project diff state survive relaunches (`~/Library/Application Support/ddu/` on macOS, `~/.config/ddu/` on Linux), and every session that was still running is started again.
+
+## Agent sessions
+
+Four launchers are built in, from a project row's `+` quick-add or its `...`
+menu:
+
+| Launcher | Runs | Resume |
+| --- | --- | --- |
+| **Terminal** | your configured login shell | — |
+| **Claude** | `claude` | `claude --resume <id>` |
+| **Codex** | `codex` | `codex resume <id>` |
+| **Oh My Pi** | `omp` | `omp --resume <id>` |
+
+Each agent launcher needs its CLI on your `PATH`; the terminal preset needs
+nothing. A row keeps the conversation id its agent prints in the banner or exit
+footer, so *Resume* continues that chat, while *Restart* starts the preset fresh
+and ignores the id. Each launcher gets its own mark and tint in the sidebar: the
+terminal from the icon set, the three agents from their brand SVGs.
+
+**Oh My Pi** ([omp.sh](https://omp.sh) · [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi),
+MIT) is a coding agent with the IDE wired in — LSP, a real debugger, subagents.
+It is also the harness ddu's own agent-core design is modelled on
+([`docs/AGENT_CORE.md`](docs/AGENT_CORE.md) — a design, not something in the
+tree yet). Anything else you want to run — an agent ddu has never heard of, a
+REPL, a build — belongs in a terminal session.
 
 ## Keyboard shortcuts
 
@@ -44,7 +69,7 @@ A chord the app binds never reaches the shell, so on Linux `Ctrl+R`, `Ctrl+N`, `
 
 ## Getting started
 
-Requirements: macOS 13+ or Linux (X11/Wayland, Vulkan or GL), plus a Rust toolchain. Agent sessions need the `claude` or `codex` CLI on your `PATH`; the plain terminal preset works out of the box.
+Requirements: macOS 13+ or Linux (X11/Wayland, Vulkan or GL), plus a Rust toolchain. Agent sessions need the `claude`, `codex` or `omp` CLI on your `PATH`; the plain terminal preset works out of the box.
 
 ### Linux
 
