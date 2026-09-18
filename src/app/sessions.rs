@@ -1,6 +1,7 @@
 //! Session lifecycle: selection, spawning, closing, restart/resume and
 //! the PTY exit bookkeeping. Leaving the app is [`super::shutdown`]'s.
 
+use super::diff::lives_in_tree;
 use super::*;
 
 impl AppView {
@@ -15,12 +16,19 @@ impl AppView {
         if self.projects.get(project).is_none() {
             return;
         }
+        // The file being left keeps its place: the pane's rows and its
+        // offset are the outgoing session's, and the switch is about to
+        // reset them. The layer is the outgoing *project's* — a switch
+        // inside one project reads the same rows and the same place.
+        self.remember_scroll();
+        self.remember_tree_scroll();
         let from = (self.current_project, self.current_session);
         self.current_project = project;
         let n = self.projects[project].sessions.len();
         self.current_session = session.min(n.saturating_sub(1));
-        // The diff tree is per-session: the outgoing session keeps its
-        // selection/collapse state, the incoming session's is adopted.
+        // The outgoing session keeps its selected file (the file tree
+        // itself is the project's and stays as it is); the incoming
+        // session's is adopted.
         self.adopt_session_diff(Some(from), cx);
         if let Some(term) = self.current_term() {
             let focus = term.read(cx).focus.clone();
@@ -64,6 +72,9 @@ impl AppView {
             return;
         };
         let cwd = project.path.clone();
+        // The file the outgoing row was showing keeps its place (see
+        // `select_session`).
+        self.remember_scroll();
         let old_session = self.current_session;
         self.session_seq += 1;
         let seq = self.session_seq;
@@ -102,8 +113,6 @@ impl AppView {
                 term,
                 cwd,
                 diff_selected: None,
-                diff_open: Default::default(),
-                diff_tree_height: None,
                 view_mode: None,
             });
             self.current_session = project.sessions.len() - 1;
@@ -115,10 +124,20 @@ impl AppView {
     }
 
     /// Re-point the diff state at the current session: the outgoing
-    /// session keeps its selection and collapsed dirs (worktrees mean
-    /// each session's changes are its own), the incoming session's
-    /// state is adopted. `from` is the outgoing `(project, session)`
-    /// slot — `None` when that session was removed (nothing to keep).
+    /// session keeps its selected file and pane mode, the incoming
+    /// session's are adopted — that is what a switch has to put back.
+    ///
+    /// The file *tree* is the project's ([`AppView::tree_open`]), so a
+    /// switch inside one project leaves it exactly as it was; only moving
+    /// to another project adopts that project's expansion and layer
+    /// height. `from` is the outgoing `(project, session)` slot — `None`
+    /// when that session was removed (nothing to keep).
+    ///
+    /// The caller must have remembered the pane's position
+    /// ([`AppView::remember_scroll`]) while the outgoing session was still
+    /// the current one: the reset below zeroes the pane's offset, and the
+    /// incoming file's place is restored on the way in — waiting for its
+    /// own rows when it has to (see `pending_scroll`).
     pub(crate) fn adopt_session_diff(
         &mut self,
         from: Option<(usize, usize)>,
@@ -128,9 +147,6 @@ impl AppView {
         if from.is_some_and(|f| f == to) {
             return;
         }
-        // The splitter under the outgoing session keeps its live
-        // height — read it before borrowing the session slot mutably.
-        let live_h = self.live_tree_height(cx);
         // Read before the session slot is borrowed mutably.
         let selected_path = self.current_diff_path().map(str::to_owned);
         let has_snapshot = self.snapshot.is_some();
@@ -149,46 +165,86 @@ impl AppView {
                 if selected_path.is_some() || has_snapshot {
                     s.diff_selected = selected_path;
                 }
-                s.diff_open = self.diff_tree_open.clone();
                 s.view_mode = Some(self.view_mode.as_str().to_owned());
-                // Hidden layer reports no live height — keep the stored one.
-                if let Some(h) = live_h {
-                    s.diff_tree_height = Some(h);
-                }
             }
         }
-        let (seed, open, height, mode) = {
+        let (seed, mode) = {
             let incoming = self.projects.get(to.0).and_then(|p| p.sessions.get(to.1));
             (
                 incoming.and_then(|s| s.diff_selected.clone()),
-                incoming.map(|s| s.diff_open.clone()).unwrap_or_default(),
-                incoming.and_then(|s| s.diff_tree_height),
                 incoming
                     .and_then(|s| s.view_mode.as_deref())
                     .and_then(ViewMode::parse),
             )
         };
-        self.tree_seeded = false;
-        self.diff_seed_path = seed;
-        // The adopted height must beat a pinned drag size on the live
-        // splitter (a bare seed only wins while the panel is unpinned),
-        // so unpin the layer panel and let the next render apply it.
-        self.diff_tree_height_seed = height
-            .map(gpui::px)
-            .filter(|h| h.as_f32() >= tree_min_h() && h.as_f32() <= tree_max_h());
-        if self.diff_tree_height_seed.is_some() && self.show_diff_tree {
-            self.sidebar_split_state.update(cx, |state, cx| {
-                if state.sizes().len() > 1 {
-                    state.reset_panel(1, cx);
+        // Whether the rows on screen are another working tree's. A `None`
+        // slot — a row that was removed — counts as a move: there is no
+        // outgoing state to keep, and the fresh project a `+` adds has no
+        // tree of its own yet.
+        let project_changed = from.map(|(fp, _)| fp) != Some(to.0);
+        if project_changed {
+            // The splitter under the outgoing project keeps its live
+            // height; the incoming project's height is adopted below.
+            let live_h = self.live_tree_height(cx);
+            if let (Some((fp, _)), Some(h)) = (from, live_h) {
+                if let Some(project) = self.projects.get_mut(fp) {
+                    project.tree_height = Some(h);
                 }
-            });
+            }
+            // The layer's place comes the same way, and it is the
+            // **project's**: the rows the offset was measured against are
+            // the outgoing project's, and the incoming project comes back
+            // to its own once its rows exist (the pending offset below,
+            // applied by `rebuild_tree_index`). The outgoing half was read
+            // before the move (`remember_tree_scroll`, next to the pane's
+            // own bookkeeping).
+            self.pending_tree_scroll = self
+                .current_project()
+                .and_then(|p| p.tree_scroll)
+                .map(gpui::px);
+            // The adopted height must beat a pinned drag size on the live
+            // splitter (a bare seed only wins while the panel is
+            // unpinned), so unpin the layer panel and let the next render
+            // apply it — the outgoing project's size must not survive
+            // into this one either, so the unpin happens even when the
+            // incoming project stored no height (its default then wins).
+            self.diff_tree_height_seed = self
+                .current_project()
+                .and_then(|p| p.tree_height)
+                .map(gpui::px);
+            if self.show_diff_tree {
+                self.sidebar_split_state.update(cx, |state, cx| {
+                    if state.sizes().len() > 1 {
+                        state.reset_panel(1, cx);
+                    }
+                });
+            }
         }
-        self.reset_diff();
+        self.reset_diff(!project_changed);
         // The pane's mode is per session too: the incoming row's mode,
         // stock Diff for a row that never chose one.
         self.view_mode = mode.unwrap_or_default();
+        // The file the row had open. This project's diff is usually still
+        // loaded — the working tree did not change, only which row is
+        // reading it — and then the file goes straight back into the pane,
+        // with its place restored by `select_path`. A cold tree (a launch,
+        // a move to another project) has nothing to pin the path against,
+        // and waits for the first poll to seed it (see `apply_snapshot`).
+        if let Some(path) = seed {
+            let root = self.current_session_cwd();
+            match self.diff() {
+                // The path lands now, or it left the working tree and the
+                // pane stays empty — which is what the poll's own filter
+                // does with a path it cannot find.
+                Some(diff) => {
+                    if lives_in_tree(root.as_deref(), &diff.files, &path) {
+                        self.select_path(path);
+                    }
+                }
+                None => self.diff_seed_path = Some(path),
+            }
+        }
         self.ensure_file_content(cx);
-        self.diff_tree_open = open;
         self.rebuild_tree_index();
         self.reload_diff(cx);
     }
@@ -409,6 +465,11 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let was_current = p == self.current_project && six == self.current_session;
+        // A row can go while its file is on screen: the place in that
+        // file belongs to the file, so it is read before the switch.
+        if was_current {
+            self.remember_scroll();
+        }
         let became_empty;
         {
             let project = self.projects.get_mut(p).unwrap();
@@ -668,6 +729,9 @@ mod tests {
                     name: "proj".into(),
                     path: std::env::temp_dir(),
                     expanded: true,
+                    tree_open: vec![],
+                    tree_height: None,
+                    tree_scroll: None,
                     sessions: vec![],
                 }]),
                 ..Default::default()
@@ -835,20 +899,16 @@ mod tests {
             resume: None,
             live: Some(true),
             selected_file: None,
-            open_dirs: vec![],
-            tree_height: None,
             view_mode: None,
-};
+        };
         let finished_row = SavedSession {
             kind: "omp".into(),
             title: "omp".into(),
             resume: Some("01a075e1-346f-7b92-b832-745a71ee00ed".into()),
             live: Some(false),
             selected_file: None,
-            open_dirs: vec![],
-            tree_height: None,
             view_mode: None,
-};
+        };
         gpui::run_test_once(
             0,
             Box::new(move |dispatcher| {
@@ -868,6 +928,9 @@ mod tests {
                             name: "p".into(),
                             path: std::env::temp_dir(),
                             expanded: true,
+                            tree_open: vec![],
+                            tree_height: None,
+                            tree_scroll: None,
                             sessions: vec![live_row, finished_row],
                         }]),
                         ..Default::default()

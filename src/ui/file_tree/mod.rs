@@ -183,9 +183,12 @@ fn dir_row(
         .cursor_pointer()
         .hover(move |el| el.bg(hov_bg))
         .on_click(cx.listener(move |this, _, _, cx| {
-            // Open by default: presence in the set = expanded.
-            if !this.diff_tree_open.remove(&toggle) {
-                this.diff_tree_open.insert(toggle.clone());
+            // Open by default: presence in the set = expanded. The set is
+            // the **project's** — every session in it shares the tree.
+            if let Some(open) = this.tree_open_mut() {
+                if !open.remove(&toggle) {
+                    open.insert(toggle.clone());
+                }
             }
             this.rebuild_tree_index();
             this.persist(cx);
@@ -695,8 +698,8 @@ mod tests {
                             },
                         });
                         v.show_diff_tree = true;
-                        v.tree_seeded = false;
-                        v.diff_tree_open.clear();
+                        v.projects[0].tree_seeded = false;
+                        v.projects[0].tree_open.clear();
                         v.rebuild_tree_index();
                         cx.notify();
                     });
@@ -734,7 +737,7 @@ mod tests {
                     max > 0.,
                     "71 rows in a 220px layer must scroll (max offset {max})"
                 );
-                let open = vcx.update(|_, cx| view.read(cx).diff_tree_open.clone());
+                let open = vcx.update(|_, cx| view.read(cx).tree_open().clone());
                 assert_eq!(
                     open,
                     HashSet::from(["many".to_owned(), "many/d03".to_owned()]),
@@ -744,7 +747,7 @@ mod tests {
                 // Opening one more directory lists exactly that one.
                 vcx.update(|_, cx| {
                     view.update(cx, |v, cx| {
-                        v.diff_tree_open.insert("many/d04".to_owned());
+                        v.tree_open_mut().unwrap().insert("many/d04".to_owned());
                         v.rebuild_tree_index();
                         cx.notify();
                     });

@@ -581,8 +581,6 @@ mod tests {
                 resume: None,
                 live: Some(false),
                 selected_file: None,
-                open_dirs: vec![],
-                tree_height: None,
                 view_mode: None,
 }
         }
@@ -599,6 +597,9 @@ mod tests {
                         name: "p".into(),
                         path: std::env::temp_dir().join("ddu-sidebar-test"),
                         expanded: true,
+                        tree_open: vec![],
+                        tree_height: None,
+                        tree_scroll: None,
                         sessions: (0..sessions).map(|_| saved_agent()).collect(),
                     }]),
                     ..Default::default()

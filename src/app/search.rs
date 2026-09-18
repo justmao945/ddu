@@ -274,10 +274,14 @@ impl AppView {
         let Some(path) = self.file_search.current_path().map(str::to_owned) else {
             return;
         };
-        let mut rest = path.as_str();
-        while let Some(cut) = rest.rfind('/') {
-            rest = &rest[..cut];
-            self.diff_tree_open.insert(rest.to_owned());
+        // The path's ancestors open in the project's tree, so the file is
+        // where the search left it.
+        if let Some(open) = self.tree_open_mut() {
+            let mut rest = path.as_str();
+            while let Some(cut) = rest.rfind('/') {
+                rest = &rest[..cut];
+                open.insert(rest.to_owned());
+            }
         }
         self.select_path(path);
         self.rebuild_tree_index();

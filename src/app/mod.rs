@@ -88,6 +88,12 @@ const DIFF_POLL_SECS: u64 = 3;
 /// how long the *look* at the rows waits, not where they land.
 const LABEL_TICK_CAP: Duration = Duration::from_secs(60);
 
+/// The expansion read on an empty workspace: no project means no tree to
+/// expand, and every reader wants a set rather than an `Option` (see
+/// [`AppView::tree_open`]).
+static NO_TREE_OPEN: std::sync::LazyLock<HashSet<String>> =
+    std::sync::LazyLock::new(HashSet::new);
+
 mod diff;
 pub(crate) mod keys;
 mod pane;
@@ -136,9 +142,6 @@ pub struct AppView {
     /// Whether the diff file tree layer is shown under the project
     /// tree in the sidebar.
     pub(crate) show_diff_tree: bool,
-    /// Directories expanded in the file tree: the layer is lazy, so this
-    /// is the *only* reason a directory is ever listed (the root aside).
-    pub(crate) diff_tree_open: std::collections::HashSet<String>,
     /// The tree's rows + totals, rebuilt when the diff, the expansion or
     /// the listing changes (never per frame — see `build_index`).
     pub(crate) tree_index: Option<crate::ui::file_tree::TreeIndex>,
@@ -192,16 +195,15 @@ pub struct AppView {
     /// the diff splitter has been laid out (its panels are created at
     /// render time); refreshed on every session switch.
     pub(crate) diff_tree_height_seed: Option<Pixels>,
+    /// The incoming project's remembered file-tree offset, applied when
+    /// its rows first exist after a switch (`rebuild_tree_index`): before
+    /// the poll's snapshot there is no index to put an offset on.
+    pub(crate) pending_tree_scroll: Option<Pixels>,
     pub(crate) session_seq: usize,
     /// The last applied poll: the diff **and** the full working-tree
     /// listing, always written together (one poll, one snapshot — the
     /// tree and the pane can never disagree about what changed).
     pub(crate) snapshot: Option<Snapshot>,
-    /// Whether the clean directories have been folded away for the
-    /// current session yet — the default-collapse rule runs once per
-    /// session, on the first snapshot that carries a tree, and never
-    /// overrides a directory the user has touched since.
-    pub(crate) tree_seeded: bool,
     pub(crate) diff_error: Option<String>,
     /// The right pane's find bar (⌘F): input entity, match list and
     /// cycle position. Lives in [`diff`]'s module; always constructed,
@@ -218,6 +220,17 @@ pub struct AppView {
     /// A remembered position whose rows are not on screen yet (see
     /// `AppView::restore_scroll`): `(path, mode, offset)`.
     pub(crate) pending_scroll: Option<(String, ViewMode, Point<Pixels>)>,
+    /// The rendered documents the pane has drawn, keyed by working tree
+    /// and path: a Markdown document's scroll lives in its own gpui state
+    /// (gpui keeps that state only while the element is rendered), so
+    /// holding the state is what brings the document back to the passage
+    /// it was left at — across a file switch, a session switch and a poll.
+    /// In memory only, like `file_positions`; one table per working tree,
+    /// so the read side keys a path by reference and allocates nothing.
+    pub(crate) documents: std::collections::HashMap<
+        std::path::PathBuf,
+        std::collections::HashMap<String, Entity<gpui_kit::base::TextViewState>>,
+    >,
     /// Guards against stale poll results overwriting newer ones.
     diff_seq: u64,
     /// Which surface the right pane shows (⌘⇧M toggles it); per session,
@@ -330,6 +343,19 @@ impl AppView {
                     name: p.name.clone(),
                     path: p.path.clone(),
                     sessions: vec![],
+                    // The file tree is the project's, so its expansion and
+                    // layer height come back with it; the default-expansion
+                    // rule re-runs once for the launch (see
+                    // `rebuild_tree_index`).
+                    tree_open: p.tree_open.iter().cloned().collect(),
+                    tree_height: p
+                        .tree_height
+                        .filter(|h| *h >= tree_min_h() && *h <= tree_max_h()),
+                    // The tree is the project's, so its place is too. Only
+                    // ever a scrolled-down offset: a positive one would
+                    // put the first row below the layer's top.
+                    tree_scroll: p.tree_scroll.filter(|y| *y <= 0.),
+                    tree_seeded: false,
                 })
                 .collect(),
         };
@@ -367,7 +393,6 @@ impl AppView {
             sessions_scroll: ScrollHandle::new(),
             sidebar_split_state: cx.new(|_| ResizableState::default()),
             show_diff_tree: state.show_diff_tree,
-            diff_tree_open: HashSet::new(),
             tree_index: None,
             repo: None,
             hovered_project: None,
@@ -379,17 +404,18 @@ impl AppView {
             selection_active: false,
             diff_seed_path: None,
             diff_tree_height_seed: None,
+            pending_tree_scroll: None,
             session_seq: 0,
             healed_shell_at: px(0.),
             healed_panes_at: px(0.),
             suppress_resize_records: 0,
             snapshot: None,
-            tree_seeded: false,
             diff_error: None,
             diff_search: search::DiffSearch::new(window, cx),
             file_search: search::FileSearch::new(window, cx),
             file_positions: std::collections::HashMap::new(),
             pending_scroll: None,
+            documents: Default::default(),
             diff_seq: 0,
             view_mode: ViewMode::default(),
             file_view: None,
@@ -562,25 +588,30 @@ impl AppView {
         } else {
             this.spawn_session_of(&cfg.new_session.kind, window, cx);
         }
-        // Seed the diff pane from the restored current session —
-        // selection, collapsed dirs and the tree-layer height are all
-        // per-session; a fresh spawn carries none (default height).
-        let (seed, closed, height, mode) = match this.current_session() {
+        // Seed the diff pane from the restored current session: the
+        // selected *file* and the pane's mode are the row's, while the
+        // tree-layer height is the **project's** — the file tree is one
+        // per project, shared by every session in it.
+        let (seed, mode) = match this.current_session() {
             Some(s) => (
                 s.diff_selected.clone(),
-                s.diff_open.clone(),
-                s.diff_tree_height,
                 s.view_mode.as_deref().and_then(ViewMode::parse),
             ),
-            None => (None, Default::default(), None, None),
+            None => (None, None),
         };
         this.diff_seed_path = seed;
         // The pane's mode is per session and restored with the row.
         this.view_mode = mode.unwrap_or_default();
-        this.diff_tree_open = closed;
-        this.diff_tree_height_seed = height
-            .map(gpui::px)
-            .filter(|h| h.as_f32() >= tree_min_h() && h.as_f32() <= tree_max_h());
+        this.diff_tree_height_seed = this
+            .current_project()
+            .and_then(|p| p.tree_height)
+            .map(gpui::px);
+        // The layer's place comes back the same way — applied when the
+        // first poll gives the tree its rows (`rebuild_tree_index`).
+        this.pending_tree_scroll = this
+            .current_project()
+            .and_then(|p| p.tree_scroll)
+            .map(gpui::px);
 
         // Surface settings/state load failures once: bundled launches
         // lose stderr, so corrupt-file/backup warnings would otherwise
@@ -609,6 +640,26 @@ impl AppView {
     /// `None` once the user removed the last project (empty workspace).
     pub(crate) fn current_project(&self) -> Option<&Project> {
         self.projects.get(self.current_project)
+    }
+
+    /// The current project's file-tree expansion: which directories the
+    /// layer lists. The tree is the **project's** — one repository, one
+    /// working tree, one expansion — so switching sessions inside it
+    /// leaves the tree exactly where it was, and a session remembers
+    /// only the file it has open.
+    pub(crate) fn tree_open(&self) -> &HashSet<String> {
+        match self.current_project() {
+            Some(project) => &project.tree_open,
+            None => &NO_TREE_OPEN,
+        }
+    }
+
+    /// [`Self::tree_open`] for mutation; `None` on an empty workspace
+    /// (there is no tree to expand — and none to render a row from).
+    pub(crate) fn tree_open_mut(&mut self) -> Option<&mut HashSet<String>> {
+        self.projects
+            .get_mut(self.current_project)
+            .map(|project| &mut project.tree_open)
     }
 
     pub(crate) fn current_session(&self) -> Option<&crate::session::AgentSession> {

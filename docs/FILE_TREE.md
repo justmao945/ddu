@@ -9,7 +9,9 @@
 > sidebar lists the whole working tree (tracked + untracked, `.gitignore`
 > respected), with the default-collapse rule
 > (`src/diff/file_view.rs`); the pane's **whole-file** surface with the `⌘⇧M` /
-> far-right icon-button switch (per session, persisted); and the virtualization
+> far-right icon-button switch (per session, persisted); the file tree itself is
+> the **project's** (one working tree, one expansion — a session remembers only
+> the file it has open); and the virtualization
 > §7 asked for — the pane renders a mode-independent `RowStream` through
 > `v_virtual_list`, and the tree renders a per-poll `TreeIndex` the same way.
 > A Markdown file renders in File mode through gpui-base's own per-block list;
@@ -56,7 +58,8 @@
   2. **File** — the whole file, with added/removed lines tinted in place and the
      deletions spliced back in (a unified, context-complete view). A Markdown
      file (`*.md` / `*.markdown` / `*.mdx`) renders as its document here.
-* Selection, per-session memory, search, horizontal scrolling and the 3 s
+* Selection, per-session memory of the open file (the tree itself is the
+  project's), search, horizontal scrolling and the 3 s
   freshness guarantee all keep working exactly as today.
 
 ## 2. Non-Goals
@@ -79,9 +82,9 @@
 | Flow | `src/app/diff.rs` | 3 s poll (`DIFF_POLL_SECS`, `src/app/mod.rs`), `reload_diff` + `diff_seq` stale guard, `apply_diff` re-pins the selection **by path** through `diff_seed_path`, `DiffSearch` (⌘F) match list = child-row indices |
 | Tree UI | `src/ui/file_tree/` | `TreeNode { files, dirs }` built in `render` from `&[DiffFile]`; `tree_stats` rollup; `flatten` → `TreeRow::{File,Dir}`; `guides(depth)` stripes; `dir_row`/`file_row`; collapse set = "present in `diff_tree_closed` means collapsed" (all-open default); `plus_minus`; `tree_{default,min,max}_h()` (scale-aware) |
 | Pane UI | `src/ui/diff_panel/` | `panel_view!` → cached child view; `header` (path + `+a/−b`), `body` (scroll container whose **direct children are the rows**, `row_box(el, w, h)`), `diff_line` (one number gutter measured per file by `gutter_width()`, numbering the file as it is now + a sign column (`LINE_CHROME_EXTRAS`), green/red 0.12 tints, yellow search tints 0.30/0.13, `SelectableText` per line), `measure_content_width` (top 16 lines shaped exactly), `hunk_header`, `find_bar` |
-| State | `src/app/mod.rs` | `diff`, `diff_error`, `diff_file: Option<usize>`, `diff_seed_path`, `diff_tree_closed: HashSet<String>`, `diff_tree_scroll`, `diff_hunks_scroll`, `sidebar_split_state`, `show_diff_tree`, `diff_tree_height_seed`, `diff_search`, `diff_pane: Entity<...PanelView>` |
+| State | `src/app/mod.rs` | `snapshot`, `diff_error`, `diff_seed_path`, `diff_tree_scroll`, `diff_hunks_scroll`, `pending_scroll`, `pending_tree_scroll`, `file_positions`, `documents`, `sidebar_split_state`, `show_diff_tree`, `diff_tree_height_seed`, `diff_search`, `diff_pane: Entity<...PanelView>` |
 | Mount | `src/app/mod.rs:1041`, `src/ui/session_panel.rs:118-130` | `diff_pane.cached(diff_panel::root_style())`; the tree layer is the sidebar's lower splitter slot, `.visible(show_diff_tree)` |
-| Persist | `src/config.rs`, `src/app/persist.rs` | per **session**: `selected_file: Option<String>`, `closed_dirs: Vec<String>`, `tree_height: Option<f32>`; `live_tree_height` reads splitter slot 1 |
+| Persist | `src/config.rs`, `src/app/persist.rs` | per **session**: `selected_file: Option<String>`, `view_mode: Option<String>`; per **project**: `tree_open: Vec<String>`, `tree_height: Option<f32>`, `tree_scroll: Option<f32>` — the tree is the project's; `live_tree_height` reads splitter slot 1 |
 | Cache contract | `src/ui/mod.rs` `panel_view!`, `AppView::notify_panels` | stream frames notify the terminal pane alone; every other `cx.notify()` fans out to all panels — pinned by `panel_cache_tests` |
 
 Two facts drive the whole design:
@@ -207,7 +210,7 @@ the root plus the **expanded** directories, each listed on demand
 the layer's cost is the visible tree, not the repository.
 
 * **Default expansion.** The set means "present = expanded" and starts empty.
-  On the first snapshot of a session, `seed_open` opens every directory on the
+  On the project's first snapshot, `seed_open` opens every directory on the
   way to a changed file; everything else is one click away. A clean repository
   therefore opens folded — one root listing. User toggles win afterwards.
 * **Rows.** `file_row` keeps the edge-to-edge band, `guides(depth)` stripes, the
@@ -317,17 +320,24 @@ New `AppView` fields:
 pub(crate) snapshot: Option<crate::diff::Snapshot>,   // replaces `diff: Option<GitDiff>`
 pub(crate) file_view: Option<(String, u64, crate::diff::file_view::FileView)>, // path, seq, view
 pub(crate) view_mode: ViewMode,                       // Diff | File
-pub(crate) diff_tree_open: HashSet<String>,           // expanded dirs (the layer is lazy)
 pub(crate) repo: Option<(PathBuf, Rc<Repository>)>,   // for the tree's listings
-pub(crate) tree_seeded: bool,                         // default-expansion rule ran for this session
 ```
 
-`SavedSession` carries `view_mode: Option<String>` and `open_dirs: Vec<String>`
-(`#[serde(default, skip_serializing_if = …)]`, so old `state.json` files load
-unchanged — the pre-lazy `closed_dirs` and `tree_filter` keys are simply
-ignored). `selected_file` may name a **clean** file: `apply_snapshot` keeps the
-selection when the path is in the diff or still on disk, since the tree no
-longer holds a list to look it up in.
+The tree's own state is not on `AppView` at all: the expansion
+(`Project::tree_open`), the layer height (`tree_height`), where the layer was
+left scrolled (`tree_scroll`) and the default-expansion flag (`tree_seeded`)
+live on the **project** — one repository, one working tree, one tree, shared by
+every session in it. A session's only tree-adjacent state is the file it has
+open. The same split is what goes to `state.json`: `ProjectConfig::tree_open` /
+`tree_height` / `tree_scroll` against `SavedSession::selected_file` /
+`view_mode`. `#[serde(default,
+skip_serializing_if = …)]` keeps old files loading unchanged — the pre-lazy
+`closed_dirs` and `tree_filter` keys, and the per-session `open_dirs` /
+`tree_height` an earlier version of this feature wrote, are simply ignored (the
+tree then re-seeds on the changes, exactly as it does on any launch).
+`selected_file` may name a **clean** file: the poll keeps the selection while the
+path is in the diff or still on disk (`app::diff::lives_in_tree`), since the tree
+no longer holds a list to look it up in.
 
 ## 7. Performance
 

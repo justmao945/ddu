@@ -7,28 +7,54 @@ use std::time::Duration;
 use super::*;
 use crate::diff::git;
 
+/// Whether `path` is still part of the working tree the pane reads: the
+/// diff knows it (a file deleted in the workdir stays readable through
+/// its hunks), or it is on disk under `root`. The one rule both consumers
+/// of a remembered path obey — the poll keeping a session's selection,
+/// and a switch handing one back to the pane.
+pub(super) fn lives_in_tree(
+    root: Option<&std::path::Path>,
+    files: &[crate::diff::DiffFile],
+    path: &str,
+) -> bool {
+    files.iter().any(|f| f.path == path) || root.is_some_and(|root| root.join(path).is_file())
+}
+
 impl AppView {
 
-    pub(super) fn reset_diff(&mut self) {
+    /// Drop what the outgoing session's pane was showing: its selection,
+    /// the find bar's hits on it, and the offset it sat at. A session
+    /// keeps none of that across a switch — the incoming row has its own
+    /// file, and `adopt_session_diff` puts it back.
+    ///
+    /// What belongs to the **working tree** is dropped only when the tree
+    /// itself changed (`same_tree` false): the poll, the file-view and
+    /// preview caches, the limits, the tree's rows and the tree's own
+    /// scroll. Another session of the same project reads exactly the same
+    /// rows — that is what "the tree is the project's" means — so a switch
+    /// inside one project leaves it, and the incoming file's view, where
+    /// it is.
+    pub(super) fn reset_diff(&mut self, same_tree: bool) {
+        self.selection = None;
+        self.diff_search.matches.clear();
+        self.pending_scroll = None;
+        self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
+        if same_tree {
+            return;
+        }
         self.snapshot = None;
         self.diff_error = None;
-        self.selection = None;
-        self.tree_seeded = false;
         self.diff_limits.clear();
         self.file_view = None;
         self.file_view_key = None;
         self.preview = None;
         self.tree_index = None;
-        self.diff_tree_open.clear();
-        self.diff_search.matches.clear();
-        self.pending_scroll = None;
+        self.diff_tree_scroll.set_offset(point(px(0.), px(0.)));
         // The quick open's path list belongs to the working tree the
         // session that owned it; the next open walks for the new one.
         self.file_search.forget_paths();
         self.file_search.matches.clear();
         self.file_search.current = 0;
-        self.diff_tree_scroll.set_offset(point(px(0.), px(0.)));
-        self.diff_hunks_scroll.set_offset(point(px(0.), px(0.)));
     }
 
     /// Grow a truncated file's line budget ×4 and reload at once — the
@@ -58,51 +84,53 @@ impl AppView {
         cx: &mut Context<Self>,
     ) -> bool {
         // The live selection's path: `None` stays `None` (no click =
-        // empty pane — the poll never auto-selects a file).
-        let selected = self.selection.as_ref().map(|s| s.path.clone());
-        // First paint after a cold start: the persisted selection wins
-        // when the path still exists in the working tree.
+        // empty pane — the poll never auto-selects a file). A session
+        // switch seeds it with the row's own file, which the poll then
+        // lands on the first time it applies.
+        let wanted = self.selection.as_ref().map(|s| s.path.clone());
         let seed = if self.diff_seed_path.is_some() && self.snapshot.is_none() {
             self.diff_seed_path.clone()
         } else {
             None
         };
-        let selected = selected.or(seed);
+        let wanted = wanted.or(seed);
         let moved = match result {
             Ok(snapshot) => {
-                // The selection is a path in the *tree*, so a clean file
-                // stays selected across polls; only a path that left the
-                // working tree clears the pane.
-                // The selection is a path in the tree: a file on disk,
+                // The selection is a path in the *tree*: a file on disk,
                 // or one the diff still knows (a file deleted in the
-                // workdir stays readable through its hunks).
+                // workdir stays readable through its hunks). A clean file
+                // therefore keeps its selection across polls, and only a
+                // path that left the working tree clears the pane.
                 let root = self.current_session_cwd();
-                let next = selected
+                let next = wanted
                     .as_ref()
-                    .filter(|path| {
-                        snapshot.diff.files.iter().any(|f| f.path == path.as_str())
-                            || root
-                                .as_ref()
-                                .is_some_and(|root| root.join(path).is_file())
-                    })
+                    .filter(|path| lives_in_tree(root.as_deref(), &snapshot.diff.files, path))
                     .map(|path| crate::app::Selection {
                         path: path.clone(),
                         changed: snapshot.diff.files.iter().position(|f| &f.path == path),
                     });
                 let moved = self.snapshot.as_ref() != Some(&snapshot) || next != self.selection;
-                // The selection moved on its own — a restored row's path
-                // landing on the first poll, or the path leaving the
+                // The pane's file moved on its own — a restored row's
+                // path landing on the first poll, or the path leaving the
                 // working tree. Same bookkeeping as a click: remember
                 // where the outgoing file was, put the incoming one back
-                // where it was left.
-                if next.as_ref().map(|s| s.path.as_str()) != selected.as_deref() {
+                // where it was left — and let `restore_scroll` defer that
+                // until the rows it was measured against are the ones on
+                // screen, or the list clamps it to the hunks the pane
+                // falls back to and the file opens at the wrong place.
+                //
+                // Compared against the *live* selection, not the wanted
+                // path: on a seeded restore those are the same path, and
+                // the position the session left behind is exactly what
+                // such a poll has to put back.
+                let was = self.selection.as_ref().map(|s| s.path.clone());
+                if next.as_ref().map(|s| s.path.as_str()) != was.as_deref() {
                     self.remember_scroll();
-                    let restored = next.as_ref().map(|s| self.saved_scroll(&s.path));
-                    if let Some(offset) = restored {
-                        self.diff_hunks_scroll.set_offset(offset);
-                    }
+                    self.selection = next;
+                    self.restore_scroll();
+                } else {
+                    self.selection = next;
                 }
-                self.selection = next;
                 self.snapshot = Some(snapshot);
                 let had_error = self.diff_error.take().is_some();
                 moved || had_error
@@ -154,8 +182,8 @@ impl AppView {
     /// Rebuild the sidebar tree's rows (a new snapshot, a directory
     /// toggle). The listing is lazy — the root plus every *expanded*
     /// directory, nothing else — so this costs the visible tree, not the
-    /// repository (`FILE_TREE.md` §4.1). The first snapshot of a session
-    /// also opens the changes' ancestors (`seed_open`).
+    /// repository (`FILE_TREE.md` §4.1). The project's first snapshot also
+    /// opens the changes' ancestors (`seed_open`).
     pub(crate) fn rebuild_tree_index(&mut self) {
         let root = self.current_session_cwd();
         let Some(root) = root else {
@@ -178,17 +206,29 @@ impl AppView {
             return;
         };
         let changes = crate::diff::listing::Changes::of(&snapshot.diff.files);
-        if !self.tree_seeded {
-            self.tree_seeded = true;
-            crate::ui::file_tree::seed_open(&mut self.diff_tree_open, &changes);
+        // The default-expansion rule runs once per **project** — the tree
+        // is the project's — and `seed_open` only adds, so it can never
+        // re-open a directory the user has collapsed since it ran.
+        if let Some(project) = self.projects.get_mut(self.current_project) {
+            if !project.tree_seeded {
+                project.tree_seeded = true;
+                crate::ui::file_tree::seed_open(&mut project.tree_open, &changes);
+            }
         }
         // Field-level borrows: the listing closure reads the diff while the
         // rows land in `tree_index`.
-        let open = &self.diff_tree_open;
+        let open = self.tree_open();
         let index = crate::ui::file_tree::build_index(open, |dir| {
             crate::diff::listing::list_dir(&workdir, dir, &changes)
         });
         self.tree_index = Some(index);
+        // The project's layer comes back where it was left. This is the
+        // only moment its rows exist — before the poll's first snapshot
+        // there is no index to put an offset on — and the list is the
+        // finished one (the seeding rule above has already run).
+        if let Some(offset) = self.pending_tree_scroll.take() {
+            self.diff_tree_scroll.set_offset(point(px(0.), offset));
+        }
     }
 
     /// The project's repository handle, discovered once per directory and
@@ -420,6 +460,9 @@ mod tests {
                     path: cwd.clone(),
                     expanded: true,
                     sessions: vec![],
+                    tree_open: vec![],
+                    tree_height: None,
+                    tree_scroll: None,
                 }]),
                 ..Default::default()
             });
@@ -437,8 +480,8 @@ mod tests {
                         files: changed.clone(),
                     },
                 });
-                v.tree_seeded = false;
-                v.diff_tree_open.clear();
+                v.projects[0].tree_seeded = false;
+                v.projects[0].tree_open.clear();
                 v.rebuild_tree_index();
                 cx.notify();
             });
@@ -533,7 +576,7 @@ mod tests {
                         v.commit_file_search(window, cx);
                         assert_eq!(v.current_diff_path(), Some("src/app.rs"));
                         assert!(
-                            v.diff_tree_open.contains("src"),
+                            v.tree_open().contains("src"),
                             "the hit's ancestors open in the tree"
                         );
                         assert!(!v.file_search.open, "the bar closes on the pick");
@@ -895,5 +938,579 @@ mod tests {
             }),
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A second, dead row in the app's project: something to switch to
+    /// without a second PTY, sharing the project's one working tree.
+    fn second_session(cwd: &std::path::Path) -> crate::session::AgentSession {
+        crate::session::AgentSession {
+            id: "s-2".into(),
+            title: "cat".into(),
+            status: crate::session::AgentStatus::Done(0),
+            cmd: crate::session::AgentCmd {
+                program: "/bin/cat".into(),
+                args: vec![],
+            },
+            resume_id: None,
+            was_live: false,
+            kind: "terminal".into(),
+            started: std::time::Instant::now(),
+            ended: Some(std::time::Instant::now()),
+            term: None,
+            cwd: cwd.to_path_buf(),
+            diff_selected: None,
+            view_mode: None,
+        }
+    }
+
+    /// The file view a session's File-mode pane renders, built the way the
+    /// background pass builds it.
+    fn built_view(
+        root: &std::path::Path,
+        path: &str,
+        changed: &[DiffFile],
+    ) -> std::rc::Rc<crate::diff::file_view::FileView> {
+        std::rc::Rc::new(crate::diff::file_view::FileView::build(
+            root,
+            path,
+            changed.iter().find(|f| f.path == path),
+        ))
+    }
+
+    /// Switching sessions is what a row's memory is for: each one comes
+    /// back to **its own file**, in the place it was left. The switch
+    /// zeroes the pane's offset with the rest of the outgoing session's
+    /// state, so the position has to be read before the switch — and the
+    /// restore then waits for its own rows on the way in.
+    #[test]
+    fn a_session_switch_restores_its_file_and_place() {
+        let (root, changed) = workspace("session-restore");
+        let root_for_closure = root.clone();
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let root = root_for_closure;
+                let (mut cx0, view, mut vcx) =
+                    app(dispatcher, "session_restore", root.clone(), changed.clone());
+                let cx = &mut cx0;
+                let top = point(px(0.), px(0.));
+                let deep = point(px(0.), px(-140.));
+                let deeper = point(px(0.), px(-260.));
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        v.projects[0].sessions.push(second_session(&root));
+
+                        // Row 0 reads `src/app.rs`, deep in the file.
+                        v.select_path("src/app.rs".to_owned());
+                        v.file_view = Some(built_view(&root, "src/app.rs", &changed));
+                        v.file_view_key = Some(("src/app.rs".to_owned(), v.diff_gen));
+                        v.apply_pending_scroll();
+                        v.diff_hunks_scroll.set_offset(deep);
+
+                        // Away: the new row has no file of its own yet.
+                        v.select_session(0, 1, window, cx);
+                        assert_eq!(v.current_diff_path(), None);
+                        assert_eq!(v.diff_hunks_scroll.offset(), top);
+
+                        // Back: the row's file is on screen again in the
+                        // same call — the project's diff never went away —
+                        // and lands where it was left.
+                        v.select_session(0, 0, window, cx);
+                        assert_eq!(
+                            v.current_diff_path(),
+                            Some("src/app.rs"),
+                            "the incoming row's file comes back with it"
+                        );
+                        assert_eq!(v.diff_hunks_scroll.offset(), deep, "and so does its place");
+
+                        // A file whose view was never built waits for its
+                        // rows instead of being clamped against the hunks
+                        // the pane falls back to.
+                        v.select_path("src/other.rs".to_owned());
+                        assert_eq!(v.diff_hunks_scroll.offset(), top, "a new file starts at the top");
+                        v.diff_hunks_scroll.set_offset(deeper);
+                        v.select_session(0, 1, window, cx);
+                        v.select_session(0, 0, window, cx);
+                        assert_eq!(v.current_diff_path(), Some("src/other.rs"));
+                        assert_eq!(
+                            v.pending_scroll
+                                .as_ref()
+                                .map(|(path, _, offset)| (path.as_str(), *offset)),
+                            Some(("src/other.rs", deeper)),
+                            "the session's place in its file survives the switch"
+                        );
+
+                        // The read lands: the pane is back where the
+                        // session left it.
+                        v.file_view = Some(built_view(&root, "src/other.rs", &changed));
+                        v.file_view_key = Some(("src/other.rs".to_owned(), v.diff_gen));
+                        v.apply_pending_scroll();
+                        assert_eq!(v.diff_hunks_scroll.offset(), deeper, "the rows arrive");
+                        assert!(v.pending_scroll.is_none(), "and the wait is over");
+                    });
+                });
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The file tree is one per project — one repository, one working
+    /// tree — so a session switch leaves it exactly as it was: the
+    /// expansion the user worked out is not a session's to keep, and the
+    /// tree does not jump back to the top under a switch either. Only the
+    /// **file** is per session.
+    #[test]
+    fn a_session_switch_leaves_the_projects_file_tree_alone() {
+        let (root, changed) = workspace("session-tree");
+        let root_for_closure = root.clone();
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let root = root_for_closure;
+                let (mut cx0, view, mut vcx) =
+                    app(dispatcher, "session_tree", root.clone(), changed.clone());
+                let cx = &mut cx0;
+                let scrolled = point(px(0.), px(-40.));
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        v.projects[0].sessions.push(second_session(&root));
+                        // The seeding rule opened `src/` for the change;
+                        // the user then scrolled the layer.
+                        assert!(v.tree_open().contains("src"), "seeded on the change");
+                        v.diff_tree_scroll.set_offset(scrolled);
+                        // A file of row 0, so the switch has something to
+                        // leave behind.
+                        v.select_path("src/app.rs".to_owned());
+                        let seeded = v.tree_index.as_ref().expect("the tree is built").rows.len();
+
+                        v.select_session(0, 1, window, cx);
+                        assert_eq!(
+                            v.tree_index.as_ref().map(|i| i.rows.len()),
+                            Some(seeded),
+                            "the incoming row lists the project's tree, not its own"
+                        );
+                        assert!(
+                            v.tree_open().contains("src"),
+                            "the expansion is the project's, not the session's"
+                        );
+                        assert_eq!(
+                            v.diff_tree_scroll.offset(),
+                            scrolled,
+                            "and the layer does not jump to the top"
+                        );
+                    });
+                });
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same round trip with the pane's own read in the loop: no test
+    /// hands the cache a prebuilt view here — `ensure_file_content` reads
+    /// the file in the background the way the app does, and the deferred
+    /// position lands with the rows. A switch seeds the incoming row's
+    /// file exactly like a tree click, so this is the app's own path.
+    #[test]
+    fn a_session_switch_restores_the_files_place_off_the_read() {
+        let (root, changed) = workspace("session-read");
+        let root_for_closure = root.clone();
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let root = root_for_closure;
+                let (mut cx0, view, mut vcx) = app(
+                    dispatcher,
+                    "session_read",
+                    root.clone(),
+                    changed.clone(),
+                );
+                let cx = &mut cx0;
+                let top = point(px(0.), px(0.));
+                let deep = point(px(0.), px(-140.));
+                let deeper = point(px(0.), px(-260.));
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        let mut second = second_session(&root);
+                        second.diff_selected = Some("src/other.rs".to_owned());
+                        v.projects[0].sessions.push(second);
+                        v.select_path("src/app.rs".to_owned());
+                        // What the tree's own click handler does next.
+                        v.ensure_file_content(cx);
+                    });
+                    // Frames are what clamp an offset against the rows they
+                    // drew: the round trip has to survive them.
+                    let _ = window.draw(cx);
+                });
+                cx.run_until_parked();
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        assert!(
+                            matches!(
+                                v.cached_file_view(),
+                                Some(crate::diff::file_view::FileView::Text(_))
+                            ),
+                            "the background read landed"
+                        );
+                        v.diff_hunks_scroll.set_offset(deep);
+                        v.select_session(0, 1, window, cx);
+                    });
+                    let _ = window.draw(cx);
+                });
+                cx.run_until_parked();
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        assert_eq!(v.current_diff_path(), Some("src/other.rs"));
+                        assert_eq!(v.diff_hunks_scroll.offset(), top, "the new file starts at the top");
+                        assert_eq!(
+                            v.saved_scroll("src/app.rs"),
+                            deep,
+                            "the file left behind keeps its place"
+                        );
+                        v.diff_hunks_scroll.set_offset(deeper);
+                        v.select_session(0, 0, window, cx);
+                    });
+                    let _ = window.draw(cx);
+                });
+                cx.run_until_parked();
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, _| {
+                        assert_eq!(v.current_diff_path(), Some("src/app.rs"));
+                        assert_eq!(
+                            v.diff_hunks_scroll.offset(),
+                            deep,
+                            "the file comes back where it was left, off its own read"
+                        );
+                        assert!(v.pending_scroll.is_none(), "with nothing left waiting");
+                    });
+                    let _ = window.draw(cx);
+                });
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A rendered document is a surface of its own, and so is its place:
+    /// gpui keeps a text view's scroll only while that view is rendered,
+    /// so the pane draws the document from a state it holds per file —
+    /// and a document left mid-way comes back to that passage. The pane's
+    /// row handle has nothing to do with it: a position recorded there
+    /// under the document's key would belong to rows the pane is not
+    /// showing.
+    #[test]
+    fn a_document_keeps_its_own_place() {
+        let (root, changed) = workspace("document-place");
+        std::fs::write(root.join("notes.md"), "a paragraph of prose\n\n".repeat(400))
+            .expect("write");
+        let root_for_closure = root.clone();
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let root = root_for_closure;
+                let (mut cx0, view, mut vcx) = app(
+                    dispatcher,
+                    "document_place",
+                    root.clone(),
+                    changed.clone(),
+                );
+                let cx = &mut cx0;
+                // The document's state, and where its own scroll sits.
+                let document = |vcx: &mut gpui_kit::VisualTestContext| {
+                    vcx.update(|_, cx| view.read(cx).document_state().cloned())
+                };
+                let offset = |vcx: &mut gpui_kit::VisualTestContext,
+                              state: &Entity<gpui_kit::base::TextViewState>| {
+                    let state = state.clone();
+                    vcx.update(|_, cx| {
+                        state.read_with(cx, |state, _| {
+                            state.list_state().scroll_px_offset_for_scrollbar()
+                        })
+                    })
+                };
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        let _ = window;
+                        v.select_path("notes.md".to_owned());
+                        v.ensure_file_content(cx);
+                    });
+                });
+                cx.run_until_parked();
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, _| {
+                        assert_eq!(
+                            v.surface(),
+                            crate::ui::diff_panel::Surface::Preview,
+                            "a Markdown file renders as a document"
+                        );
+                    });
+                    let _ = window.draw(cx);
+                });
+                let state = document(&mut vcx).expect("the document's state is kept");
+                let first = state.entity_id();
+
+                // Scroll the document, the way its own scrollbar does.
+                state.read_with(cx, |state, _| {
+                    state
+                        .list_state()
+                        .set_offset_from_scrollbar(point(px(0.), px(-600.)));
+                });
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                assert!(
+                    offset(&mut vcx, &state).y < px(0.),
+                    "the document is scrolled"
+                );
+                assert_eq!(
+                    vcx.update(|_, cx| view
+                        .read(cx)
+                        .documents
+                        .values()
+                        .map(std::collections::HashMap::len)
+                        .sum::<usize>()),
+                    1,
+                    "one state for the one document visited"
+                );
+
+                // Away to a file of rows, and back: the document is drawn
+                // from the same state, so it opens where it was left.
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, _| v.select_path("src/app.rs".to_owned()));
+                    let _ = window.draw(cx);
+                });
+                cx.run_until_parked();
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, _| v.select_path("notes.md".to_owned()));
+                    let _ = window.draw(cx);
+                });
+                cx.run_until_parked();
+                let back = document(&mut vcx).expect("the document's state is still there");
+                assert_eq!(back.entity_id(), first, "drawn from the state it had");
+                assert!(
+                    offset(&mut vcx, &back).y < px(0.),
+                    "and it is still scrolled"
+                );
+                assert!(
+                    !vcx.update(|_, cx| view.read(cx).file_positions.contains_key(&(
+                        root.clone(),
+                        "notes.md".to_owned(),
+                        ViewMode::File
+                    ))),
+                    "a document's place is not recorded on the row handle"
+                );
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two sessions whose rows each left a different file open: the
+    /// switch is a round trip through the pane's own state, and both
+    /// files have to come back where they were left. The bookkeeping
+    /// runs on the *shared* scroll handle, and the outgoing file's place
+    /// has to be read while the handle still holds it — a reset that
+    /// zeroes the handle before the incoming file is even known turns
+    /// the next read into "the outgoing file was at the top", which is
+    /// how a remembered position used to be erased on the way out.
+    #[test]
+    fn a_session_switch_keeps_each_files_place() {
+        let (root, changed) = workspace("session-two-files");
+        let root_for_closure = root.clone();
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let root = root_for_closure;
+                let (mut cx0, view, mut vcx) = app(
+                    dispatcher,
+                    "session_two_files",
+                    root.clone(),
+                    changed.clone(),
+                );
+                let cx = &mut cx0;
+                let deep = point(px(0.), px(-140.));
+                let deeper = point(px(0.), px(-260.));
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        let mut second = second_session(&root);
+                        second.diff_selected = Some("src/other.rs".to_owned());
+                        v.projects[0].sessions.push(second);
+
+                        // Row 0 reads `src/app.rs`, deep in the file.
+                        v.select_path("src/app.rs".to_owned());
+                        v.file_view = Some(built_view(&root, "src/app.rs", &changed));
+                        v.file_view_key = Some(("src/app.rs".to_owned(), v.diff_gen));
+                        v.apply_pending_scroll();
+                        v.diff_hunks_scroll.set_offset(deep);
+
+                        // Away: row 1 has a file of its own, and the file
+                        // left behind keeps the place it was left at.
+                        v.select_session(0, 1, window, cx);
+                        assert_eq!(v.current_diff_path(), Some("src/other.rs"));
+                        assert_eq!(
+                            v.saved_scroll("src/app.rs"),
+                            deep,
+                            "the file left behind keeps its place"
+                        );
+
+                        // Row 1's file, deep in its own right.
+                        v.file_view = Some(built_view(&root, "src/other.rs", &changed));
+                        v.file_view_key = Some(("src/other.rs".to_owned(), v.diff_gen));
+                        v.apply_pending_scroll();
+                        v.diff_hunks_scroll.set_offset(deeper);
+
+                        // Back: row 0's file, exactly where it was.
+                        v.select_session(0, 0, window, cx);
+                        assert_eq!(v.current_diff_path(), Some("src/app.rs"));
+                        assert_eq!(
+                            v.saved_scroll("src/other.rs"),
+                            deeper,
+                            "the file left behind keeps its place"
+                        );
+                        v.file_view = Some(built_view(&root, "src/app.rs", &changed));
+                        v.file_view_key = Some(("src/app.rs".to_owned(), v.diff_gen));
+                        v.apply_pending_scroll();
+                        assert_eq!(v.diff_hunks_scroll.offset(), deep, "row 0's file");
+
+                        // And away again: row 1's file is still where it
+                        // was left, not at the top.
+                        v.select_session(0, 1, window, cx);
+                        assert_eq!(v.current_diff_path(), Some("src/other.rs"));
+                        v.file_view = Some(built_view(&root, "src/other.rs", &changed));
+                        v.file_view_key = Some(("src/other.rs".to_owned(), v.diff_gen));
+                        v.apply_pending_scroll();
+                        assert_eq!(v.diff_hunks_scroll.offset(), deeper, "row 1's file");
+                    });
+                });
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The layer is the project's, so its place is too: moving to another
+    /// project and back puts the tree back where it was left, and the
+    /// rows it is measured against — the poll's snapshot — are what it
+    /// waits for.
+    #[test]
+    fn a_project_keeps_its_file_trees_place() {
+        let (root, changed) = workspace("project-tree-scroll");
+        let other = std::env::temp_dir().join(format!("ddu-tree-scroll-b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&other);
+        std::fs::create_dir_all(other.join("lib")).expect("mkdir");
+        std::fs::write(other.join("lib/one.rs"), "fn one() {}\n").expect("write");
+        git2::Repository::init(&other).expect("init");
+        let root_for_closure = root.clone();
+        let other_for_closure = other.clone();
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let root = root_for_closure;
+                let other = other_for_closure;
+                let (mut cx0, view, mut vcx) = app(
+                    dispatcher,
+                    "project_tree_scroll",
+                    root.clone(),
+                    changed.clone(),
+                );
+                let cx = &mut cx0;
+                let mine = point(px(0.), px(-120.));
+                let theirs = point(px(0.), px(-300.));
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        let mut second = crate::session::Project::new("other".into(), other.clone());
+                        second.sessions.push(second_session(&other));
+                        v.projects.push(second);
+                        v.expanded.push(true);
+                        v.diff_tree_scroll.set_offset(mine);
+
+                        // Away: the other project's own layer starts at
+                        // its own top.
+                        v.select_session(1, 0, window, cx);
+                        assert_eq!(v.current_diff_path(), None);
+                        assert_eq!(v.diff_tree_scroll.offset(), point(px(0.), px(0.)));
+                        // Its poll lands: rows exist, and the tree is
+                        // scrolled by hand.
+                        v.snapshot = Some(Snapshot {
+                            diff: GitDiff {
+                                branch: None,
+                                files: vec![],
+                            },
+                        });
+                        v.rebuild_tree_index();
+                        v.diff_tree_scroll.set_offset(theirs);
+                        // A save records it against the project it is the
+                        // project's place *of*.
+                        v.persist(cx);
+                        assert_eq!(v.projects[1].tree_scroll, Some(-300.));
+
+                        // Back: the first project's tree comes back where
+                        // it was left, once its own rows are there.
+                        v.select_session(0, 0, window, cx);
+                        assert_eq!(v.current_diff_path(), None);
+                        // The switch's zeroed handle must not overwrite the
+                        // place being returned to: until those rows exist,
+                        // a save keeps what the project had.
+                        v.persist(cx);
+                        assert_eq!(v.projects[0].tree_scroll, Some(-120.));
+                        v.snapshot = Some(Snapshot {
+                            diff: GitDiff {
+                                branch: None,
+                                files: changed.clone(),
+                            },
+                        });
+                        v.rebuild_tree_index();
+                        assert_eq!(
+                            v.diff_tree_scroll.offset(),
+                            mine,
+                            "the first project's layer is where it was left"
+                        );
+
+                        // And the other project's, the other way.
+                        v.select_session(1, 0, window, cx);
+                        v.snapshot = Some(Snapshot {
+                            diff: GitDiff {
+                                branch: None,
+                                files: vec![],
+                            },
+                        });
+                        v.rebuild_tree_index();
+                        assert_eq!(
+                            v.diff_tree_scroll.offset(),
+                            theirs,
+                            "the other project's layer is where it was left"
+                        );
+                    });
+                });
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&other);
     }
 }

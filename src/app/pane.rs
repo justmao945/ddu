@@ -10,13 +10,26 @@ use super::*;
 
 impl AppView {
 
-    /// Remember where the file being left was scrolled, and put the
-    /// newly selected one back where it was left. Both are keyed by
+    /// Remember where the file being left was scrolled. Keyed by
     /// `(working tree, path, mode)`: a file reads the same way in every
     /// session of a project, and switching files is the thing this
     /// makes cheap — a re-rendered stream puts a file back at the top
     /// unless its own position is remembered.
+    ///
+    /// It has to run *before* the pane's state is torn down or moved on:
+    /// the offset lives on the shared scroll handle, so the caller must
+    /// still be looking at the outgoing file — a click in the tree, a
+    /// mode switch, and the top of every path that moves the current
+    /// session (whose state reset zeroes that handle).
     pub(super) fn remember_scroll(&mut self) {
+        // A rendered document's place is its own state's, not the pane's
+        // row handle ([`AppView::document_state`]): nothing to record
+        // here, and writing the *rows* handle's leftover offset under the
+        // document's key would plant a position the file's own rows — the
+        // fallback an unreadable document shows — were never at.
+        if self.surface() == crate::ui::diff_panel::Surface::Preview {
+            return;
+        }
         // A restore still waiting for its rows means the offset on the
         // handle belongs to the *previous* file (or to a clamped
         // fallback): the remembered value is the truth, so leave it.
@@ -70,6 +83,13 @@ impl AppView {
     /// opens nowhere near where it was left.
     pub(super) fn restore_scroll(&mut self) {
         self.pending_scroll = None;
+        // A rendered document comes back to its own place by being drawn
+        // from the state it was drawn from before (see `documents`), which
+        // `preview_body` does; the pane's row handle has nothing to do
+        // with it.
+        if self.surface() == crate::ui::diff_panel::Surface::Preview {
+            return;
+        }
         let Some(path) = self.current_diff_path().map(str::to_owned) else {
             return;
         };
@@ -86,8 +106,9 @@ impl AppView {
     /// Whether the pane is showing the rows a remembered position was
     /// measured against: Diff mode reads its rows straight off the poll,
     /// File mode needs the file's own view (the hunks it falls back to
-    /// meanwhile are a different row list). A rendered document and an
-    /// image have no rows of their own — the pane's scroll is not theirs.
+    /// meanwhile are a different row list). A rendered document has no
+    /// rows at all — its place lives in its own state, so there is nothing
+    /// for the pane's rows to wait for (see `restore_scroll`).
     fn stream_is_final(&self) -> bool {
         match self.surface() {
             crate::ui::diff_panel::Surface::Diff => self.diff().is_some(),
@@ -145,6 +166,21 @@ impl AppView {
         (cached == path && *generation <= self.diff_gen)
             .then(|| self.file_view.as_deref())
             .flatten()
+    }
+
+    /// The state the current document is drawn from, when the pane has
+    /// one for this file: it is what carries the document's own scroll
+    /// (see [`AppView::documents`]). `None` before the source has landed
+    /// — the body then builds a one-off view, which has no place to keep.
+    pub(crate) fn document_state(&self) -> Option<&Entity<gpui_kit::base::TextViewState>> {
+        let root = self
+            .projects
+            .get(self.current_project)?
+            .sessions
+            .get(self.current_session)?
+            .cwd
+            .as_path();
+        self.documents.get(root)?.get(self.current_diff_path()?)
     }
 
     /// The rendered document's Markdown source, same keying
@@ -285,6 +321,28 @@ impl AppView {
                     v.file_view_key = Some((path.clone(), generation));
                 }
                 if let Some(source) = source {
+                    // The document is drawn from a state the pane keeps per
+                    // file: that entity owns the document's scroll (gpui's
+                    // own text view keeps it only while the element is
+                    // rendered), so a switch back to the file returns to
+                    // the passage it was left at instead of the top. A
+                    // poll's re-read only swaps the text inside it.
+                    if let Ok(text) = source.as_deref() {
+                        match v.documents.entry(root.clone()).or_default().get(&path) {
+                            Some(state) => {
+                                let state = state.clone();
+                                state.update(cx, |state, cx| state.set_text(text, cx));
+                            }
+                            None => {
+                                let state: Entity<gpui_kit::base::TextViewState> =
+                                    cx.new(|cx| gpui_kit::base::TextViewState::markdown(text, cx));
+                                v.documents
+                                    .entry(root.clone())
+                                    .or_default()
+                                    .insert(path.clone(), state);
+                            }
+                        }
+                    }
                     v.preview = Some(crate::diff::file_view::PreviewBuild {
                         key: (path.clone(), generation),
                         source: source.map(|text| std::rc::Rc::from(text.as_str())),

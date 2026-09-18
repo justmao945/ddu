@@ -138,6 +138,22 @@ fn preview_body(this: &AppView) -> impl IntoElement {
     let text = this.cached_preview().map(|text| text.to_owned()).unwrap_or_default();
     // Images in the document resolve against the *document's* directory.
     let base = this.preview_base();
+    // The document is drawn from the state the pane keeps for this file
+    // when it has one: that state is what holds the document's scroll, so
+    // a document left mid-way comes back to that passage (a fresh element
+    // starts at the top — the id is the same, but gpui drops a text view's
+    // state the moment it is not rendered). Before the source lands there
+    // is nothing to keep, and the one-off element is the same as ever.
+    let view = match this.document_state() {
+        Some(state) => TextView::new(state),
+        None => TextView::markdown(
+            SharedString::from(format!(
+                "md-preview-{}",
+                this.current_diff_path().unwrap_or_default()
+            )),
+            text,
+        ),
+    };
     div()
         .flex_1()
         .min_h_0()
@@ -148,14 +164,7 @@ fn preview_body(this: &AppView) -> impl IntoElement {
         // one that used to have no menu at all.
         .context_menu(file_menu)
         .child(
-            TextView::markdown(
-                SharedString::from(format!(
-                    "md-preview-{}",
-                    this.current_diff_path().unwrap_or_default()
-                )),
-                text,
-            )
-            .selectable(true)
+            view.selectable(true)
             .scrollable(true)
             // Headings follow the desktop's text scale, not gpui-base's
             // stock 14px base (see [`crate::ui::document_text_style`]).

@@ -149,8 +149,6 @@ its own `v_resizable("sidebar-split")`.
 ## 5. State Model
 
 ```rust
-struct Project { name: String, path: PathBuf, sessions: Vec<AgentSession> }
-
 struct AgentSession {
     id: String,                    // stable id, source of element ids
     title: String,                 // live: agents override it via the OSC title
@@ -162,8 +160,15 @@ struct AgentSession {
     started: Instant, ended: Option<Instant>,
     term: Option<Entity<TermSession>>,   // None while the spawn failed
     cwd: PathBuf,                  // project root today; a worktree later
-    diff_selected: Option<String>, diff_closed: HashSet<String>,
-    diff_tree_height: Option<f32>,
+    diff_selected: Option<String>, // the file this row's pane shows
+    view_mode: Option<String>,     // "diff" | "file"
+}
+
+struct Project {
+    name: String, path: PathBuf, sessions: Vec<AgentSession>,
+    tree_open: HashSet<String>,    // the file tree is the *project's* …
+    tree_height: Option<f32>,      // … so its expansion and layer height live here,
+    tree_seeded: bool,             // with the default-expansion rule run once per project
 }
 
 struct AgentCmd { program: String, args: Vec<String> }   // + label/basename/spec/resume_spec
@@ -205,11 +210,12 @@ Agent CLIs (claude/codex/omp) daily need streaming output, ANSI colors, line-wra
 * Data: `Repository::discover(project.path)` → `diff_tree_to_workdir_with_index(head, opts)` with `include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true)` — staged, unstaged and untracked in one pass, no subprocess. Refreshed by the 3 s poll (every session switch reloads immediately); there is **no** `notify`-crate `.git` watcher and no manual refresh control.
 * Truncation: a file's collected lines are capped at `MAX_LINES_PER_FILE` (5 000) with the stat counts still counted in full; the pane renders a cap note and reaching it grows that file's budget ×4 up to `EXPAND_MAX_LINES` (200 000).
 * View: the file list is the sidebar's **file tree** (`ui/file_tree/`), read **lazily**: `TreeIndex` (`AppView::tree_index`) is the root plus the directories the user has expanded, and each of those is listed on demand (`diff/listing.rs::list_dir` — one `read_dir`, nothing filtered but `.git`, one diff lookup per entry) with the poll's changes merged in as it is read. Nothing else is read, so a 40k-file repository draws a few hundred rows; a `v_virtual_list` then builds only the visible slice.
-  * **Default expansion**: on the first snapshot of a session, `seed_open` expands every directory on the way to a changed file, so a large repository opens on its changes and their ancestors. Explicit toggles win from then on, and a file changing later only moves badges — never the expansion state, so the tree does not jump under the user.
+  * **Default expansion**: on the project's first snapshot, `seed_open` expands every directory on the way to a changed file, so a large repository opens on its changes and their ancestors. Explicit toggles win from then on, and a file changing later only moves badges — never the expansion state, so the tree does not jump under the user.
   * **Order and figures**: directories come first, then files, each name-sorted
     **case-insensitively** (`tree::by_name`: `README.md` sits with `readme.md`, not
     in a block above every lowercase name; the exact bytes break a case-only tie); every name wears the tree's own text color (a file that did not change is listed, not dimmed — the figures are what marks the change) and changed rows carry `+a/−b`. **A zero side is never printed** (`+8`, not `+8 −0`, nothing at all for a binary change), and a directory's badge is `● n` changed descendants — never a file total. One tree, no All/Changed filter, no counts and no summary strip: what the layer has not read it cannot count.
   * **Selection is a path** (`AppView::selection`), not an index into the diff: a clean file is a normal selection — the record is looked up by index when the poll found one, and the selection survives a poll while the path is in the diff or still on disk. A file nobody changed renders as the file itself: `AppView::surface` folds Diff into File, so a clean `README.md` shows its rendered document rather than an empty hunks pane.
+  * **The tree is the project's, the file is the session's.** One repository and one working tree per project means one tree: its expansion (`Project::tree_open`), its layer height and the default-expansion flag live on the project, so switching sessions inside it leaves the tree — rows, expansion and its own scroll — exactly where it was. A session remembers the *file* it has open (`AgentSession::diff_selected`) and the pane's mode, and a switch puts both back: with the same project's diff still loaded the file lands in the pane on the spot (`adopt_session_diff` → `select_path`), a cold tree lets the first poll seed it.
 * Quick open (⌘P, `FileSearch`) is a **floating palette** (`ui/palette.rs`), not a search inside the sidebar: a scrim over the workspace with the card hanging from the top (`TOP_SHARE`/`WIDTH_SHARE`, clamped), a field, and the ranked hits under it scrolling beneath the arrows. It answers from the working tree's own path list — the index's tracked files plus the poll's untracked ones, no walk — through `diff/listing.rs::search`: a case-insensitive subsequence match ranked by where it lands (a name prefix beats a hit inside the name, that beats a scattered subsequence, that beats a match on the file's directories; ties go to the shorter path, capped at `FILE_SEARCH_MAX` = 200). The panels are left as they are: nothing is revealed, nothing hidden, and a hit opens with its ancestors expanded in the tree and the pane taking the file. ↑↓/⌘G/⌘⇧G step the cursor, Enter opens it, Escape (or a click on the scrim) closes. See `docs/UI.md`.
 * Pane modes: the hunk area (`ui/diff_panel/`) shows the selected file in one of two modes, toggled by `⌘⇧M` or the header's far-right icon button (per session, persisted). The switch is offered only when there is something to switch to: a file nobody changed has no hunks, so its header carries the path and the figures alone and `set_view_mode(Diff)` is a no-op (`surface()` folds that request back into the file anyway). **File is the default**: a file is read, not skimmed, and the surface carries the code around the change.
   * **Diff** — hunks only: one number gutter (measured per file) + a sign column, green `+` / red `-` / untinted context rows, `@@` header bands. The gutter numbers the file **as it is now** — a kept or added line its working-tree line number, a deleted line none, since it is no longer in the file. Hunks are not syntax-highlighted: a hunk line is a fragment with no offset into the file.
@@ -217,17 +223,18 @@ Agent CLIs (claude/codex/omp) daily need streaming output, ANSI colors, line-wra
   * **Images**: an image file (`png`/`jpg`/`jpeg`/`gif`/`webp`/`bmp`/`ico`/`svg`) is drawn by the pane (`FileView::Image`, fitted with `Contain`) instead of banding "binary", and images *inside* a rendered document go through the plugin in `ui/markdown.rs` — gpui's text view hands `![]()`/`<img>` to the app's http client, which cannot read a path, so the block holding an image is rendered here through `img(Resource::Path)` against the document's directory.
   * **Markdown** is not a third mode: File mode *is* the rendered document for `.md`/`.markdown`/`.mdx` (a `TextView::markdown`), which is why the toggle is a plain two-state switch. The library's own scrollable text view virtualizes the document by Markdown block (it builds a `gpui::list` over the parsed blocks and measures them all so the thumb does not jitter), so a long document paints its visible blocks. The find bar has no match list over a rendered document: ⌘F switches to Diff, whose rows it can match.
   * **Overview**: an overlay in the pane's scrollbar column (`diff_panel::scroll_overview`) draws the stream's changed runs — `RowStream::marks()`: contiguous same-sign rows. Additions take the left half of the strip, removals the right, so a replacement's two runs sit side by side rather than covering each other. Clicking a mark scrolls that run to the top, which is how a 200 000-line file is navigated. Nothing is drawn for a stream with no marks, and the viewport is not drawn at all — the scrollbar in that same column says it better. Positions are relative lengths, not pixels — see `docs/UI.md`.
-  * **Positions**: the pane's scroll offset is remembered per `(working tree, path, mode)` in memory (`AppView::file_positions`), so switching files and coming back lands where the file was left. A restore waits for the rows it belongs to (`pending_scroll`), or the virtual list clamps it against the fallback rows and the file reopens at the wrong place (`docs/UI.md`).
+  * **Positions**: the pane's scroll offset is remembered per `(working tree, path, mode)` in memory (`AppView::file_positions`), so switching files — or sessions — and coming back lands where the file was left. The position is read out *before* a switch resets the pane (`remember_scroll` at the top of every path that moves the current session), and a restore waits for the rows it belongs to (`pending_scroll`), or the virtual list clamps it against the fallback rows and the file reopens at the wrong place (`docs/UI.md`).
   * **One read policy for both surfaces** (`diff/file_view.rs`): the merged view and the Markdown source refuse for the same reasons — binary (NUL in the first 8 KiB), over the byte/line cap, or gone from disk — and a refused document renders the rows it falls back to with the same one-line band File mode shows. A refusal is stored with the `(path, generation)` it was read for, so the pane can tell "still reading" from "cannot read" instead of banding the reading note forever.
   Both modes are one **`RowStream`** (`diff/mod.rs`): a row's item index *is* its search index, so the find bar, `scroll_to_item` and drag selection are mode-agnostic; the pane's `v_virtual_list` builds only the visible slice of either. Lines are selection participants ordered by `document_order` (drag selection copies them joined by newlines) — `SelectableText` as-is, or `ui/code_text.rs` when the row has syntax runs, which is that same element with caller-supplied `TextRun`s.
-* Scope: project-level HEAD→workdir diff by default; per-session scope (branch/worktree) comes later — with multiple sessions in one repo they share the project diff. The branch is captured on `GitDiff` but has no display yet.
+* Scope: project-level HEAD→workdir diff by default; per-session scope (branch/worktree) comes later — with multiple sessions in one repo they share the project diff *and* its file tree. The branch is captured on `GitDiff` but has no display yet.
 * The full working-tree listing and the pane's whole-file surface are designed in `FILE_TREE.md`.
 
 ## 8. Left Pane and File Tree
 
 * The left pane is the project tree (projects → their sessions) plus, as its
   lower splitter slot, the **diff file tree layer** (§7): today it lists the
-  changed files as a directory tree, toggled with ⌘T and resizable per session.
+  changed files as a directory tree, toggled with ⌘T and resizable (one layer
+  per project: every session in it shares the tree — see §7).
 * The layer now lists the whole working tree, lazily expanded and
   **unfiltered** (`FILE_TREE.md`: nothing is hidden but `.git`), rather than
   only the changed files: it replaces the changed-only build instead of sitting
@@ -279,11 +286,11 @@ struct AgentCmd { program: String, args: Vec<String> }
   theme, and the keyboard overrides (`keys`: `app::keys` command id → chord, the
   Keys page's own state). No `config.toml` ever existed.
 * State `state.json` — the runtime workspace snapshot: projects with their session
-  rows (including `resume_id` and the per-row `live` flag), the active
+  rows (including `resume_id` and the per-row `live` flag), the per-project
+  **file tree** (expanded directories + layer height), the active
   project/session, panel visibility and widths, per-session diff selection
-  (may name a clean file) / collapsed directories / tree height / **pane
-  mode** / **tree filter**, and window placement. PTY *contents* are
-  never persisted; a row that was still running is respawned on the next launch,
+  (may name a clean file) / **pane mode**, and window placement. PTY *contents*
+  are never persisted; a row that was still running is respawned on the next launch,
   agents resumed from their id.
 * Both files live under `~/Library/Application Support/ddu/` (macOS) or
   `$XDG_CONFIG_HOME/ddu/` / `~/.config/ddu/` (Linux); `DDU_STATE_PATH` /

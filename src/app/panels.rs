@@ -221,6 +221,9 @@ mod panel_cache_tests {
                     name: "proj".into(),
                     path: std::env::temp_dir(),
                     expanded: true,
+                    tree_open: vec![],
+                    tree_height: None,
+                    tree_scroll: None,
                     sessions: vec![],
                 }]),
                 ..Default::default()
@@ -551,6 +554,9 @@ mod panel_cache_tests {
                             name: "proj".into(),
                             path: std::env::temp_dir(),
                             expanded: true,
+                            tree_open: vec![],
+                            tree_height: None,
+                            tree_scroll: None,
                             sessions: vec![],
                         }]),
                         ..Default::default()
@@ -805,6 +811,9 @@ mod panel_cache_tests {
                             name: "proj".into(),
                             path: std::env::temp_dir(),
                             expanded: true,
+                            tree_open: vec![],
+                            tree_height: None,
+                            tree_scroll: None,
                             sessions: vec![],
                         }]),
                         ..Default::default()

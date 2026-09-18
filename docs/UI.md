@@ -137,7 +137,9 @@ stated.
 
 A file's place is a `(working tree, path, mode)` entry in
 `AppView::file_positions`, written when the file is left and read when it is
-returned to. Two rules make it hold:
+returned to — the same entry serves a file switch and a **session** switch
+(the tree is the project's, so another session's visit to the same file is the
+same reading of it). Three rules make it hold:
 
 * **A restore waits for the rows it belongs to.** Rows mount in stages — a
   changed file shows the poll's hunks while its whole-file view is built off
@@ -150,6 +152,39 @@ returned to. Two rules make it hold:
   handle's offset still describes the *previous* file, so `remember_scroll`
   leaves the stored entry alone — otherwise the position just asked for would
   be overwritten by the one being left.
+
+* **The write happens before the state it reads is torn down.** The offset lives
+  on the pane's shared scroll handle, so `remember_scroll` has to run while the
+  outgoing file is still the pane's — which is why every path that moves the
+  current session (`select_session`, `spawn_session_of`, `remove_session_row`,
+  `add_project_path`, `remove_project`) reads it at the top, before the indices
+  move and `adopt_session_diff` resets the pane. A switch that skipped it left the
+  outgoing file's place only as good as the last file switch, which is the
+  "where was I?" it exists to answer.
+
+Two surfaces keep their place somewhere else, and for the same reason — their
+scroll is not the pane's row list:
+
+* **A rendered document.** gpui's text view keeps its scroll in the state the
+  element is drawn from, and gpui drops that state the moment the element is
+  not rendered — so a `.md` file that is switched away from and back would
+  start at the top. The pane therefore holds one `Entity<TextViewState>` per
+  `(working tree, path)` (`AppView::documents`) and draws the document from it
+  (`TextView::new(&state)`), which is what makes the passage it was left at
+  come back with the file; the document's key is never written to
+  `file_positions` (`remember_scroll`/`restore_scroll` skip the Preview
+  surface), so a position recorded there can only ever describe rows.
+* **The file tree.** The tree is the project's, so its place is the project's:
+  `Project::tree_scroll` (persisted with the expansion and the height). Every
+  path that moves `current_project` reads the live handle first
+  (`remember_tree_scroll`, beside `remember_scroll`), and the incoming
+  project's place goes back through `AppView::pending_tree_scroll` — a project
+  switch drops the poll's snapshot and with it the index, so there are no rows
+  to put an offset on until the incoming project's poll lands
+  (`rebuild_tree_index`). A save never writes the live offset back while that
+  restore is still pending, or the switch's own zeroing would overwrite the
+  place being returned to. A switch *inside* a project touches none of this:
+  the rows are the same rows, and the handle already holds the place.
 
 ## Cached panels
 

@@ -34,6 +34,11 @@ impl AppView {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| raw.to_string());
+        // Another working tree is about to be on screen: the file this
+        // one was showing keeps its place (see `select_session`), and so
+        // does its file tree.
+        self.remember_scroll();
+        self.remember_tree_scroll();
         let from = (self.current_project, self.current_session);
         if let Some(ix) = self.projects.iter().position(|p| p.path == path) {
             self.current_project = ix;
@@ -42,11 +47,8 @@ impl AppView {
             cx.notify();
             return;
         }
-        self.projects.push(Project {
-            name,
-            path: path.clone(),
-            sessions: vec![],
-        });
+        self.projects
+            .push(Project::new(name, path.clone()));
         self.expanded.push(true);
         self.current_project = self.projects.len() - 1;
         self.current_session = 0;
@@ -89,6 +91,11 @@ impl AppView {
         if project >= self.projects.len() {
             return;
         }
+        // The pane may be showing a file of the project about to go (or
+        // of the one that becomes current): its place is read now — and
+        // its layer's, which belongs to the project about to go.
+        self.remember_scroll();
+        self.remember_tree_scroll();
         let removed = self.projects.remove(project);
         for session in removed.sessions {
             if let Some(term) = session.term {

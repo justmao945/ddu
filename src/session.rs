@@ -43,8 +43,6 @@ mod session_tests {
             term: None,
             cwd: PathBuf::new(),
             diff_selected: None,
-            diff_open: Default::default(),
-            diff_tree_height: None,
             view_mode: None,
         }
     }
@@ -198,13 +196,11 @@ pub struct AgentSession {
     /// The working tree this session runs in (project root today; a
     /// per-session worktree later). The diff poll targets this.
     pub cwd: PathBuf,
-    /// Session-scoped diff tree state: with per-session worktrees each
-    /// session's changes, selection and collapsed dirs are its own.
+    /// Session-scoped diff state: the file this session's pane shows.
+    /// The file *tree* is not here — it belongs to the project (one
+    /// repository, one working tree), so only the selected path is a
+    /// row's own.
     pub diff_selected: Option<String>,
-    pub diff_open: std::collections::HashSet<String>,
-    /// This session's sidebar splitter height (diff tree layer, px) —
-    /// per-session layout, restored when the session is selected.
-    pub diff_tree_height: Option<f32>,
     /// The row's persisted right-pane mode (`diff` / `file`),
     /// written on save and adopted on switch.
     pub view_mode: Option<String>,
@@ -262,12 +258,44 @@ impl AgentSession {
     }
 }
 
-/// One project in the left pane.
+/// One project in the left pane: one working tree, one repository, and
+/// therefore one **file tree** — every session in it shares the tree's
+/// expansion and layer height, and only the selected file is a session's
+/// own.
 #[derive(Debug, Clone)]
 pub struct Project {
     pub name: String,
     pub path: PathBuf,
     pub sessions: Vec<AgentSession>,
+    /// Directories expanded in the file tree (the layer is lazy:
+    /// everything else is listed on demand).
+    pub tree_open: std::collections::HashSet<String>,
+    /// The sidebar's diff-tree layer height (px).
+    pub tree_height: Option<f32>,
+    /// Where the file tree was left scrolled (the layer's own offset,
+    /// negative y, px). The tree is the project's, so its place is too:
+    /// another session of the same project reads the same rows, and a
+    /// switch back to it comes back to the same line.
+    pub tree_scroll: Option<f32>,
+    /// Whether the default-expansion rule has run for this project: it
+    /// opens the changes' ancestors once, and never overrides a
+    /// directory the user has collapsed since.
+    pub tree_seeded: bool,
+}
+
+impl Project {
+    /// A project whose tree has nothing remembered about it yet.
+    pub fn new(name: String, path: PathBuf) -> Self {
+        Self {
+            name,
+            path,
+            sessions: Vec::new(),
+            tree_open: Default::default(),
+            tree_height: None,
+            tree_scroll: None,
+            tree_seeded: false,
+        }
+    }
 }
 
 /// The workspace the app starts with: the directory it was launched
@@ -279,9 +307,5 @@ pub fn initial_projects() -> Vec<Project> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| cwd.to_string_lossy().into_owned());
-    vec![Project {
-        name,
-        path: cwd,
-        sessions: vec![],
-    }]
+    vec![Project::new(name, cwd)]
 }

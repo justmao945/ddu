@@ -189,6 +189,30 @@ editing, and where the long form lives.
   mount in stages (the poll's hunks, then the whole-file view), and the virtual
   list clamps an offset to whatever is mounted — applied early, a deep position
   is lost for good. `AppView::pending_scroll` defers it; see `docs/UI.md`.
+- **The file tree is the project's, the open file is the session's**: one
+  repository and one working tree per project means one tree, so its expansion
+  (`Project::tree_open`), layer height, own scroll (`tree_scroll`) and
+  default-expansion flag live on the
+  `Project` (and in `ProjectConfig`), never on a session — a session records
+  only the file it has open (`AgentSession::diff_selected`) and the pane's mode.
+  A switch therefore leaves the tree's rows, expansion and own scroll exactly
+  where they were (`adopt_session_diff` resets the outgoing row's state, not the
+  working tree's), puts the incoming row's file back on the spot when the
+  project's diff is still loaded (`select_path`), and only a cold tree lets the
+  first poll seed it. The pane's position is read out **before** the switch —
+  `remember_scroll` at the top of every path that moves the current session, and
+  in `remove_session_row` before the row goes — or the outgoing file keeps only
+  the place it had at the last file switch.
+- **Two surfaces keep their place elsewhere**: a rendered Markdown document's
+  scroll lives in the `Entity<TextViewState>` the pane draws it from
+  (`AppView::documents`, one per `(working tree, path)`) — gpui drops a text
+  view's state as soon as it is not rendered, so a document would otherwise
+  start at the top every time the file comes back; and the file tree's place is
+  the project's (`Project::tree_scroll`), read off the live handle by every
+  path that moves `current_project` (`remember_tree_scroll`, beside
+  `remember_scroll`) and applied through `pending_tree_scroll` when the incoming
+  project's rows exist (`rebuild_tree_index` — a switch drops the snapshot, and
+  with it the index). Neither is a `file_positions` entry; see `docs/UI.md`.
 - **`h_flex()` centers on the cross axis**: `flex_row` + `items_center`, so a
   row that must hand a child the full height states `items_stretch()`
   (`docs/UI.md`).

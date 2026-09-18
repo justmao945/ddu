@@ -21,7 +21,16 @@ use crate::session::AgentCmd;
 /// (or `~/.config/ddu`) elsewhere. Env override `DDU_STATE_PATH` still
 /// names the state file directly (launcher/tests); `DDU_SETTINGS_PATH`
 /// does the same for settings.
+///
+/// A **test** build never resolves here: the suite drives
+/// `AppView::persist`, and a test writing the real `state.json` replaces
+/// the developer's own workspace (projects, selection, panel widths) with
+/// a test's — which the next launch then restores. Tests that *test* the
+/// path resolution set the env override, which still wins.
 fn data_dir() -> PathBuf {
+    if cfg!(test) {
+        return std::env::temp_dir().join("ddu-test-config");
+    }
     if cfg!(target_os = "macos") {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         return PathBuf::from(home).join("Library/Application Support/ddu");
@@ -242,6 +251,21 @@ pub struct ProjectConfig {
     /// respawn fresh.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<SavedSession>,
+    /// Directories expanded in the project's file tree. The tree is the
+    /// *project's* — one working tree, one repository — so it is stored
+    /// here and every session in it shares the expansion; only the
+    /// selected file is per session. The layer is lazy: everything else
+    /// is listed on demand.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tree_open: Vec<String>,
+    /// Sidebar splitter height for this project's file tree (px);
+    /// clamped to the layer's min/max on restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_height: Option<f32>,
+    /// Where the file tree was left scrolled (the layer's own offset,
+    /// negative y, px) — the project's, like its expansion and height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_scroll: Option<f32>,
 }
 
 /// One restored session row.
@@ -264,17 +288,10 @@ pub struct SavedSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<bool>,
     /// The file this session had selected in the diff tree (path;
-    /// re-pinned to an index on load).
+    /// re-pinned to an index on load). The session's own — the *tree*
+    /// (its expansion and height) is the project's, `ProjectConfig`'s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_file: Option<String>,
-    /// Directories expanded in this session's diff tree (the layer is
-    /// lazy: everything else is listed on demand).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub open_dirs: Vec<String>,
-    /// Sidebar splitter height for this session's diff tree (px);
-    /// clamped to the layer's min/max on restore.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tree_height: Option<f32>,
     /// Which surface this row's right pane was showing (`diff` / `file`
     /// / `file`; the pre-merge `preview` still parses as `file`); absent
     /// in files written before the view panel.
@@ -639,18 +656,27 @@ pub(crate) mod tests {
                 resume: Some("id-1".into()),
                 live: Some(true),
                 selected_file: None,
-                open_dirs: vec![],
-                tree_height: Some(260.),
                 view_mode: None,
-}],
+            }],
+            tree_open: vec!["src".into()],
+            tree_height: Some(260.),
+            tree_scroll: Some(-120.),
         }]);
         let saved = serde_json::to_string(&state).unwrap();
         let back: State = serde_json::from_str(&saved).unwrap();
         assert_eq!(back.window, state.window);
         assert_eq!(
-            back.projects.as_ref().unwrap()[0].sessions[0].tree_height,
+            back.projects.as_ref().unwrap()[0].tree_height,
             Some(260.)
         );
+        // The layer's place rides the same entry, for the same reason.
+        assert_eq!(
+            back.projects.as_ref().unwrap()[0].tree_scroll,
+            Some(-120.)
+        );
+        // The tree's expansion is the project's, so it rides the project
+        // entry — a session entry has no tree state of its own.
+        assert_eq!(back.projects.as_ref().unwrap()[0].tree_open, ["src"]);
         // Files from before this feature carry neither key.
         let old: State = serde_json::from_str(r#"{"projects": []}"#).unwrap();
         assert_eq!(old.window, None);
@@ -677,6 +703,30 @@ pub(crate) mod tests {
             "{ not json"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_test_build_never_opens_the_real_config_dir() {
+        // The suite drives `AppView::persist`: if the unset-override path
+        // resolved to the developer's own `~/.config/ddu`, a test run would
+        // leave its projects behind and the next launch would restore the
+        // test's workspace instead of theirs.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        assert!(
+            state_path().starts_with(std::env::temp_dir()),
+            "state.json resolved outside the scratch dir: {}",
+            state_path().display()
+        );
+        assert!(
+            settings_path().starts_with(std::env::temp_dir()),
+            "settings.json resolved outside the scratch dir: {}",
+            settings_path().display()
+        );
+        // The override still wins — that is how the tests above point both
+        // files at their own scratch dirs.
+        unsafe { std::env::set_var("DDU_STATE_PATH", "/tmp/ddu-path-override.json") };
+        assert_eq!(state_path(), PathBuf::from("/tmp/ddu-path-override.json"));
+        unsafe { std::env::remove_var("DDU_STATE_PATH") };
     }
 
     #[test]

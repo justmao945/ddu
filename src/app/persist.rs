@@ -8,13 +8,9 @@ impl AppView {
     /// global state snapshot and save to disk. Save errors are reported
     /// (notification or stderr) but never crash the app.
     pub(crate) fn persist(&mut self, cx: &mut App) {
-        // Sync the live diff state onto the current session's slot:
-        // selection and collapsed dirs are per-session (worktrees can
-        // differ), and this slot is what the snapshot serializes.
-        // The splitter's live height belongs to the session under it —
-        // read it before borrowing the session slot mutably.
-        let live_h = self.live_tree_height(cx);
-        // Read before the session slot is borrowed mutably.
+        // Sync the pane's own state onto the current session's slot: only
+        // the selected file and the mode are a session's (the file tree
+        // belongs to the project).
         let selected_path = self.current_diff_path().map(str::to_owned);
         let has_snapshot = self.snapshot.is_some();
         if let Some(s) = self
@@ -34,11 +30,25 @@ impl AppView {
             if selected_path.is_some() || has_snapshot {
                 s.diff_selected = selected_path;
             }
-            s.diff_open = self.diff_tree_open.clone();
             s.view_mode = Some(self.view_mode.as_str().to_owned());
-            // Hidden layer reports no live height — keep the stored one.
-            if let Some(h) = live_h {
-                s.diff_tree_height = Some(h);
+        }
+        // The tree's expansion lives on the project already (it is the
+        // project's), so only the layer height has to be written back —
+        // and only while the layer is on screen: a hidden one reports no
+        // live height, and the stored one must stay.
+        if let Some(h) = self.live_tree_height(cx) {
+            if let Some(project) = self.projects.get_mut(self.current_project) {
+                project.tree_height = Some(h);
+            }
+        }
+        // The layer's place is written back the same way — but never while
+        // a restore is still waiting for rows: a switch zeroes the handle,
+        // and the incoming project's place would be overwritten by that
+        // zero before it is ever applied (`pending_tree_scroll`).
+        if self.show_diff_tree && self.pending_tree_scroll.is_none() {
+            let offset = self.diff_tree_scroll.offset().y.as_f32();
+            if let Some(project) = self.projects.get_mut(self.current_project) {
+                project.tree_scroll = Some(offset);
             }
         }
         let snapshot = self.snapshot(cx);
@@ -75,6 +85,11 @@ impl AppView {
                     name: p.name.clone(),
                     path: p.path.clone(),
                     expanded: *ex,
+                    // The file tree is the project's, so its expansion and
+                    // layer height ride the project entry.
+                    tree_open: p.tree_open.iter().cloned().collect(),
+                    tree_height: p.tree_height,
+                    tree_scroll: p.tree_scroll,
                     // The whole session list survives the restart, with
                     // the rows that were still running marked `live` so
                     // the next launch spawns them again. An agent's id
@@ -103,8 +118,6 @@ impl AppView {
                             },
                             live: Some(s.status.is_running() || s.was_live),
                             selected_file: s.diff_selected.clone(),
-                            open_dirs: s.diff_open.iter().cloned().collect(),
-                            tree_height: s.diff_tree_height,
                             view_mode: s.view_mode.clone(),
                         })
                         .collect(),
@@ -149,11 +162,6 @@ impl AppView {
                 let now = std::time::Instant::now();
                 let cwd = self.projects[ix].path.clone();
                 let selected = s.selected_file.clone();
-                let open: std::collections::HashSet<String> =
-                    s.open_dirs.iter().cloned().collect();
-                let tree_height = s
-                    .tree_height
-                    .filter(|h| *h >= tree_min_h() && *h <= tree_max_h());
                 let (status, term) = if restores_running(&s, ix == current) {
                     let spec = match s.resume.as_deref() {
                         Some(id) if s.kind != "terminal" => cmd.resume_spec(&cwd, id),
@@ -189,13 +197,27 @@ impl AppView {
                         term,
                         cwd,
                         diff_selected: selected,
-                        diff_open: open,
-                        diff_tree_height: tree_height,
                         view_mode: s.view_mode.clone(),
                     });
             }
         }
         self.session_seq = seq;
+    }
+
+    /// Record where the current project's file tree is scrolled, from the
+    /// live handle. Called by every path that moves `current_project`,
+    /// next to [`AppView::remember_scroll`] for the pane: the offset on
+    /// the handle belongs to the project leaving the screen, and after
+    /// the move it is the incoming project's. A hidden layer reports
+    /// nothing, so its stored place stays.
+    pub(super) fn remember_tree_scroll(&mut self) {
+        if !self.show_diff_tree {
+            return;
+        }
+        let offset = self.diff_tree_scroll.offset().y.as_f32();
+        if let Some(project) = self.projects.get_mut(self.current_project) {
+            project.tree_scroll = Some(offset);
+        }
     }
 
     /// The splitter's live tree-layer height: `None` while the layer
@@ -274,8 +296,6 @@ mod tests {
             resume: resume.map(String::from),
             live: Some(live),
             selected_file: None,
-            open_dirs: vec![],
-            tree_height: None,
             view_mode: None,
 }
     }
@@ -345,10 +365,8 @@ mod tests {
             resume: Some(agent_id.into()),
             live: Some(false),
             selected_file: None,
-            open_dirs: vec![],
-            tree_height: None,
             view_mode: None,
-};
+        };
         // A shell in a project the window does NOT open on: the old
         // restore left those as `Done` rows, which is exactly the
         // "click Resume to start it" complaint.
@@ -358,10 +376,8 @@ mod tests {
             resume: None,
             live: Some(true),
             selected_file: None,
-            open_dirs: vec![],
-            tree_height: None,
             view_mode: None,
-};
+        };
         gpui::run_test_once(
             0,
             Box::new(move |dispatcher| {
@@ -385,12 +401,22 @@ mod tests {
                                 name: "ddu".into(),
                                 path: dir.clone(),
                                 expanded: true,
+                                tree_open: vec![],
+                                tree_height: None,
+                                // The launch's project carries its layer's
+                                // place into the first build.
+                                tree_scroll: Some(-96.),
                                 sessions: vec![finished_agent],
                             },
                             ProjectConfig {
                                 name: "other".into(),
                                 path: dir.clone(),
                                 expanded: true,
+                                tree_open: vec![],
+                                tree_height: None,
+                                // The layer's place comes back with the
+                                // project, like its expansion and height.
+                                tree_scroll: Some(-160.),
                                 sessions: vec![live_shell],
                             },
                         ]),
@@ -401,13 +427,20 @@ mod tests {
                 vcx.update(|window, cx| {
                     let _ = window.draw(cx);
                 });
-                let (dead, live) = vcx.update(|_, cx| {
+                let (dead, live, scroll) = vcx.update(|_, cx| {
                     let v = view.read(cx);
                     (
                         v.projects[0].sessions[0].clone(),
                         v.projects[1].sessions[0].clone(),
+                        v.projects[1].tree_scroll,
                     )
                 });
+                assert_eq!(scroll, Some(-160.), "the file tree's place survives the launch");
+                assert_eq!(
+                    vcx.update(|_, cx| view.read(cx).pending_tree_scroll),
+                    Some(gpui::px(-96.)),
+                    "the launch's file tree comes back where it was left"
+                );
                 assert!(live.term.is_some(), "the live shell comes back");
                 assert_eq!(live.status, AgentStatus::Running);
                 assert!(dead.term.is_none(), "the finished agent stays put");
@@ -462,10 +495,8 @@ mod tests {
             resume: None,
             live: Some(false),
             selected_file: None,
-            open_dirs: vec![],
-            tree_height: None,
             view_mode: None,
-};
+        };
         gpui::run_test_once(
             0,
             Box::new(move |dispatcher| {
@@ -486,6 +517,9 @@ mod tests {
                             name: "ddu".into(),
                             path: dir.clone(),
                             expanded: true,
+                            tree_open: vec![],
+                            tree_height: None,
+                            tree_scroll: None,
                             sessions: vec![done("first"), done("second"), done("third")],
                         }]),
                         ..Default::default()
