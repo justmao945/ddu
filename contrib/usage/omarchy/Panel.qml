@@ -233,8 +233,6 @@ Panel {
             width: parent.width
             spacing: Style.space(12)
 
-            readonly property var editingField: null
-
             Text {
               visible: root.lastError !== ""
               width: parent.width
@@ -416,7 +414,6 @@ Panel {
               Column {
                 required property string modelData
                 readonly property string pid: modelData
-                readonly property bool on: root.boolSetting(pid + "Enabled", true)
                 width: parent.width
                 spacing: Style.space(6)
 
@@ -450,11 +447,19 @@ Panel {
                     elide: Text.ElideRight
                   }
 
+                  // Never gated on `refreshing`. A fetch runs on every panel
+                  // open and takes seconds (each provider is its own request,
+                  // 15s timeout apiece), and a switch that goes inert for that
+                  // window reads as a dead control — hovering gives no cursor
+                  // change, clicking does nothing, and the click is dropped
+                  // rather than deferred. Nothing about a fetch needs the
+                  // setting frozen: the write is applied locally first, and a
+                  // toggle flipped mid-refresh is re-queued by
+                  // BarWidget.refresh() instead of being lost.
                   ToggleSwitch {
                     checked: root.boolSetting(pid + "Enabled", true)
                     foreground: root.foreground
                     accent: Color.accent
-                    interactive: !root.refreshing
                     onToggled: root.setEnabled(pid, !checked)
                   }
                 }

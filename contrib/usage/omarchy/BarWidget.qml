@@ -175,6 +175,12 @@ BarWidget {
     var entry = { id: root.moduleName }
     for (var k in settings) if (k !== "id" && k !== name) entry[k] = settings[k]
     entry[name] = value
+    // Applied locally first, like the clock's persistSettings: the switch
+    // throws on the click itself instead of waiting out a shell.json write
+    // and the re-injection that follows it, and a refresh() that runs before
+    // that round trip still builds its env from the new value. The write
+    // comes back through the bar as the same entry.
+    settings = entry
     bar.shell.updateEntryInline(root.moduleName, entry)
   }
   function setEnabled(id, on) {
