@@ -226,7 +226,7 @@ impl Render for AppView {
             // `SelectableText` runs register here). Must prepaint
             // before any of them — first child of the root.
             .child(TextSelectionLayer)
-            .child(ui::title_bar::bar(self))
+            .child(ui::title_bar::bar(self, cx))
             .child({
                 // Two nested splitters. The sidebar column owns a status
                 // strip, so the LEFT divider runs to the window's bottom

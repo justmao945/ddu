@@ -50,6 +50,13 @@ impl gpui::AssetSource for AppAssets {
             "icons/clipboard-paste.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/clipboard-paste.svg"
             )))),
+            // The Keys settings page. Not in the icon set's default
+            // list, so without this the page would render as an empty
+            // gap in the sidebar — a stock name outside that list is a
+            // *silent* blank, guarded by `icon_assets`' test below.
+            "icons/keyboard.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/keyboard.svg"
+            )))),
             _ => gpui_kit::assets::Assets.load(path),
         }
     }
@@ -110,7 +117,10 @@ fn main() {
     app.run(move |cx| {
         // Must be first, before using any component features.
         gpui_kit::init(cx);
-        let (config, state, warnings) = config::load_all();
+        let (config, state, mut warnings) = config::load_all();
+        // Unusable keyboard overrides (`settings.json`'s `keys` map) are
+        // load-time problems too: they are ignored rather than fatal.
+        warnings.extend(app::keys::validate_keys(&config));
         // Load-time problems (corrupt files, failed backups) go to
         // stderr: no GUI toast, so this is the durable channel.
         for w in &warnings {
@@ -154,17 +164,13 @@ fn main() {
         // route through the window's confirm dialog + graceful shutdown.
         cx.set_global(ExitHook(None));
 
-        // Application menu. The keymap binding for `Quit` (secondary-q)
-        // must exist before the menu is built — the menu item resolves
-        // its shortcut from the keymap — so it is registered at app
-        // level here. `OpenSettings` is too: `set_menus` runs before any
-        // window exists, so the per-window bindings in `AppView::new`
-        // are not yet in the keymap and the Settings item would lose
-        // its hint.
-        cx.bind_keys([
-            KeyBinding::new("secondary-q", app::Quit, None),
-            KeyBinding::new("secondary-,", app::OpenSettings, None),
-        ]);
+        // The app menu. `keys::install` binds the whole table — including
+        // Quit and OpenSettings, which used to live here because
+        // `set_menus` ran before any window existed and the per-window
+        // bindings were not in the keymap yet — plus the user's overrides,
+        // so a menu item resolves the chord actually in force. It has to
+        // run before `set_menus`, which reads the hints out of the keymap.
+        app::keys::install(cx);
         cx.set_menus([Menu::new("ddu").items(vec![
             MenuItem::action("Settings…", app::OpenSettings),
             MenuItem::separator(),
@@ -276,4 +282,39 @@ fn placement_visible(p: &config::WindowPlacement, cx: &gpui_kit::App) -> bool {
         let overlap_h = (b.min(dbt) - t.max(dt)).max(0.);
         overlap_w >= 100. && overlap_h >= 40.
     })
+}
+
+#[cfg(test)]
+mod icon_assets {
+    use super::AppAssets;
+    use crate::ui::AppIcon;
+    use gpui_kit::component::IconNamed as _;
+    use gpui_kit::gpui::AssetSource as _;
+
+    /// Every icon path the app hands to `Icon` must exist in the source
+    /// it loads through. `AppAssets` layers the app's own SVGs over
+    /// `gpui_kit::assets::Assets`, which carries the icon set's
+    /// *default* list only: a path that neither provides — the Keys
+    /// page shipped `icons/keyboard.svg` that way — resolves to
+    /// nothing, and the gap in the sidebar is the only symptom. Stock
+    /// icons therefore come from `gpui_kit::component::IconName` (the
+    /// default list, bound to exist), never from the full catalog's.
+    #[test]
+    fn every_app_icon_exists() {
+        for path in [
+            AppIcon::FolderPlus.path(),
+            AppIcon::Keyboard.path(),
+            AppIcon::FileCode.path(),
+            AppIcon::FileConfig.path(),
+            AppIcon::FileImage.path(),
+            AppIcon::FileArchive.path(),
+            AppIcon::FileLock.path(),
+            AppIcon::ClipboardPaste.path(),
+        ] {
+            assert!(
+                matches!(AppAssets.load(&path), Ok(Some(_))),
+                "{path} is not in the asset bundle: it would render as a blank gap"
+            );
+        }
+    }
 }

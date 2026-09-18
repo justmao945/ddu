@@ -117,6 +117,15 @@ pub struct Config {
     /// it. `None` = the stock 3000-line history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_scrollback: Option<usize>,
+    /// Keyboard overrides: `app::keys` command id -> chord, in gpui's
+    /// keystroke syntax (`"ctrl-shift-n"`, `"cmd-alt-c"`). A command
+    /// missing from the map runs on its builtin chords; one present runs
+    /// on the stored chord *instead* of them (see
+    /// [`crate::app::keys::apply_overrides`]). Entries the app cannot use
+    /// (unknown id, unparseable chord, no command modifier) are reported
+    /// at startup and ignored, never fatal.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub keys: std::collections::BTreeMap<String, String>,
 }
 
 /// Stock UI base size (px) — the root the panels' `text_sm`/`text_xs`
@@ -536,8 +545,32 @@ pub const BUILTIN_AGENTS: &[(&str, &str)] = &[
 ];
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Serializes the tests that point `DDU_SETTINGS_PATH`/
+    /// `DDU_STATE_PATH` at scratch files. The variables are process-wide,
+    /// so two tests setting them at once read each other's paths — one of
+    /// them then asserts against a file the other wrote.
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A keyboard override is a settings entry like any other: it has to
+    /// survive a save/load round trip, and an untouched install must not
+    /// grow a `keys` map at all.
+    #[test]
+    fn keyboard_overrides_round_trip() {
+        let fresh = serde_json::to_string(&Config::default()).unwrap();
+        assert!(!fresh.contains("keys"), "{fresh}");
+
+        let config = Config {
+            keys: [("new_session".to_string(), "ctrl-alt-j".to_string())].into(),
+            ..Config::default()
+        };
+        let saved = serde_json::to_string(&config).unwrap();
+        assert!(saved.contains(r#""new_session":"ctrl-alt-j""#), "{saved}");
+        let back: Config = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back, config);
+    }
 
     #[test]
     fn older_settings_load_with_light_theme() {
@@ -648,6 +681,7 @@ mod tests {
 
     #[test]
     fn missing_files_are_clean_defaults() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let dir = std::env::temp_dir().join(format!("ddu-cfg-miss-{}", unix_secs()));
         let state_path = dir.join("state.json");
         let settings_path = dir.join("settings.json");

@@ -296,6 +296,61 @@ half; the library's keymap is not visible from a unit test) and exercised end to
 end — type, `down`, `up`, Enter — in
 `app::diff::tests::quick_open_searches_the_working_tree_and_opens_the_hit`.
 
+## The Keys page's recorder
+
+The settings window's Keys page rebinds a shortcut by recording the next
+keystroke, and that cannot go through `on_key_down`: gpui resolves the keymap
+*before* key listeners, so pressing `⌘N` while recording would spawn a session
+instead of being recorded. The recorder is an app-level keystroke interceptor —
+`App::intercept_keystrokes`, which runs before action dispatch and can stop it
+(`App::stop_propagation`; `ui/settings/keys.rs::record`) — armed while a row is
+recording and gated on `window.focused(cx) == recorder handle`, so the keys of
+another window, or of a settings field the user clicked into, are not chords.
+The recorder element is focused when the row is clicked and **replaces** the
+chord button while it holds that focus (the button that was clicked cannot then
+fight it for focus on the same press), and a render-time check in
+`SettingsWindow::render` disarms a capture whose recorder lost focus — clicking
+anywhere else is a cancel, Escape is another. A refused chord keeps recording
+with the reason on the row's second line, so the next press is the next
+attempt.
+
+The rules live in `app::keys::captured`, not in the page: a chord must carry
+`⌃`, `⌥` or `⌘`/Super (a bare key would be swallowed from every text field and
+every PTY), and it must not be one another command or a reserved chord already
+holds (`chord_taken_by`, which skips the command being rebound and the reserved
+chords it already shares — close-session's `⌘W` is the settings window's too).
+The page only prints the answer.
+
+Applying one is **appended, never a rebuild**: gpui has no way to take a binding
+back out, but an `Unbind` added *after* a chord hides the earlier bindings for
+that action at that chord, so an override layer is the new chord plus an
+`Unbind` on every chord it replaces — the builtin ones and the ones the
+*previous* layer bound (`app::keys::apply_overrides`, which remembers them).
+An `Unbind` is permanent for the bindings *under* it, which is what makes a
+reset the harder half: putting a command back on a chord a layer retired is only
+possible by binding that chord *again*, later in the list — so a command a layer
+has touched is re-stated on the chord it runs on now, whether or not it is
+overridden. (Without that, one rebind followed by Reset left the builtin chord
+dead for the rest of the session; two rebinds had hidden it.) Pinned by
+`ui::settings::keys::tests::a_reset_puts_the_builtin_chord_back`.
+`app::keys::install` binds the builtin table exactly once per process
+(`AppView::new` can run again when a window is re-created, and a re-added
+builtin lands after the layer and out-ranks it — silently resurrecting a
+retired chord), then applies the overrides; `update_config` re-applies on every
+settings edit, a no-op while the `keys` map is unchanged. Pinned by
+`app::keys::tests::a_rebind_replaces_the_chord_it_moved_off` and
+`…::a_second_rebind_retires_the_first_layer`, and end to end (record, press,
+persist, dispatch) by
+`ui::settings::keys::tests::a_recorded_chord_is_stored_and_takes_the_command_over`.
+
+A row keeps the anatomy of `super::item` (title and control on one line, the
+text beneath) with one difference: the second line can carry the refusal reason
+or the broken-override reason, which is why it is not built through `item()`. It
+also passes `on_reset` (`is_dirty` = the command has a `keys` entry), which is
+what makes the page's "Reset All" appear while anything is customized, and a
+per-row reset sits beside the chord — always rendered, as an empty box when
+there is nothing to reset, so the column stays aligned.
+
 ## The quick open's palette
 
 ⌘P opens a **floating palette** over the workspace (`ui/palette.rs`), not a

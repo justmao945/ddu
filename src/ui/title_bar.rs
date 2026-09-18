@@ -69,7 +69,7 @@ pub(crate) fn render(
         .into_any_element()
 }
 
-pub(crate) fn bar(this: &AppView) -> impl IntoElement {
+pub(crate) fn bar(this: &AppView, cx: &App) -> impl IntoElement {
     TitleBar::new()
         // The breadcrumb is a cached view of its own: a title change
         // notifies it directly (see `AppView::subscribe_term`).
@@ -78,6 +78,6 @@ pub(crate) fn bar(this: &AppView) -> impl IntoElement {
             h_flex()
                 .items_center()
                 .px_2()
-                .child(super::settings::button()),
+                .child(super::settings::button(cx)),
         )
 }

@@ -164,6 +164,8 @@ pub(crate) fn meta_text(text: impl Into<SharedString>, cx: &App) -> Div {
 #[derive(Clone, Copy)]
 pub(crate) enum AppIcon {
     FolderPlus,
+    /// The Keys settings page.
+    Keyboard,
     FileCode,
     FileConfig,
     FileImage,
@@ -176,6 +178,7 @@ impl gpui_kit::component::IconNamed for AppIcon {
     fn path(self) -> SharedString {
         match self {
             AppIcon::FolderPlus => "icons/folder-plus.svg".into(),
+            AppIcon::Keyboard => "icons/keyboard.svg".into(),
             AppIcon::FileCode => "icons/file-code.svg".into(),
             AppIcon::FileConfig => "icons/file-config.svg".into(),
             AppIcon::FileImage => "icons/file-image.svg".into(),

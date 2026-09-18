@@ -140,7 +140,7 @@ fn field(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     } else {
         format!("{}/{}", search.current.min(total - 1) + 1, total).into()
     };
-    let chord = crate::app::accel_hint("G");
+    let chord = crate::app::accel_hint(crate::app::keys::FILE_SEARCH, cx);
 
     h_flex()
         .id("file-search-field")

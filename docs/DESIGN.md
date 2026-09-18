@@ -276,7 +276,8 @@ struct AgentCmd { program: String, args: Vec<String> }
 
 * Settings `settings.json` — one-to-one with the Settings window: default new-session
   launcher, login shell, terminal font family/size, scrollback cap, light/dark
-  theme. No `config.toml` ever existed.
+  theme, and the keyboard overrides (`keys`: `app::keys` command id → chord, the
+  Keys page's own state). No `config.toml` ever existed.
 * State `state.json` — the runtime workspace snapshot: projects with their session
   rows (including `resume_id` and the per-row `live` flag), the active
   project/session, panel visibility and widths, per-session diff selection
@@ -289,6 +290,20 @@ struct AgentCmd { program: String, args: Vec<String> }
   `DDU_SETTINGS_PATH` name them directly. Load checks each file: a corrupt one is
   backed up as `<name>.corrupt-<ts>` and defaults are used. Writes go to a sibling
   temp file and are renamed over the target.
+* **Shortcuts are one table, and the user owns their chords.** `app/keys.rs`
+  holds every shortcut as a `Command`: a stable id (the key in `settings.json`'s
+  `keys` map), the settings row it renders as, and the builtin chords that
+  dispatch it. The settings window's Keys page records a replacement chord per
+  command (see `UI.md`), and the override replaces *all* of a command's builtin
+  chords — it is appended to the keymap as the new chord plus an `Unbind` on each
+  chord it retires (and a re-statement of the chord a touched command runs on
+  now, since an `Unbind` would otherwise outlive the layer that added it and a
+  reset could never put the builtin chord back), because gpui has no way to
+  remove a binding and gpui-component's own bindings share the same keymap. A chord needs ⌃, ⌥ or
+  ⌘/Super and may not be one another command holds; unusable entries in the file
+  are reported at startup and ignored, never fatal. Every tooltip, tab and menu
+  hint reads the command's *current* chord through `accel_hint(id, cx)`, so a
+  rebind moves the labels with it.
 * Shortcuts, all `secondary-` (⌘ on macOS, ⌃ elsewhere): ⌘N new session, ⌘O add
   project, ⌘1…⌘9 select the Nth session, ⌘T toggle the diff file tree, ⌘B toggle
   the sidebar, ⌘R toggle the changes pane, ⌘P find a file (the floating

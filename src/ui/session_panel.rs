@@ -143,9 +143,12 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let quick_tooltip: SharedString = format!(
         "New {} ({})",
         cfg.label_for(&cfg.new_session.kind),
-        crate::app::accel_hint("N")
+        crate::app::accel_hint(crate::app::keys::NEW_SESSION, cx)
     )
     .into();
+    // The empty-workspace line prints the same chord, but its closure runs
+    // after `cx` has moved into the row builder below.
+    let add_project_hint = crate::app::accel_hint(crate::app::keys::ADD_PROJECT, cx);
     v_flex()
         .id("project-tree")
         .flex_1()
@@ -277,15 +280,14 @@ fn tree(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                 })
         }))
         // Empty workspace (every project removed): say how to add one.
-        .when(this.projects.is_empty(), |el| {
+        .when(this.projects.is_empty(), move |el| {
             el.child(
                 div()
                     .p_2()
                     .text_xs()
                     .text_color(fg.opacity(0.35))
                     .child(format!(
-                        "No projects — add one with {} or the folder button below.",
-                        crate::app::accel_hint("O")
+                        "No projects — add one with {add_project_hint} or the folder button below."
                     )),
             )
         })
@@ -380,10 +382,10 @@ fn session_row(
                     .ghost()
                     .xsmall()
                     .tab_stop(false)
-                    .tooltip(format!("Close session ({})", crate::app::accel_hint("W")))
+                    .tooltip(format!("Close session ({})", crate::app::accel_hint(crate::app::keys::CLOSE_SESSION, cx)))
                     .accessibility_label(format!(
                         "Close session ({})",
-                        crate::app::accel_hint("W")
+                        crate::app::accel_hint(crate::app::keys::CLOSE_SESSION, cx)
                     ))
                     // Stop the mouse-down so the row's own click
                     // synthesis never sees this press (see quick-add).

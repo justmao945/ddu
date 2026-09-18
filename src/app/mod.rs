@@ -27,7 +27,6 @@ use crate::ui;
 use crate::ui::diff_panel::ViewMode;
 use crate::ui::file_tree::{tree_max_h, tree_min_h};
 pub(crate) use keys::accel_hint;
-use keys::key_bindings;
 
 // Global keyboard actions: new session, dock toggles, close session.
 gpui_kit::actions!(
@@ -90,7 +89,7 @@ const DIFF_POLL_SECS: u64 = 3;
 const LABEL_TICK_CAP: Duration = Duration::from_secs(60);
 
 mod diff;
-mod keys;
+pub(crate) mod keys;
 mod pane;
 mod panels;
 mod persist;
@@ -313,11 +312,11 @@ pub(crate) fn window_min_height() -> f32 {
 
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // Global shortcuts: secondary+N new session, +B sessions, +T
-        // file tree, +R changes, +W close (⌘ on macOS, ⌃ elsewhere).
-        // (OpenSettings lives at app level in main.rs so the Settings
-        // menu item can resolve its hint.)
-        cx.bind_keys(key_bindings());
+        // Global shortcuts, and the user's overrides on top of them
+        // (`keys::install` binds the builtin table once per process — a
+        // window can be re-created from the dock — then applies whatever
+        // `settings.json`'s `keys` map says).
+        keys::install(cx);
 
         let cfg = cx.global::<crate::config::Config>().clone();
         let state = cx.global::<crate::config::State>().clone();

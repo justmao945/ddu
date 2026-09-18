@@ -16,7 +16,7 @@
 - **The file, not just the diff** — the changes pane shows the whole file with the diff tinted in place (and `@@` hunks a keystroke away), syntax-highlighted per row for c/c++, Java, HTML, CSS, JS/JSX, TS/TSX, Rust, Go, Python, Swift, shell and JSON. Markdown renders as a document (images included); an image file is drawn as one. A thin overview strip beside the rows marks every added and removed run and shows where the viewport sits — click a mark to jump to that change — and each file reopens where you left it.
 - **The whole working tree, findable** — the sidebar lists every file (git's ignore rules respected, changed files carrying their `+/−` figures), sorted case-insensitively, and `⌘P`/`Ctrl+P` opens a floating quick open over the workspace: type a fragment like `difpan`, step the ranked hits with the arrows, and Enter opens the file with its ancestors expanded in the tree.
 - **Session lifecycle** — spawn, kill, and restart sessions; a run that finishes or fails is reported on its own row (status and duration). ddu keeps each session's conversation id, so an agent chat can be resumed later — the forms are in [Agent sessions](#agent-sessions) — and the sessions that were still running when you quit come back running, agents resumed from that id.
-- **Settings window** — theme, shell, and terminal font, in a dedicated window (`⌘,` / `Ctrl+,`).
+- **Settings window** — theme, shell, terminal font, and every shortcut: the Keys page records a new chord for any command (the app's own chords, the terminal's keys and the search bars' stepping stay reserved).
 - **Persistent workspace** — projects, panel layout, and per-project diff state survive relaunches (`~/Library/Application Support/ddu/` on macOS, `~/.config/ddu/` on Linux), and every session that was still running is started again.
 
 ## Agent sessions
@@ -46,7 +46,7 @@ REPL, a build — belongs in a terminal session.
 
 ## Keyboard shortcuts
 
-Every shortcut uses the platform's primary modifier: `⌘` on macOS, `Ctrl` on Linux. Copy, paste and find are the exception — a terminal shares those keys with the shell it runs, so on Linux they move to `Ctrl+Shift` (`Ctrl+C` stays SIGINT).
+These are the defaults; Settings → Keys rebinds any of them (a shortcut shown on a row is the chord that is in force, and the tooltips follow). Every shortcut uses the platform's primary modifier: `⌘` on macOS, `Ctrl` on Linux. Copy, paste and find are the exception — a terminal shares those keys with the shell it runs, so on Linux they move to `Ctrl+Shift` (`Ctrl+C` stays SIGINT).
 
 | Action | macOS | Linux |
 | --- | --- | --- |

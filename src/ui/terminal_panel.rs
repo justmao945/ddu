@@ -665,7 +665,7 @@ fn empty_state(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .child(if no_projects {
             format!(
                 "No projects — press {} to add one",
-                crate::app::accel_hint("O")
+                crate::app::accel_hint(crate::app::keys::ADD_PROJECT, cx)
             )
         } else if error.is_some() {
             "Unable to start session".to_string()

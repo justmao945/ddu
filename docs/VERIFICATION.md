@@ -104,11 +104,21 @@ the PTY path without touching the UI.
 Pixels and synthesized input do work here when needed:
 
 - `grim -g "<x>,<y> <w>x<h>" out.png` captures a window (geometry from
-  `hyprctl clients -j`).
+  `hyprctl clients -j`). Those numbers are **logical**: paste them verbatim and
+  expect a scaled PNG (×1.5 here) — physical-pixel maths crops the wrong
+  region, usually onto the wallpaper.
 - On Hyprland 0.56 `hyprctl dispatch` wraps its arguments in Lua — bare tokens
-  fail (`attempt to call a nil value`). Drive input with `wtype` instead, and
-  send a chord with explicit press/release: `wtype -M ctrl -P comma -p comma -m
-  ctrl` opens Settings (`⌃,`); the `-k` form did not deliver the chord.
+  fail (`attempt to call a nil value`; `hyprctl keyword` refuses outright:
+  "can't work with non-legacy parsers"). The object form works:
+  `hyprctl dispatch 'hl.dsp.focus({ window = "0x…" })'`, and
+  `hl.dsp.window.close({ window = "0x…" })` closes one window exactly. A
+  second instance's window does **not** take focus by opening it, and a new
+  window on an inactive workspace never does — check
+  `hyprctl activewindow -j` before typing, because a stray chord lands in
+  whatever *is* active (⌃, in the wrong instance opens *its* settings window).
+- Drive input with `wtype`, and send a chord with explicit press/release:
+  `wtype -M ctrl -P comma -p comma -m ctrl` opens Settings (`⌃,`); the `-k`
+  form did not deliver the chord.
 - Launch a supervised instance with `hub start` (never a detached `&`/`nohup`),
   passing `DDU_DIR` / `DDU_STATE_PATH` / `DDU_SETTINGS_PATH` in its env, and
   stop it with `hub stop`.

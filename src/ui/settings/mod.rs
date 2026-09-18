@@ -15,10 +15,11 @@ use gpui_kit::*;
 
 mod shell;
 mod theme;
+pub(super) mod keys;
 
 // Re-exports for the submodules' `super::` paths (they render brand
 // icons and tints from the ui root).
-pub(super) use crate::ui::{agent_icon, agent_menu_row, agent_tint};
+pub(super) use crate::ui::{agent_icon, agent_menu_row, agent_tint, AppIcon};
 
 /// Width shared by every select-style control (theme, default session,
 /// shell program) so the three read as one right-aligned column.
@@ -76,18 +77,58 @@ impl Global for SettingsWindowSlot {}
 /// main workspace picks changes up live.
 pub(crate) struct SettingsWindow {
     focus: FocusHandle,
+    /// The shortcut recorder, while a Keys row is capturing a chord (see
+    /// [`keys`]).
+    capture: Option<keys::Capture>,
 }
 
 impl SettingsWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle().tab_stop(false);
         focus.focus(window, cx);
-        Self { focus }
+        Self {
+            focus,
+            capture: None,
+        }
+    }
+
+    /// Arm the shortcut recorder for a command: the next chord pressed in
+    /// this window becomes its shortcut (see [`keys::record`]).
+    fn record(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.entity().downgrade();
+        self.capture = Some(keys::record(view, id, window, cx));
+        cx.notify();
+    }
+
+    /// Stop recording — a chord landed, the user pressed escape, or the
+    /// recorder lost focus.
+    fn disarm(&mut self, cx: &mut Context<Self>) {
+        if self.capture.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Keep recording, but say why the last keystroke was refused.
+    fn refuse(&mut self, reason: String, cx: &mut Context<Self>) {
+        if let Some(capture) = &mut self.capture {
+            capture.error = Some(reason);
+            cx.notify();
+        }
     }
 }
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A recorder that lost the window's focus — the user clicked into
+        // another field, or another window came forward — is no longer
+        // what the next keystroke is for; stop watching.
+        if self
+            .capture
+            .as_ref()
+            .is_some_and(|capture| !capture.focus.is_focused(window))
+        {
+            self.capture = None;
+        }
         div()
             .size_full()
             .bg(cx.theme().background)
@@ -120,6 +161,15 @@ impl Render for SettingsWindow {
                                     .item(default_session_item()),
                             )
                     )
+                    .page({
+                        let view = cx.entity().downgrade();
+                        let recording = self.capture.as_ref().map(|capture| keys::Recording {
+                            id: capture.id,
+                            focus: &capture.focus,
+                            error: capture.error.as_deref(),
+                        });
+                        keys::page(recording, view, cx)
+                    })
                     .page(
                         SettingPage::new("Terminal")
                             .header_style(&page_header_style())
@@ -150,14 +200,14 @@ impl Render for SettingsWindow {
 }
 
 /// Title-bar gear button that opens the settings window.
-pub(crate) fn button() -> impl IntoElement {
+pub(crate) fn button(cx: &App) -> impl IntoElement {
     Button::new("open-settings")
         .icon(IconName::Settings)
         .ghost()
         .small()
         .tab_stop(false)
-        .tooltip(format!("Settings ({})", crate::app::accel_hint(",")))
-        .accessibility_label(format!("Settings ({})", crate::app::accel_hint(",")))
+        .tooltip(format!("Settings ({})", crate::app::accel_hint(crate::app::keys::OPEN_SETTINGS, cx)))
+        .accessibility_label(format!("Settings ({})", crate::app::accel_hint(crate::app::keys::OPEN_SETTINGS, cx)))
         .on_click(|_, _, cx| open(cx))
 }
 
@@ -235,6 +285,10 @@ pub(super) fn update_config(f: impl FnOnce(&mut crate::config::Config, &mut App)
     if let Err(err) = snapshot.save() {
         crate::config::report_error(err, cx);
     }
+    // A keyboard override is a config edit too, and the keymap is not
+    // rebuilt from the config on its own (`app::keys` appends a layer —
+    // a no-op when the `keys` map did not change).
+    crate::app::keys::apply_overrides(cx);
     cx.refresh_windows();
 }
 

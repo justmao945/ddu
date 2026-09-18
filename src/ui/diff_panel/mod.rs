@@ -158,7 +158,7 @@ fn mode_button(this: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         ),
         _ => (IconName::Replace, "Show the diff".to_string()),
     };
-    let hint = format!("{label} ({})", crate::app::accel_hint("M"));
+    let hint = format!("{label} ({})", crate::app::accel_hint(crate::app::keys::TOGGLE_VIEW_MODE, cx));
     // The Button itself takes no debug selector (its interactivity is
     // applied to an inner element), so the box carries it for tests.
     div()

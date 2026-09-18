@@ -33,10 +33,10 @@ pub(crate) fn render_sidebar(this: &AppView, cx: &mut Context<AppView>) -> impl 
                     .ghost()
                     .small()
                     .tab_stop(false)
-                    .tooltip(format!("Add project ({})", crate::app::accel_hint("O")))
+                    .tooltip(format!("Add project ({})", crate::app::accel_hint(crate::app::keys::ADD_PROJECT, cx)))
                     .accessibility_label(format!(
                         "Add project ({})",
-                        crate::app::accel_hint("O")
+                        crate::app::accel_hint(crate::app::keys::ADD_PROJECT, cx)
                     ))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.add_project(window, cx);
@@ -70,8 +70,8 @@ fn toggle_sessions(this: &AppView, cx: &mut Context<AppView>) -> Button {
         })
         .ghost()
         .small()
-        .tooltip(format!("Toggle sidebar ({})", crate::app::accel_hint("B")))
-        .accessibility_label(format!("Toggle sidebar ({})", crate::app::accel_hint("B")))
+        .tooltip(format!("Toggle sidebar ({})", crate::app::accel_hint(crate::app::keys::TOGGLE_SESSIONS, cx)))
+        .accessibility_label(format!("Toggle sidebar ({})", crate::app::accel_hint(crate::app::keys::TOGGLE_SESSIONS, cx)))
         .on_click(cx.listener(|this, _, _, cx| this.toggle_sessions(cx)))
 }
 
@@ -85,8 +85,8 @@ fn toggle_diff(this: &AppView, cx: &mut Context<AppView>) -> Button {
         })
         .ghost()
         .small()
-        .tooltip(format!("Toggle changes ({})", crate::app::accel_hint("R")))
-        .accessibility_label(format!("Toggle changes ({})", crate::app::accel_hint("R")))
+        .tooltip(format!("Toggle changes ({})", crate::app::accel_hint(crate::app::keys::TOGGLE_DIFF, cx)))
+        .accessibility_label(format!("Toggle changes ({})", crate::app::accel_hint(crate::app::keys::TOGGLE_DIFF, cx)))
         .on_click(cx.listener(|this, _, window, cx| this.toggle_diff(window, cx)))
 }
 
@@ -101,7 +101,7 @@ fn toggle_diff_tree(this: &AppView, cx: &mut Context<AppView>) -> Button {
         })
         .ghost()
         .small()
-        .tooltip(format!("Toggle file tree ({})", crate::app::accel_hint("T")))
-        .accessibility_label(format!("Toggle file tree ({})", crate::app::accel_hint("T")))
+        .tooltip(format!("Toggle file tree ({})", crate::app::accel_hint(crate::app::keys::TOGGLE_DIFF_TREE, cx)))
+        .accessibility_label(format!("Toggle file tree ({})", crate::app::accel_hint(crate::app::keys::TOGGLE_DIFF_TREE, cx)))
         .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_tree(cx)))
 }

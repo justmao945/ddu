@@ -28,7 +28,8 @@ editing, and where the long form lives.
 - `src/main.rs` — entry, window creation, `AppAssets` (brand SVGs layered over
   the gpui-kit icon set).
 - `src/app/` — `mod.rs` `AppView` (the shared state + the actions macro + the
-  app's own accessors), `keys.rs` (the binding table + accel labels), `render.rs`
+  app's own accessors), `keys.rs` (the binding table + accel labels + the
+  `Command` table the settings window rebinds), `render.rs`
   (the Render impl: shell layout, action handlers, splitter healing),
   `pane.rs` (the right pane's surface/mode, its file-view + preview caches and
   the per-file scroll memory),
@@ -67,7 +68,8 @@ editing, and where the long form lives.
   `body.rs` + `find_bar.rs`), `file_tree/` (`mod.rs` rows + `index.rs` the tree
   model), `status_bar`, `title_bar`), `palette.rs` (the quick open's floating overlay —
   scrim + card over the workspace, never inside a panel), `settings/`
-  (standalone window), `markdown.rs`
+  (standalone window: `mod.rs` the shipped pages + `update_config`, `keys.rs` the
+  shortcut recorder), `markdown.rs`
   (the image plugin a rendered document goes through: gpui's own text view sends
   every `![]()`/`<img>` to the *http* client, which cannot read a path, so the
   block holding an image is rendered here through `img(Resource::Path)`), and
@@ -99,6 +101,15 @@ editing, and where the long form lives.
   is anonymous (`docs/RUNNING.md`).
 - **One GPUI surface**: `use gpui_kit::*;` plus specific component modules.
   Never invent gpui APIs — follow the gpui-kit/gpui-component sources.
+- **An icon must exist in the asset bundle**: `AppAssets` layers this repo's
+  `assets/icons/*.svg` over `gpui_kit::assets::Assets`, which carries the icon
+  set's *default* list only, so a path neither source provides renders as an
+  empty gap — silently, with no error anywhere (the Keys page shipped
+  `icons/keyboard.svg` that way). A new glyph is vendored into `assets/icons/`
+  (Lucide, ISC, with the provenance comment) plus a case in `AppAssets::load`;
+  a stock name comes from `gpui_kit::component::IconName` (generated from the
+  default list), never from the full catalog's. Pinned by
+  `icon_assets::every_app_icon_exists` in `main.rs`.
 - **Scroll regions**: the `.vertical_scrollbar(...)` host must be an un-padded
   `v_flex` ancestor, never the tracked element (`docs/UI.md`).
 - **Cached panels**: a panel's subtree replays until notified, so keep the
@@ -213,6 +224,15 @@ editing, and where the long form lives.
   right-click selects its row first, so the menu and the chord always act on
   the same file
   (`docs/UI.md`).
+- **Shortcuts are one table, and overrides are appended**: every rebindable
+  shortcut is a `Command` in `src/app/keys.rs` (id = the `settings.json` `keys`
+  key, the settings row, the builtin chords); the Keys page records a chord into
+  that map, and `keys::apply_overrides` adds the new chord plus an `Unbind` on
+  every chord it retires. Never `clear_key_bindings` — gpui-component's own
+  bindings live in the same keymap — and never re-bind the builtin table on a
+  later window (it would land *after* the override layer and out-rank it);
+  `keys::install` is once per process. Hints print the current chord through
+  `accel_hint(id, cx)`, so a rebind moves the tooltips and menu labels with it.
 - **Modal dialogs**: pickers go through `rfd::AsyncFileDialog` deferred with
   `window.spawn`; confirm dialogs use `ui::dialog_footer(...)`, never a
   hand-rolled `DialogFooter` pair (`docs/UI.md`).
