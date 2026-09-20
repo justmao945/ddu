@@ -91,12 +91,26 @@ below it and never the ones above (`ddu-diff` is a leaf beside the chain).
 ## Build / run
 
 - Linux: `scripts/linux.sh run` (build `--release` + run, workspace = `$DDU_DIR`
-  or this repo; the build is CPU-capped through `DDU_BUILD_CPU_QUOTA`) and
+  or this repo; the build is CPU-capped through `scripts/capped.sh`) and
   `scripts/linux.sh install`. Details: `docs/RUNNING.md`.
 - macOS: `scripts/dev.sh` / `scripts/install.sh` — the only launch paths.
+- **On Linux, every `cargo` build, test and check goes through
+  `scripts/capped.sh`** — `scripts/capped.sh cargo test -p ddu-app`,
+  `scripts/capped.sh cargo check`, anything else CPU-heavy. A bare `cargo`
+  cannot be limited from the outside: `[build] jobs` counts rustc *processes*
+  and misses the LLVM thread pool inside one crate, so a single build pins
+  every core (measured 7.62 of 8 bare, 4.01 capped). The wrapper runs the
+  command in a systemd user scope at half the machine's cores
+  (`DDU_BUILD_CPU_QUOTA=400%` / `off`) **and** serializes it through an
+  `flock`: one wrapped command at a time per user, so N agents in N terminals
+  cannot add up to N quotas — the rest wait their turn and are told they are
+  waiting. Scope and lock both end with the command (the app `run` execs is
+  outside them); a host with no systemd user session (macOS, a container)
+  runs uncapped.
 - `cargo test` — the whole workspace; `-p ddu-app` (or `ddu-core`, `ddu-diff`,
   `ddu-terminal`, `ddu`) restricts it to one crate's suite, which is also the
-  quickest way to compile just that layer.
+  quickest way to compile just that layer. On Linux wrap it as above:
+  `scripts/capped.sh cargo test -p ddu-app`.
 
 ## Rules
 

@@ -27,16 +27,27 @@ lands, delete the section and `cargo update -p gpui-kit`.
   into the hicolor theme and writes `~/.local/share/applications/ddu.desktop`
   with `Path=` set to the launch directory (a desktop launch would otherwise
   start in `$HOME`).
-- **The build is CPU-capped**: both paths build inside a systemd user scope
-  carrying a `CPUQuota`, because a release build otherwise pins every core for
-  the whole compile and the desktop stops answering. The cap is a cgroup
-  property, so it covers the per-crate LLVM thread pools that `cargo -j` (a
-  count of rustc *processes*) cannot, and it ends with the build — the app
-  `run` execs afterwards is outside it. Default: every core but two, which
-  scales with the machine and measured 5.96 of 8 cores against 7.62 uncapped
-  on a rebuilt crate. `DDU_BUILD_CPU_QUOTA` overrides it with a systemd
-  percentage (`400%`, the suffix is required) or `off`; a host with no
-  systemd user session falls back to an uncapped build and says so.
+- **Builds and tests are CPU-capped, and queued**: `scripts/capped.sh` is the
+  wrapper every `cargo` build/test/check goes through on Linux (`AGENTS.md`);
+  both `linux.sh` paths build with it, and it takes any command
+  (`scripts/capped.sh cargo test -p ddu-core`). A release build otherwise pins
+  every core for the whole compile and the desktop stops answering, and the
+  cap is a cgroup property, so it covers the per-crate LLVM thread pools that
+  `cargo -j` (a count of rustc *processes*) cannot. Default: half the machine's
+  cores (`nproc` × 50, so 8 cores build under `CPUQuota=400%`) — measured 4.01
+  of 8 cores against 7.62 uncapped on a rebuilt crate, and 4.00 across a
+  `cargo test -p ddu-core`. `DDU_BUILD_CPU_QUOTA` overrides it with a systemd
+  percentage (`600%`, the suffix is required) or `off`.
+- **The queue**: a quota is per command, so three agents building in three
+  terminals would take three halves of the machine and pin it anyway. The
+  wrapper therefore also takes a per-user `flock`
+  (`$XDG_RUNTIME_DIR/ddu-build.lock`) and waits its turn, saying so on stderr.
+  The lock lives in the file description, so it dies with the last process
+  holding it — a killed build cannot wedge the queue — and a nested call
+  inherits `DDU_CAPPED_LOCKED=1`, so it never queues behind its own parent.
+  Scope and lock both end with the command: the app `run` execs afterwards is
+  outside them. A host with no systemd user session (macOS, a container) runs
+  uncapped.
 - **Window identity**: every `WindowOptions` opens with
   `config::window_app_id()` — on Linux the Wayland `app_id` / X11 `WM_CLASS`
   `ddu`, which must equal the desktop entry's basename (`ddu.desktop`) for the

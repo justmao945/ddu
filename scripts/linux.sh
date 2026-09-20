@@ -11,15 +11,22 @@
 #                              plus a desktop entry (menu launcher)
 #
 # DDU_INSTALL_DIR overrides the install prefix, DDU_DIR the workspace
-# root the app opens on. Nothing here touches the macOS bundle flow —
-# a Linux machine has no target/ddu-dev.app to keep in sync.
+# root the app opens on; DDU_BUILD_CPU_QUOTA caps the build's CPU (see
+# scripts/capped.sh). Nothing here touches the macOS bundle flow — a
+# Linux machine has no target/ddu-dev.app to keep in sync.
+#
+# The release build goes through scripts/capped.sh, i.e. a systemd user
+# scope carrying a CPUQuota (half the machine's cores by default,
+# DDU_BUILD_CPU_QUOTA overrides it): a build that pins every core makes
+# the desktop unusable, and the scope dies with the build — the app
+# `run` execs afterwards is not throttled.
 set -e
 
 SCRIPTS=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$SCRIPTS/.." && pwd)
 BIN="$ROOT/target/release/ddu"
 
-cargo build --release --manifest-path "$ROOT/Cargo.toml"
+"$SCRIPTS/capped.sh" cargo build --release --manifest-path "$ROOT/Cargo.toml"
 
 case "${1:-run}" in
     run)
