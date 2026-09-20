@@ -22,7 +22,7 @@ report lands on whichever test happens to be running when the wake arrives:
 Detected activity on thread Some("ddu-pty-read") … but test scheduler is
 running on Some("<some other test>"). Your test is not deterministic.
 assertion `left == right` failed: local task dropped by a thread that didn't
-spawn it. Task spawned at src/terminal/session.rs:…
+spawn it. Task spawned at crates/ddu-terminal/src/session.rs:…
 ```
 
 then the runnable is dropped on the pump's thread, a destructor panics during
@@ -42,8 +42,13 @@ Two rules keep it out, both in the code rather than in a convention:
   the executor's per-test `allow_parking()` — upstream's escape hatch for "a
   mix of deterministic and non-deterministic async behavior, such as when
   interacting with I/O in an otherwise deterministic test". Being per-test it
-  weakens no other test's checks, which is why the `#[cfg(test)]` call sits
-  there instead of at each call site.
+  weakens no other test's checks, which is why the call sits there instead of
+  at each call site. It is compiled under
+  `#[cfg(any(test, feature = "test-support"))]`: a PTY test in *another* crate
+  (ddu-app drives one) builds `ddu-terminal` as a dependency, where `cfg(test)`
+  is off, so `ddu-app`'s dev-dependencies turn that feature on. The same gate
+  covers `inject_bytes` and `kill_and_join` — a new test-only helper on the
+  terminal needs it, or the dependent crate cannot see the helper.
 
 The forwarder task and its trailing flush timer are **held, not detached**
 (`TermSession::pump_task`, and the `flush_task` local in `session.rs`): a

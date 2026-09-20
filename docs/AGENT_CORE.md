@@ -364,13 +364,13 @@ The attention surface is new and required: in this model an agent can message
 
 ### 10.3 Code touch points
 
-- `src/session.rs` — `AgentSession` / `AgentCmd` / `AgentStatus`. Target: a
+- `crates/ddu-core/src/session.rs` — `AgentSession` / `AgentCmd` / `AgentStatus`. Target: a
   `Session` enum with today's `Pty` arm and a new `Chat` arm bound to a
   `Conversation`. `AgentCmd` presets remain the spawn recipe for the `Pty` arm.
-- `src/terminal/` — `PtySpawn` / `TermSession`, unchanged, now only one arm.
-- `src/app/mod.rs` — `AppView`, actions, global shortcuts (`⌘T`, `⌘N`, `⌘O`, …);
-  `src/app/persist.rs` — the `state.json` snapshot this design extends.
-- `src/ui/` — new `conversation_panel`, `transcript`, `roster`, `composer`,
+- `crates/ddu-terminal/src/` — `PtySpawn` / `TermSession`, unchanged, now only one arm.
+- `crates/ddu-app/src/app/mod.rs` — `AppView`, actions, global shortcuts (`⌘T`, `⌘N`, `⌘O`, …);
+  `crates/ddu-app/src/app/persist.rs` — the `state.json` snapshot this design extends.
+- `crates/ddu-app/src/ui/` — new `conversation_panel`, `transcript`, `roster`, `composer`,
   `inspector`; existing `session_panel`, `terminal`, `diff_panel` evolve.
 
 ## 11. Risks

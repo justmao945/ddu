@@ -1,0 +1,26 @@
+[package]
+name = "ddu-app"
+description = "The shell: AppView state, the frame and every panel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+rfd.workspace = true
+
+ddu-core.workspace = true
+ddu-diff.workspace = true
+ddu-terminal.workspace = true
+
+[dev-dependencies]
+# Enables gpui's TestAppContext/run_test_once for the headless app tests
+# (panel caches, terminal IME regression); feature-unifies only into test
+# builds.
+gpui-kit = { workspace = true, features = ["test-support"] }
+# The terminal's own test-only surface (`inject_bytes`, `kill_and_join`,
+# the spawn-time `allow_parking`): this crate's tests drive PTYs, so the
+# helpers must exist in the dependency build too.
+ddu-terminal = { workspace = true, features = ["test-support"] }

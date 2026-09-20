@@ -8,7 +8,7 @@
 > **Landed (2026-09-13, `DESIGN.md` §7/§12):** §4.1's **index union** — the
 > sidebar lists the whole working tree (tracked + untracked, `.gitignore`
 > respected), with the default-collapse rule
-> (`src/diff/file_view.rs`); the pane's **whole-file** surface with the `⌘⇧M` /
+> (`crates/ddu-diff/src/file_view.rs`); the pane's **whole-file** surface with the `⌘⇧M` /
 > far-right icon-button switch (per session, persisted); the file tree itself is
 > the **project's** (one working tree, one expansion — a session remembers only
 > the file it has open); and the virtualization
@@ -27,10 +27,10 @@
 > carries no number) where §5.2 drew two; a file nobody changed renders as the
 > file itself rather than an empty hunks pane; and **images** — an image file,
 > and `![](…)`/`<img>` inside a rendered document — draw through
-> `src/ui/markdown.rs` instead of going to the http client that cannot read a
+> `crates/ddu-app/src/ui/markdown.rs` instead of going to the http client that cannot read a
 > path. Syntax highlighting comes with it (§8.4, all-MIT grammars, parsed on
 > the same background pass): a `.rs`/`.py`/… file colors per row through
-> `src/ui/code_text.rs`.
+> `crates/ddu-app/src/ui/code_text.rs`.
 > **Not landed:** worktrees (§8), and Diff mode's hunks stay uncolored (they
 > are fragments with no offsets into the file). Caps came out at
 > `MAX_VIEW_BYTES` 8 MiB / `MAX_VIEW_LINES` 200 000 (not the 1 MiB / 5 000
@@ -77,21 +77,21 @@
 
 | Layer | Where | Shape |
 | --- | --- | --- |
-| Model | `src/diff/mod.rs` | `GitDiff { branch, files }`, `DiffFile { path, added, removed, hunks, lines_total, truncated }`, `DiffLine { kind: ' ' \| '+' \| '-', old_no, new_no, text }`, `DiffFile::rows()` (= `Header`/`Line` walk), `match_rows`, `MAX_LINES_PER_FILE = 5000`, `SEARCH_MAX_MATCHES = 500` |
-| Query | `src/diff/git.rs::head_diff` | `Repository::discover` → `diff_tree_to_workdir_with_index(head_tree, opts)` with `include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true)`; per-file line cap |
-| Flow | `src/app/diff.rs` | 3 s poll (`DIFF_POLL_SECS`, `src/app/mod.rs`), `reload_diff` + `diff_seq` stale guard, `apply_diff` re-pins the selection **by path** through `diff_seed_path`, `DiffSearch` (⌘F) match list = child-row indices |
-| Tree UI | `src/ui/file_tree/` | `TreeNode { files, dirs }` built in `render` from `&[DiffFile]`; `tree_stats` rollup; `flatten` → `TreeRow::{File,Dir}`; `guides(depth)` stripes; `dir_row`/`file_row`; collapse set = "present in `diff_tree_closed` means collapsed" (all-open default); `plus_minus`; `tree_{default,min,max}_h()` (scale-aware) |
-| Pane UI | `src/ui/diff_panel/` | `panel_view!` → cached child view; `header` (path + `+a/−b`), `body` (scroll container whose **direct children are the rows**, `row_box(el, w, h)`), `diff_line` (one number gutter measured per file by `gutter_width()`, numbering the file as it is now + a sign column (`LINE_CHROME_EXTRAS`), green/red 0.12 tints, yellow search tints 0.30/0.13, `SelectableText` per line), `measure_content_width` (top 16 lines shaped exactly), `hunk_header`, `find_bar` |
-| State | `src/app/mod.rs` | `snapshot`, `diff_error`, `diff_seed_path`, `diff_tree_scroll`, `diff_hunks_scroll`, `pending_scroll`, `pending_tree_scroll`, `file_positions`, `documents`, `sidebar_split_state`, `show_diff_tree`, `diff_tree_height_seed`, `diff_search`, `diff_pane: Entity<...PanelView>` |
-| Mount | `src/app/mod.rs:1041`, `src/ui/session_panel.rs:118-130` | `diff_pane.cached(diff_panel::root_style())`; the tree layer is the sidebar's lower splitter slot, `.visible(show_diff_tree)` |
-| Persist | `src/config.rs`, `src/app/persist.rs` | per **session**: `selected_file: Option<String>`, `view_mode: Option<String>`; per **project**: `tree_open: Vec<String>`, `tree_height: Option<f32>`, `tree_scroll: Option<f32>` — the tree is the project's; `live_tree_height` reads splitter slot 1 |
-| Cache contract | `src/ui/mod.rs` `panel_view!`, `AppView::notify_panels` | stream frames notify the terminal pane alone; every other `cx.notify()` fans out to all panels — pinned by `panel_cache_tests` |
+| Model | `crates/ddu-diff/src/mod.rs` | `GitDiff { branch, files }`, `DiffFile { path, added, removed, hunks, lines_total, truncated }`, `DiffLine { kind: ' ' \| '+' \| '-', old_no, new_no, text }`, `DiffFile::rows()` (= `Header`/`Line` walk), `match_rows`, `MAX_LINES_PER_FILE = 5000`, `SEARCH_MAX_MATCHES = 500` |
+| Query | `crates/ddu-diff/src/git.rs::head_diff` | `Repository::discover` → `diff_tree_to_workdir_with_index(head_tree, opts)` with `include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true)`; per-file line cap |
+| Flow | `crates/ddu-app/src/app/diff.rs` | 3 s poll (`DIFF_POLL_SECS`, `crates/ddu-app/src/app/mod.rs`), `reload_diff` + `diff_seq` stale guard, `apply_diff` re-pins the selection **by path** through `diff_seed_path`, `DiffSearch` (⌘F) match list = child-row indices |
+| Tree UI | `crates/ddu-app/src/ui/file_tree/` | `TreeNode { files, dirs }` built in `render` from `&[DiffFile]`; `tree_stats` rollup; `flatten` → `TreeRow::{File,Dir}`; `guides(depth)` stripes; `dir_row`/`file_row`; collapse set = "present in `diff_tree_closed` means collapsed" (all-open default); `plus_minus`; `tree_{default,min,max}_h()` (scale-aware) |
+| Pane UI | `crates/ddu-app/src/ui/diff_panel/` | `panel_view!` → cached child view; `header` (path + `+a/−b`), `body` (scroll container whose **direct children are the rows**, `row_box(el, w, h)`), `diff_line` (one number gutter measured per file by `gutter_width()`, numbering the file as it is now + a sign column (`LINE_CHROME_EXTRAS`), green/red 0.12 tints, yellow search tints 0.30/0.13, `SelectableText` per line), `measure_content_width` (top 16 lines shaped exactly), `hunk_header`, `find_bar` |
+| State | `crates/ddu-app/src/app/mod.rs` | `snapshot`, `diff_error`, `diff_seed_path`, `diff_tree_scroll`, `diff_hunks_scroll`, `pending_scroll`, `pending_tree_scroll`, `file_positions`, `documents`, `sidebar_split_state`, `show_diff_tree`, `diff_tree_height_seed`, `diff_search`, `diff_pane: Entity<...PanelView>` |
+| Mount | `crates/ddu-app/src/app/mod.rs:1041`, `crates/ddu-app/src/ui/session_panel.rs:118-130` | `diff_pane.cached(diff_panel::root_style())`; the tree layer is the sidebar's lower splitter slot, `.visible(show_diff_tree)` |
+| Persist | `crates/ddu-core/src/config.rs`, `crates/ddu-app/src/app/persist.rs` | per **session**: `selected_file: Option<String>`, `view_mode: Option<String>`; per **project**: `tree_open: Vec<String>`, `tree_height: Option<f32>`, `tree_scroll: Option<f32>` — the tree is the project's; `live_tree_height` reads splitter slot 1 |
+| Cache contract | `crates/ddu-app/src/ui/mod.rs` `panel_view!`, `AppView::notify_panels` | stream frames notify the terminal pane alone; every other `cx.notify()` fans out to all panels — pinned by `panel_cache_tests` |
 
 Two facts drive the whole design:
 
 * `DiffFile::rows()` order **is** the pane's child order — `match_rows` indices,
   `scroll_to_item`, and the drag-selection `document_order` all ride on it
-  (`src/diff/mod.rs`, `src/app/diff.rs::file_rows` comment). Any new row
+  (`crates/ddu-diff/src/mod.rs`, `crates/ddu-app/src/app/diff.rs::file_rows` comment). Any new row
   stream must keep that identity.
 * The tree is built **inside `render`** today. Fine for a handful of changed
   files, fatal for a 100k-file repository — the build has to move to the
@@ -117,7 +117,7 @@ Two facts drive the whole design:
 Replace `head_diff(path) -> GitDiff` with:
 
 ```rust
-// src/diff/git.rs
+// crates/ddu-diff/src/git.rs
 pub struct Snapshot {
     pub branch: Option<String>,
     pub diff: GitDiff,              // unchanged shape: hunks + per-file stats
@@ -131,7 +131,7 @@ pub fn snapshot(path: &Path) -> anyhow::Result<Snapshot>;
 background thread), not a `Vec<String>` re-split on every render:
 
 ```rust
-// src/diff/listing.rs (new)
+// crates/ddu-diff/src/listing.rs (new)
 pub struct TreeEntry { pub path: String, pub kind: EntryKind, pub added: usize, pub removed: usize }
 pub enum EntryKind { Clean, Added, Modified, Deleted, Renamed, Untracked }
 pub struct TreeNode { pub entries: Vec<(usize, TreeEntry)>, pub dirs: Vec<(String, TreeNode)> }
@@ -156,7 +156,7 @@ Cost: one index read (in-memory) plus the status work the poll already does;
 the tree build is O(n) string splitting on a background thread. Acceptance on a
 100k-file repository: **< 50 ms** for `snapshot`, never on the UI thread.
 
-### 4.2 View rows (`src/diff/file_view.rs`, new)
+### 4.2 View rows (`crates/ddu-diff/src/file_view.rs`, new)
 
 The pane's row stream becomes mode-independent, so search, scrolling and the
 child-index contract survive all three modes:
@@ -272,7 +272,7 @@ the layer's cost is the visible tree, not the repository.
   `document_order`, `' '` rows untinted, `+`/`-` rows tinted 0.12. `Missing` /
   `Binary` / `TooLarge` fall back to Diff mode with the existing notice style
   (`empty()` / `hunk_header` band).
-* **Images.** `src/ui/markdown.rs` takes over the *block* holding an image (a
+* **Images.** `crates/ddu-app/src/ui/markdown.rs` takes over the *block* holding an image (a
   paragraph, or a raw HTML block with `<img>`) and renders it here: the prose
   through the same Markdown view, the picture through `img(PathBuf)`
   (`Resource::Path`), resolved against the document's own directory. Without it
@@ -293,7 +293,7 @@ the layer's cost is the visible tree, not the repository.
   for `md`/`markdown`/`mdx`. The find bar has no match API over a rendered
   document, so ⌘F over one switches to Diff, whose rows it can match.
 * Keyboard: ⌘⇧M toggles Diff ⇄ File (bound in `key_bindings()`,
-  `src/app/mod.rs`), and the header's far-right icon button is the same toggle;
+  `crates/ddu-app/src/app/mod.rs`), and the header's far-right icon button is the same toggle;
   ⇧⌘F toggles the tree filter. Both get a routing assertion in the existing
   key-binding test.
 * Cached-panel discipline is preserved: mode changes mutate `AppView` and
@@ -367,11 +367,11 @@ no longer holds a list to look it up in.
 
 | Phase | Files | Work |
 | --- | --- | --- |
-| P1 data | `src/diff/git.rs`, `src/diff/listing.rs` (new), `src/diff/mod.rs` | `snapshot()` = diff + index union + prebuilt `FileTree`; `Snapshot`/`TreeEntry`/`EntryKind`; hermetic tests (§9) |
-| P2 tree UI | `src/ui/file_tree/`, `src/app/mod.rs`, `src/app/diff.rs` | flatten the prebuilt tree; badges; filter strip ⇧⌘F; default-collapse seeding; selection re-pin against the full tree |
-| P3 view | `src/diff/file_view.rs` (new), `src/ui/diff_panel/`, `src/app/diff.rs` | `build_view`, the mode switch + ⌘⇧M, whole-file rows, `match_rows` over the merged rows, find bar scoping, `file_view` cache |
-| P4 preview | `src/ui/diff_panel/` | `TextView::markdown` path, the Markdown gate on File mode, empty-state fallbacks |
-| P5 cleanup | `AGENTS.md`, `docs/DESIGN.md`, `src/diff/mod.rs` | source map + §7/§8 rewritten; delete what the cutover obsoletes (`build_tree`/`tree_stats` in the UI layer, any Diff-mode-only helper, stale comments about "changed files only") |
+| P1 data | `crates/ddu-diff/src/git.rs`, `crates/ddu-diff/src/listing.rs` (new), `crates/ddu-diff/src/mod.rs` | `snapshot()` = diff + index union + prebuilt `FileTree`; `Snapshot`/`TreeEntry`/`EntryKind`; hermetic tests (§9) |
+| P2 tree UI | `crates/ddu-app/src/ui/file_tree/`, `crates/ddu-app/src/app/mod.rs`, `crates/ddu-app/src/app/diff.rs` | flatten the prebuilt tree; badges; filter strip ⇧⌘F; default-collapse seeding; selection re-pin against the full tree |
+| P3 view | `crates/ddu-diff/src/file_view.rs` (new), `crates/ddu-app/src/ui/diff_panel/`, `crates/ddu-app/src/app/diff.rs` | `build_view`, the mode switch + ⌘⇧M, whole-file rows, `match_rows` over the merged rows, find bar scoping, `file_view` cache |
+| P4 preview | `crates/ddu-app/src/ui/diff_panel/` | `TextView::markdown` path, the Markdown gate on File mode, empty-state fallbacks |
+| P5 cleanup | `AGENTS.md`, `docs/DESIGN.md`, `crates/ddu-diff/src/mod.rs` | source map + §7/§8 rewritten; delete what the cutover obsoletes (`build_tree`/`tree_stats` in the UI layer, any Diff-mode-only helper, stale comments about "changed files only") |
 
 ### 8.4 Syntax highlighting — landed for the whole-file surface
 
@@ -380,7 +380,7 @@ file's rope + language to style ranges (`.update(None, &rope, None)` then
 `.styles(&row_range, theme)`), and `TextFileView` holds the parse next to the
 rows, so a render never parses. What the sketch did not foresee:
 
-* The extension decides the grammar (`language_of` in `src/diff/file_view.rs`), and
+* The extension decides the grammar (`language_of` in `crates/ddu-diff/src/file_view.rs`), and
   the parse rides the **same background pass** as the rows: `FileView::build`
   already reads the file off the UI thread, so a 1 MiB parse costs the pane
   nothing. Past `MAX_HIGHLIGHT_BYTES` the file is listed uncolored rather than
@@ -390,7 +390,7 @@ rows, so a render never parses. What the sketch did not foresee:
   own runs. So the highlight follows the merge: a deletion is never colored,
   and the offsets survive CRLF.
 * `SelectableText` cannot take runs (it lays out the runs it built from its own
-  text), so `src/ui/code_text.rs` mirrors it with caller-supplied runs — the
+  text), so `crates/ddu-app/src/ui/code_text.rs` mirrors it with caller-supplied runs — the
   element the pane's rows already were, with color. Window selection and the
   drag-copy path are unchanged (`document_order` per row).
 * Enabled grammars: c, cpp, java, html, css, javascript/jsx, typescript, tsx,
@@ -401,7 +401,7 @@ rows, so a render never parses. What the sketch did not foresee:
 
 ## 9. Verification
 
-* `cargo test`, extending the existing hermetic style (`src/diff/git.rs` tests use
+* `cargo test`, extending the existing hermetic style (`crates/ddu-diff/src/git.rs` tests use
   a temp repo built with `RepositoryInitOptions`):
   * `listing::tests::list_dir_reads_the_directory_as_the_filesystem_has_it` —
     the listing is the filesystem's: `.gitignore` is not read (`target/` and
@@ -449,9 +449,9 @@ rows, so a render never parses. What the sketch did not foresee:
 | Row-index contract breaks (search jumps to the wrong row, drag selection copies garbage) | The merged row stream reuses `rows()`'s definitional identity; a test pins indices against rendered child order (as `match_rows` already does) |
 | Deletion anchoring subtleties in the merge (EOF deletions, multiple delete runs) | Explicit algorithm step + tests for each shape |
 | Markdown re-parse per frame | Stable element id + gpui element-state cache, `TextViewState` as the documented fallback; the pane is a cached child view, so parsing only happens on notify |
-| Markdown images (README screenshots) | Landed as a block plugin (`src/ui/markdown.rs`): local paths resolve to `Resource::Path`, remote URLs keep gpui's loader, a missing local file shows its alt text |
+| Markdown images (README screenshots) | Landed as a block plugin (`crates/ddu-app/src/ui/markdown.rs`): local paths resolve to `Resource::Path`, remote URLs keep gpui's loader, a missing local file shows its alt text |
 | Selection/persistence drift (`selected_file` was diff-only) | Re-pin against the full tree in `apply_diff`; `tree_filter`/`view_mode` default when absent |
-| Grammar features pulled in for highlighting | Landed (§8.4): one feature per language in `Cargo.toml`, all MIT; the parse rides the existing background read |
+| Grammar features pulled in for highlighting | Landed (§8.4): one feature per language on `ddu-diff`'s `gpui-kit` dependency (`crates/ddu-diff/Cargo.toml`), all MIT; the parse rides the existing background read |
 
 ## 11. Decisions taken (open to challenge)
 

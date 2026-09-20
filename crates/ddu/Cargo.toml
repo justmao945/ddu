@@ -1,0 +1,13 @@
+[package]
+name = "ddu"
+description = "Day Day Up — workspace for AI coding agents: sessions, terminal, live git diff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+
+ddu-app.workspace = true
+ddu-core.workspace = true

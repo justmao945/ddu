@@ -1,0 +1,930 @@
+//! Terminal grid: an `alacritty_terminal::Term` behind a `FairMutex`,
+//! plus the two pump threads that drive it — a reader that parses PTY
+//! bytes into the grid and a waiter that reports the exit status.
+
+use std::io::Read;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
+
+use alacritty_terminal::event::{Event, EventListener};
+
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+use parking_lot::Mutex;
+use portable_pty::Child;
+
+use super::TermMatch;
+use super::pty::{PtyProcess, PtySpawn, PtyWriter};
+
+/// Minimum spacing between reader-thread wakeups while output flows.
+/// The PTY can return a few bytes per `read`, and a wakeup per read
+/// would ping the UI task at MHz rates under a flood; this caps the
+/// ping at ~60 Hz. Spacing is enforced on the reader (see
+/// [`spawn_pump`]) so the pump's own repaint throttle still has
+/// headroom, and the poll deadline there guarantees a trailing wakeup
+/// for the tail chunk.
+const READER_WAKE_MIN: Duration = Duration::from_millis(16);
+
+/// Block until `fd` is readable or `timeout` lapses (None = forever).
+/// `Closed` covers EBADF (the master can be dropped before the child
+/// dies on session teardown — the reader must exit, not spin) and any
+/// other hard error. EINTR retries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollOutcome {
+    Readable,
+    NotReady,
+    Closed,
+}
+
+#[cfg(unix)]
+fn poll_readable(fd: i32, timeout: Option<Duration>) -> PollOutcome {
+    use rustix::event::{PollFd, PollFlags, poll};
+    use rustix::fd::BorrowedFd;
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    let mut fds = [PollFd::new(&borrowed, PollFlags::IN)];
+    let millis = timeout.map_or(-1, |t| t.as_millis().min(i32::MAX as u128) as i32);
+    loop {
+        match poll(&mut fds, millis) {
+            Ok(0) => return PollOutcome::NotReady,
+            Ok(_) => return PollOutcome::Readable,
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(rustix::io::Errno::BADF) => return PollOutcome::Closed,
+            Err(_) => return PollOutcome::Closed,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn poll_readable(_fd: i32, _timeout: Option<Duration>) -> PollOutcome {
+    PollOutcome::Readable
+}
+
+/// Messages from the pump threads to the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PumpMsg {
+    /// Grid or meta changed; the UI should re-render. Sent through a
+    /// capacity-1 channel so bursts coalesce into at most one pending
+    /// wakeup.
+    Wakeup,
+    /// Child exited. `i32` is the raw exit code (`-1` when wait failed).
+    Exit(i32),
+}
+
+/// Escape-sequence metadata extracted from the stream (window title).
+#[derive(Default)]
+pub struct TermMeta {
+    pub title: Option<String>,
+}
+
+/// Rolling capture of the last ~64 KiB of PTY bytes, utf-8 repaired at
+/// read time. The waiter thread extracts an agent's resume id from it
+/// when the child exits.
+pub struct RecentOutput {
+    buf: Mutex<Vec<u8>>,
+    cap: usize,
+}
+
+impl RecentOutput {
+    fn new(cap: usize) -> Self {
+        Self {
+            buf: Mutex::new(Vec::with_capacity(cap)),
+            cap,
+        }
+    }
+
+    fn push(&self, bytes: &[u8]) {
+        let mut buf = self.buf.lock();
+        buf.extend_from_slice(bytes);
+        if buf.len() > self.cap {
+            let excess = self.cap.min(buf.len() - (self.cap / 2));
+            buf.drain(..excess);
+        }
+    }
+
+    /// Best-effort utf-8 text of the captured tail.
+    pub fn tail(&self) -> String {
+        let buf = self.buf.lock();
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+}
+
+/// Agent-specific resume id extraction, matching the formats agents
+/// print in their banner/exit footer:
+/// - `session id: 01a075df-…` / `Session ID: 01a075df-…` (codex, claude)
+/// - `claude --resume 65e901cd-…` / `Resume this session with omp
+///   --resume 01a075e2-…` (the shell snippets agents print on exit)
+/// Scans lines newest first; ignores lines whose id token is pure
+/// digits (a "session id: 42" counter, not a suite id).
+pub fn extract_resume_id(text: &str) -> Option<String> {
+    for line in text.lines().rev() {
+        let lower = line.to_ascii_lowercase();
+        // Form 1: `session id: <id>` / `Session ID: <id>` /
+        // `session_id=<id>`.
+        if let Some(pos) = lower.find("session") {
+            let mut rest = lower[pos + "session".len()..].trim_start();
+            let prefixes = ["id", "_id", "-id"];
+            let mut matched = None;
+            for p in prefixes {
+                if let Some(after) = rest.strip_prefix(p) {
+                    rest = after.trim_start_matches([' ', ':', '=', '_', '-']);
+                    matched = Some(());
+                    break;
+                }
+            }
+            if matched.is_some() {
+                if let Some(id) = take_id(rest, false) {
+                    return Some(id);
+                }
+            }
+        }
+        // Form 2: `claude --resume <id>`, `omp -r <id>` /
+        // `resume this session with omp --resume <id>` /
+        // `codex resume <id>`.
+        // Scan every occurrence: a line may contain both a prose
+        // "Resume this session…" and the actual snippet.
+        let mut search_from = 0;
+        while let Some(pos) = lower[search_from..].find("resume") {
+            let abs = search_from + pos;
+            let rest = lower[abs + "resume".len()..].trim_start();
+            // `strict` marks the flag-less form below.
+            let (after_flag, strict) = match rest.strip_prefix("--") {
+                Some(r) => (
+                    r.strip_prefix("resume").or_else(|| r.strip_prefix("continue")),
+                    false,
+                ),
+                None => match rest.strip_prefix("-r") {
+                    Some(r) => (Some(r), false),
+                    None => {
+                        // `codex resume <id>` — the id follows with no
+                        // flag at all. Prose reads the same way ("you
+                        // can resume functions later"), so this form
+                        // only takes the hyphenated id shape every
+                        // agent prints, never a bare English word.
+                        let bare = rest
+                            .starts_with(|c: char| c.is_ascii_alphanumeric())
+                            .then_some(rest);
+                        (bare, true)
+                    }
+                },
+            };
+            if let Some(after) = after_flag {
+                let after = after.trim_start_matches([' ', ':', '=', '-']);
+                if let Some(id) = take_id(after, strict) {
+                    return Some(id);
+                }
+            }
+            search_from = abs + "resume".len();
+        }
+    }
+    None
+}
+
+/// Consume an id-like token at the start of `rest`. `strict` demands
+/// the hyphenated shape agents actually print over a mere word: the
+/// flag-less `codex resume <id>` form reads exactly like prose ("you
+/// can resume functions later"), so it must not take an English word.
+fn take_id(rest: &str, strict: bool) -> Option<String> {
+    let id: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let id = id.replace('_', "");
+    // UUIDs and slugs: at least 8 chars, not all digits (a line
+    // like "session id: 42" is a counter, not a session); the strict
+    // form additionally wants the hyphen and a digit every id carries.
+    let shaped = !strict || (id.contains('-') && id.contains(|c: char| c.is_ascii_digit()));
+    if shaped && id.len() >= 8 && id.chars().any(|c| !c.is_ascii_digit()) {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+/// Event sink installed into the `Term`. Query responses (`PtyWrite`)
+/// are routed back to the PTY; everything user-visible becomes a
+/// coalesced wakeup.
+#[derive(Clone)]
+pub struct EventProxy {
+    writer: PtyWriter,
+    wake: async_channel::Sender<PumpMsg>,
+    meta: Arc<Mutex<TermMeta>>,
+    fg: Arc<AtomicU32>,
+    bg: Arc<AtomicU32>,
+}
+
+impl EventProxy {
+    fn wake(&self) {
+        // Dropping when the channel is full IS the coalescing.
+        let _ = self.wake.try_send(PumpMsg::Wakeup);
+    }
+}
+
+impl EventListener for EventProxy {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::ColorRequest(index, format) => {
+                let (fg, bg) = (self.fg.load(Ordering::Relaxed), self.bg.load(Ordering::Relaxed));
+                if let Some(color) = super::palette::query_rgb(index, super::palette::DefaultColors { fg, bg }) {
+                    self.writer.write(format(color).as_bytes());
+                }
+            }
+            Event::PtyWrite(text) => self.writer.write(text.as_bytes()),
+            Event::Title(title) => {
+                self.meta.lock().title = Some(title);
+                self.wake();
+            }
+            Event::ResetTitle => {
+                self.meta.lock().title = None;
+                self.wake();
+            }
+            Event::Wakeup | Event::Bell | Event::MouseCursorDirty | Event::CursorBlinkingChange => {
+                self.wake()
+            }
+            // Cell-size (CSI 14t/18t) and clipboard (OSC 52) queries are
+            // not answered yet; agent CLIs do not depend on them.
+            _ => {}
+        }
+    }
+}
+
+/// Column/row count handed to `Term::new`/`Term::resize`.
+#[derive(Clone, Copy)]
+struct GridDims {
+    cols: u16,
+    rows: u16,
+}
+
+impl Dimensions for GridDims {
+    fn columns(&self) -> usize {
+        self.cols as usize
+    }
+    fn screen_lines(&self) -> usize {
+        self.rows as usize
+    }
+    fn total_lines(&self) -> usize {
+        self.rows as usize
+    }
+}
+
+/// The default colors a test grid starts with (the real ones come from
+/// the theme — see [`super::palette::DefaultColors`]).
+#[cfg(test)]
+fn test_colors() -> super::palette::DefaultColors {
+    super::palette::DefaultColors {
+        fg: 0xab_b2_bf,
+        bg: 0x28_2c_34,
+    }
+}
+
+/// The whole terminal: grid data model + escape-sequence parser feed
+/// point + input writer. Shared between the UI thread (render, input,
+/// resize) and the pump thread (parse).
+pub struct TermGrid {
+    pub term: Arc<FairMutex<Term<EventProxy>>>,
+    pub meta: Arc<Mutex<TermMeta>>,
+    pub writer: PtyWriter,
+    /// The theme's default foreground/background, shared with the pump
+    /// thread so an OSC 10/11/12 reply names the color the palette paints
+    /// (see `set_default_colors`).
+    pub fg: Arc<AtomicU32>,
+    pub bg: Arc<AtomicU32>,
+    /// Rolling tail of raw PTY output (resume-id extraction at exit).
+    pub recent: Arc<RecentOutput>,
+    /// Only a test needs to plant bytes itself (see `inject_bytes`): the
+    /// reader thread and the alacritty proxy each own their own sender.
+    #[cfg(any(test, feature = "test-support"))]
+    wake: async_channel::Sender<PumpMsg>,
+    cols: u16,
+    rows: u16,
+}
+
+impl TermGrid {
+    pub fn new(
+        cols: u16,
+        rows: u16,
+        writer: PtyWriter,
+        wake: async_channel::Sender<PumpMsg>,
+        scrollback: usize,
+        colors: super::palette::DefaultColors,
+    ) -> Self {
+        let meta = Arc::new(Mutex::new(TermMeta::default()));
+        let fg = Arc::new(AtomicU32::new(colors.fg));
+        let bg = Arc::new(AtomicU32::new(colors.bg));
+        let recent = Arc::new(RecentOutput::new(64 * 1024));
+        let proxy = EventProxy {
+            writer: writer.clone(),
+            wake: wake.clone(),
+            meta: meta.clone(),
+            fg: fg.clone(),
+            bg: bg.clone(),
+        };
+        let term = Arc::new(FairMutex::new(Term::new(
+            Config {
+                scrolling_history: scrollback,
+                ..Config::default()
+            },
+            &GridDims { cols, rows },
+            proxy,
+        )));
+        Self {
+            term,
+            meta,
+            writer,
+            fg,
+            bg,
+            recent,
+            #[cfg(any(test, feature = "test-support"))]
+            wake,
+            cols,
+            rows,
+        }
+    }
+
+    /// The theme's default foreground/background, from the UI thread (the
+    /// paint path builds its palette from the same theme, and the pump
+    /// thread answers OSC 10/11/12 from these).
+    pub fn set_default_colors(&self, colors: super::palette::DefaultColors) {
+        self.fg.store(colors.fg, Ordering::Relaxed);
+        self.bg.store(colors.bg, Ordering::Relaxed);
+    }
+
+    pub fn size(&self) -> (u16, u16) {
+        (self.cols, self.rows)
+    }
+
+    /// Resize the grid model. The PTY master must be resized separately
+    /// (see [`super::TermSession::resize`]) so both stay in lockstep.
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        if cols == self.cols && rows == self.rows {
+            return;
+        }
+        self.term.lock().resize(GridDims { cols, rows });
+        self.cols = cols;
+        self.rows = rows;
+    }
+
+    /// Send raw bytes to the child (keystrokes, paste).
+    pub fn write(&self, bytes: &[u8]) {
+        self.writer.write(bytes);
+    }
+
+    /// Scroll the viewport by `lines` (positive = towards history).
+    pub fn scroll(&self, lines: i32) {
+        self.term.lock().scroll_display(Scroll::Delta(lines));
+    }
+
+    /// Jump to the live bottom of the scrollback.
+    pub fn scroll_to_bottom(&self) {
+        self.term.lock().scroll_display(Scroll::Bottom);
+    }
+
+    /// Feed raw bytes through the escape parser into the grid — the
+    /// same path PTY output takes. Tests use it to plant content without
+    /// writing to the child (a PTY write would reach an agent CLI as a
+    /// prompt).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn inject_bytes(&self, bytes: &[u8]) {
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        let mut term = self.term.lock();
+        for &byte in bytes {
+            parser.advance(&mut *term, byte);
+        }
+        // The reader thread wakes the pump after each chunk; planted
+        // content must do the same or the UI never learns about it.
+        let _ = self.wake.try_send(PumpMsg::Wakeup);
+    }
+}
+
+/// Case-insensitive substring scan of the whole grid (history +
+/// screen), newest lines first, capped at `cap` hits. Line indices are
+/// absolute (negative = history, same convention as `cell_at`), so
+/// hits stay valid as output scrolls; each hit carries a half-open
+/// cell-column range usable directly for highlight rects. Wide-char
+/// spacer cells count as one column of `buf` so string offsets stay
+/// 1:1 with grid columns; case folding is ASCII-only so offsets can
+/// never drift from the text.
+pub fn search_grid(
+    term: &FairMutex<Term<EventProxy>>,
+    query: &str,
+    cap: usize,
+) -> Vec<TermMatch> {
+    let mut hits = Vec::new();
+    let query = query.trim();
+    if query.is_empty() || cap == 0 {
+        return hits;
+    }
+    let needle = query.to_ascii_lowercase();
+    let term = term.lock();
+    let grid = term.grid();
+    let cols = grid.columns();
+    let history = grid.history_size() as i32;
+    let screen = grid.screen_lines() as i32;
+    let mut buf = String::with_capacity(cols);
+    // Newest first: the find bar almost always targets recent output,
+    // and the cap then keeps huge scrollbacks flat-out cheap.
+    for line in (-history..screen).rev() {
+        let row = &grid[Line(line)];
+        buf.clear();
+        for col in 0..cols {
+            let cell = &row[Column(col)];
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    buf.push(' ');
+                    continue;
+                }
+            buf.push(if cell.c == '\0' { ' ' } else { cell.c });
+        }
+        let lower = buf.to_ascii_lowercase();
+        let mut from = 0;
+        while let Some(rel) = lower[from..].find(&needle) {
+            let start = from + rel;
+            hits.push(TermMatch {
+                line,
+                start,
+                end: start + needle.len(),
+            });
+            if hits.len() >= cap {
+                hits.reverse();
+                return hits;
+            }
+            from = start + needle.len().max(1);
+        }
+    }
+    hits.reverse();
+    hits
+}
+
+/// How long the waiter keeps offering the child's exit code to a full
+/// channel before dropping it (see the waiter thread in [`spawn_pump`]).
+/// A live forwarder drains within one frame; this only has to outlast a
+/// repaint throttle, and give up on a session that was torn down.
+const EXIT_SEND_PATIENCE: Duration = Duration::from_millis(1500);
+
+/// The pump threads' handles, for a caller that has to *prove* they are
+/// gone (see [`PumpThreads::join`]).
+///
+/// Only a test reads them: production drops the handles, which detaches
+/// the threads — exactly the lifecycle a bare `spawn` had before they
+/// were returned — so a non-test build has no reader for either field.
+#[allow(dead_code)]
+pub struct PumpThreads {
+    reader: std::thread::JoinHandle<()>,
+    waiter: std::thread::JoinHandle<()>,
+}
+
+impl PumpThreads {
+    /// Wait for both pumps, but never indefinitely.
+    ///
+    /// A pump is *normally* already on its way out by the time a test gets
+    /// here — the child is dead, so the waiter reaped it and the reader's
+    /// read fails — but nothing guarantees it, and a test must never hang on
+    /// a thread that is only hygiene: the wake it guards against is what
+    /// `allow_parking` tolerates (`TermSession::spawn`), and that is the
+    /// part the scheduler cares about. So this gives up after
+    /// [`JOIN_PATIENCE`] and detaches: a thread still running ends on its
+    /// own, just later.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn join(self) {
+        join_bounded(self.reader);
+        join_bounded(self.waiter);
+    }
+}
+
+/// How long a test waits for a pump thread before leaving it to exit on its
+/// own. Generous next to a thread that is already finishing (microseconds),
+/// short next to a test suite.
+#[cfg(any(test, feature = "test-support"))]
+const JOIN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(any(test, feature = "test-support"))]
+fn join_bounded(handle: std::thread::JoinHandle<()>) {
+    let deadline = std::time::Instant::now() + JOIN_PATIENCE;
+    while !handle.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let _ = handle.join();
+}
+
+/// Spawn the two pump threads for a freshly started [`PtyProcess`].
+///
+/// * Reader thread: `read → parse per byte → paced Wakeup`, exits on
+///   EOF (child closed its output). A flooding child can return a few
+///   bytes per read, and one wakeup per read would ping the UI task at
+///   MHz rates, so wakeups ride [`READER_WAKE_MIN`] while output flows
+///   (the pump throttles repaints further). The poll deadline
+///   guarantees a trailing wakeup for the final chunk before a pause,
+///   so a suppressed tail never waits for more output.
+/// * Waiter thread: blocks on `child.wait()`, then reports `Exit` —
+///   retrying against a full channel rather than blocking on it, since
+///   a session being torn down stops draining (see the thread itself).
+///
+/// Both handles come back in a [`PumpThreads`].
+pub fn spawn_pump(
+    term: Arc<FairMutex<Term<EventProxy>>>,
+    wake: async_channel::Sender<PumpMsg>,
+    recent: Arc<RecentOutput>,
+    mut reader: Box<dyn Read + Send>,
+    poll_fd: Option<i32>,
+    mut child: Box<dyn Child + Send + Sync>,
+) -> PumpThreads {
+    let reader_wake = wake.clone();
+    let reader_thread = std::thread::Builder::new()
+        .name("ddu-pty-read".into())
+        .spawn(move || {
+            let mut parser: Processor<StdSyncHandler> = Processor::new();
+            let mut buf = [0u8; 8192];
+            let mut last_wake = Instant::now();
+            let mut dirty = false;
+            loop {
+                if let Some(fd) = poll_fd {
+                    let timeout = if dirty {
+                        Some(READER_WAKE_MIN.saturating_sub(last_wake.elapsed()))
+                    } else {
+                        None
+                    };
+                    match poll_readable(fd, timeout) {
+                        PollOutcome::Readable => {}
+                        PollOutcome::NotReady => {
+                            // Poll deadline with unpainted content: flush
+                            // the suppressed tail now.
+                            if dirty {
+                                let _ = reader_wake.try_send(PumpMsg::Wakeup);
+                                dirty = false;
+                                last_wake = Instant::now();
+                            }
+                            continue;
+                        }
+                        // Master dropped before the child died (session
+                        // teardown): leave the wait to the waiter thread.
+                        PollOutcome::Closed => break,
+                    }
+                }
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => {
+                        if dirty {
+                            let _ = reader_wake.try_send(PumpMsg::Wakeup);
+                        }
+                        break;
+                    }
+                    Ok(n) => {
+                        recent.push(&buf[..n]);
+                        {
+                            let mut term = term.lock();
+                            for &byte in &buf[..n] {
+                                parser.advance(&mut *term, byte);
+                            }
+                        }
+                        dirty = true;
+                        if poll_fd.is_none() || last_wake.elapsed() >= READER_WAKE_MIN {
+                            let _ = reader_wake.try_send(PumpMsg::Wakeup);
+                            dirty = false;
+                            last_wake = Instant::now();
+                        }
+                    }
+                }
+            }
+        })
+        .expect("spawn pty reader thread");
+
+    let waiter_thread = std::thread::Builder::new()
+        .name("ddu-pty-wait".into())
+        .spawn(move || {
+            let code = child
+                .wait()
+                .map(|status| status.exit_code() as i32)
+                .unwrap_or(-1);
+            // `send_blocking` would park this thread for good whenever
+            // nobody drains the channel: capacity is one message, a
+            // pending `Wakeup` can hold the exit at the door, and a
+            // session being torn down (its forwarder cancelled — how a
+            // test ends one) stops draining altogether. Retry instead,
+            // for longer than any live forwarder needs (it drains within
+            // a frame) and then give up: a session nobody is listening to
+            // has nobody to tell.
+            let mut msg = PumpMsg::Exit(code);
+            let deadline = Instant::now() + EXIT_SEND_PATIENCE;
+            loop {
+                match wake.try_send(msg) {
+                    Ok(()) => break,
+                    Err(async_channel::TrySendError::Full(returned)) => {
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        msg = returned;
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(async_channel::TrySendError::Closed(_)) => break,
+                }
+            }
+        })
+        .expect("spawn pty waiter thread");
+
+    PumpThreads {
+        reader: reader_thread,
+        waiter: waiter_thread,
+    }
+}
+
+/// Convenience: spawn a process and its pumps in one go, returning the
+/// grid, the master handle and the pump threads' handles. `scrollback`
+/// caps the grid's history (lines; older output is dropped).
+pub fn spawn_session(
+    cmd: &PtySpawn,
+    cols: u16,
+    rows: u16,
+    wake: async_channel::Sender<PumpMsg>,
+    colors: super::palette::DefaultColors,
+    scrollback: usize,
+) -> anyhow::Result<(TermGrid, PtyProcess, PumpThreads)> {
+    let (process, reader, child) = PtyProcess::spawn(cmd, cols, rows)?;
+    let grid = TermGrid::new(cols, rows, process.writer().clone(), wake.clone(), scrollback, colors);
+    let pumps = spawn_pump(
+        grid.term.clone(),
+        wake,
+        grid.recent.clone(),
+        reader,
+        process.poll_fd(),
+        child,
+    );
+    Ok((grid, process, pumps))
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use std::time::{Duration, Instant};
+    fn visible_text(term: &FairMutex<Term<EventProxy>>) -> String {
+        let term = term.lock();
+        let mut text = String::new();
+        let cols = term.columns();
+        let mut last_line: Option<i32> = None;
+        for indexed in term.renderable_content().display_iter {
+            if last_line.is_some_and(|l| l != indexed.point.line.0) {
+                text.push('\n');
+            }
+            last_line = Some(indexed.point.line.0);
+            text.push(indexed.cell.c);
+            let _ = cols;
+        }
+        text
+    }
+
+    #[test]
+    fn resume_id_extraction_matches_agent_formats() {
+        // Startup banner forms.
+        assert_eq!(
+            extract_resume_id("session id: 01a075e1-346f-7b92-b832-745a71ee00ed"),
+            Some("01a075e1-346f-7b92-b832-745a71ee00ed".into())
+        );
+        assert_eq!(
+            extract_resume_id("Session ID: 01a075df-9d32-7440-a3a2-57d067ae1d2a"),
+            Some("01a075df-9d32-7440-a3a2-57d067ae1d2a".into())
+        );
+        assert_eq!(
+            extract_resume_id("session_id=019f55b9-cf32-7000-b1c8-33aa18bc3df6 omp_session=weixin"),
+            Some("019f55b9-cf32-7000-b1c8-33aa18bc3df6".into())
+        );
+        // Exit footer shell snippets.
+        assert_eq!(
+            extract_resume_id("claude --resume 65e901cd-41c1-46c3-9c6d-abde891d87b2"),
+            Some("65e901cd-41c1-46c3-9c6d-abde891d87b2".into())
+        );
+        assert_eq!(
+            extract_resume_id(
+                "Resume this session with omp --resume 01a075e2-cea0-7312-bba4-b507c7d738c0"
+            ),
+            Some("01a075e2-cea0-7312-bba4-b507c7d738c0".into())
+        );
+        assert_eq!(
+            extract_resume_id("codex resume 01a075e1-346f-7b92-b832-745a71ee00ed"),
+            Some("01a075e1-346f-7b92-b832-745a71ee00ed".into())
+        );
+        // Noise and counters must not match.
+        assert_eq!(extract_resume_id("session id: 42"), None);
+        assert_eq!(extract_resume_id("no ids here"), None);
+        assert_eq!(
+            extract_resume_id("2026-09-06 12:00:00 something unrelated"),
+            None
+        );
+        // Prose using the word "resume" reads like the flag-less
+        // `codex resume <id>` form; it must not donate a word as an id
+        // (a real session once saved `functions`).
+        assert_eq!(
+            extract_resume_id("then the agent can resume functions afterwards"),
+            None
+        );
+        assert_eq!(
+            extract_resume_id("Use /resume to continue this conversation"),
+            None
+        );
+    }
+
+    fn wait_until(term: &FairMutex<Term<EventProxy>>, needle: &str, deadline: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < deadline {
+            if visible_text(term).contains(needle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// M2 acceptance, headless: bytes → PTY → parser → grid, and the
+    /// child's exit reaches the pump channel.
+    #[test]
+    #[cfg(unix)]
+    fn pty_roundtrip_and_exit() {
+        let (wake, rx) = async_channel::bounded::<PumpMsg>(1);
+        let cmd = PtySpawn {
+            program: "/bin/sh".into(),
+            args: vec![],
+            cwd: std::env::temp_dir(),
+        };
+        let (grid, _process, pumps) =
+            spawn_session(&cmd, 80, 24, wake, test_colors(), 1000).expect("spawn sh");
+
+        assert!(
+            wait_until(&grid.term, "$", Duration::from_secs(5)),
+            "shell prompt never appeared"
+        );
+
+        grid.write(b"echo ddu-m2-roundtrip\r");
+        assert!(
+            wait_until(&grid.term, "ddu-m2-roundtrip", Duration::from_secs(5)),
+            "echo output never reached the grid"
+        );
+
+        grid.write(b"exit\r");
+        let start = Instant::now();
+        loop {
+            match rx.try_recv() {
+                Ok(PumpMsg::Exit(0)) => break,
+                Ok(PumpMsg::Exit(code)) => panic!("unexpected exit code {code}"),
+                Ok(PumpMsg::Wakeup) => {}
+                Err(async_channel::TryRecvError::Empty) => {}
+                Err(e) => panic!("channel closed: {e}"),
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "exit event never arrived"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // The shell is gone, so both pumps end on their own — but a test
+        // must not *leave* them finishing: a pump thread that outlives
+        // its test wakes the local foreground task from its own thread,
+        // which gpui's test scheduler calls non-determinism
+        // ([`PumpThreads::join`]).
+        pumps.join();
+    }
+
+}
+
+#[cfg(test)]
+mod zsh_probe {
+    use super::*;
+
+    fn nonspace(term: &FairMutex<Term<EventProxy>>) -> String {
+        let guard = term.lock();
+        let content = guard.renderable_content();
+        let mut t = String::new();
+        for c in content.display_iter {
+            t.push(c.cell.c);
+        }
+        drop(guard);
+        t.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    fn feed(bytes: &[u8]) -> String {
+        let (tx, _rx) = async_channel::bounded::<PumpMsg>(1);
+        let grid =
+            TermGrid::new(80, 24, crate::pty::PtyWriter::for_test(), tx, 1000, test_colors());
+        grid.inject_bytes(bytes);
+        nonspace(&grid.term)
+    }
+
+    fn test_grid() -> TermGrid {
+        let (tx, _rx) = async_channel::bounded::<PumpMsg>(1);
+        TermGrid::new(80, 24, crate::pty::PtyWriter::for_test(), tx, 1000, test_colors())
+    }
+
+    #[test]
+    fn grid_search_finds_case_insensitive_hits_on_screen() {
+        let grid = test_grid();
+        grid.inject_bytes(b"Hello MARKER one\r\nsecond marker here\r\n");
+        let hits = search_grid(&grid.term, "marker", 50);
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        // Absolute lines: the two rows landed on screen lines 0 and 1.
+        assert_eq!((hits[0].line, hits[0].start, hits[0].end), (0, 6, 12));
+        assert_eq!((hits[1].line, hits[1].start), (1, 7));
+        // Both case directions fold to the same hits.
+        assert_eq!(search_grid(&grid.term, "MARKER", 50).len(), 2);
+        // Query casing never matters, whitespace-only never matches.
+        assert!(search_grid(&grid.term, "", 50).is_empty());
+        assert!(search_grid(&grid.term, "   ", 50).is_empty());
+        assert!(search_grid(&grid.term, "absent", 50).is_empty());
+    }
+
+    #[test]
+    fn grid_search_marks_history_lines_negative() {
+        let grid = test_grid();
+        let mut bytes = b"ddu-marker-top\r\n".to_vec();
+        for _ in 0..30 {
+            bytes.extend_from_slice(b"filler line\r\n");
+        }
+        grid.inject_bytes(&bytes);
+        let hits = search_grid(&grid.term, "ddu-marker-top", 10);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        // 32 grid lines (the trailing CRLF opens one more) on a 24-line
+        // screen: history holds 8, so the oldest line sits at absolute
+        // line -8 and stays there as filler scrolls — the highlight
+        // coordinates paint against.
+        assert_eq!(hits[0].line, -8);
+    }
+
+    #[test]
+    fn grid_search_caps_hits_and_sorts_ascending() {
+        let grid = test_grid();
+        let mut bytes = Vec::new();
+        for _ in 0..30 {
+            bytes.extend_from_slice(b"filler line\r\n");
+        }
+        grid.inject_bytes(&bytes);
+        let hits = search_grid(&grid.term, "line", 5);
+        assert_eq!(hits.len(), 5);
+        assert!(
+            hits.windows(2).all(|w| w[0].line < w[1].line),
+            "hits must be sorted ascending: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn plain_text_lands() {
+        let t = feed(b"hello");
+        assert!(t.contains("hello"), "got {t:?}");
+    }
+
+    #[test]
+    fn zsh_prompt_bytes_land() {
+        let bytes: &[u8] = b"\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m                  \
+            \r\x1b[0m\x1b[27m\x1b[24m\x1b[Jjust@Justs-MacBook-Air";
+        let t = feed(bytes);
+        assert!(t.contains("just@"), "got {t:?}");
+    }
+}
+
+#[cfg(test)]
+mod color_query_tests {
+    use super::*;
+    use super::super::palette::DefaultColors;
+
+    #[test]
+    fn osc_queries_reply_and_follow_theme_changes() {
+        #[derive(Clone)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let capture = Capture(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let (wake, _rx) = async_channel::bounded(1);
+        let grid =
+            TermGrid::new(80, 24, PtyWriter::test_writer(capture.clone()), wake, 1000, test_colors());
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        for (colors, expected) in [
+            (
+                DefaultColors { fg: 0xab_b2_bf, bg: 0x28_2c_34 },
+                "\x1b]10;rgb:abab/b2b2/bfbf\x1b\\\x1b]11;rgb:2828/2c2c/3434\x1b\\",
+            ),
+            (
+                DefaultColors { fg: 0x2a_2c_33, bg: 0xfa_fa_fa },
+                "\x1b]10;rgb:2a2a/2c2c/3333\x1b\\\x1b]11;rgb:fafa/fafa/fafa\x1b\\",
+            ),
+        ] {
+            grid.set_default_colors(colors);
+            capture.0.lock().unwrap().clear();
+            for byte in b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\" {
+                parser.advance(&mut *grid.term.lock(), *byte);
+            }
+            assert_eq!(&*capture.0.lock().unwrap(), expected.as_bytes());
+        }
+    }
+}

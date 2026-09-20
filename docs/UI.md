@@ -12,7 +12,7 @@ second one. Never invent gpui APIs: follow the `gpui-kit 0.6` /
 
 ## Metrics, selection, accent
 
-`src/ui/mod.rs::scaled(base)` multiplies every shell geometry value (row
+`crates/ddu-app/src/ui/mod.rs::scaled(base)` multiplies every shell geometry value (row
 heights, panel widths, tree-layer heights, indents) by
 `config::desktop_text_scale()`, so layout tracks the same GTK text scale the
 fonts already follow. Selection is `foreground.opacity(0.12)`; the accent
@@ -30,7 +30,7 @@ clipped instead of scrolling.
 
 ## Splitter widths
 
-`shell_state` / `panes_state` (`src/app/mod.rs`) are gpui-base
+`shell_state` / `panes_state` (`crates/ddu-app/src/app/mod.rs`) are gpui-base
 `ResizableState`s with three quirks that all have to be handled together.
 
 **The sized panel is `flex_none`.** An unsized flex sibling takes a flex
@@ -189,7 +189,7 @@ scroll is not the pane's row list:
 ## Cached panels
 
 The sidebar, the terminal pane and the title bar's breadcrumb are cached child
-views (`panel_view!` in `src/ui/mod.rs`): they mount as
+views (`panel_view!` in `crates/ddu-app/src/ui/mod.rs`): they mount as
 `Entity::cached(panel::root_style())`, so gpui replays a panel's whole subtree
 — render, layout, paint, hitboxes, mouse listeners, key contexts, focus —
 until that view is notified. The breadcrumb is one because it mirrors the
@@ -208,7 +208,7 @@ twice (measured 5.5% → 3% CPU, 2× → 1× root renders per stream frame). The
 pane re-renders on every frame the window draws — which is what the library
 assumes of a selectable surface — and nothing else does.
 
-Three halves to keep in sync, all pinned by tests in `src/app/panels.rs`
+Three halves to keep in sync, all pinned by tests in `crates/ddu-app/src/app/panels.rs`
 (`panel_cache_tests`):
 
 * a stream wakeup notifies `terminal_pane` alone (`subscribe_term`), which is
@@ -284,7 +284,7 @@ cached row missing the title notify, above).
 ## Keyboard
 
 Every app shortcut is a `secondary-` chord — `⌘` on macOS, `⌃` on Linux
-(`src/app/keys.rs::key_bindings`; the full list is `DESIGN.md` §10). Global
+(`crates/ddu-app/src/app/keys.rs::key_bindings`; the full list is `DESIGN.md` §10). Global
 shortcuts live in `AppView::new`; terminal-scoped `⌘C`/`⌘V` (`TermCopy` /
 `TermPaste`) double as the right-click menu's shortcut hints via
 `PopupMenuItem::action` — and any action shown in a menu, terminal or not,
@@ -459,7 +459,7 @@ find bar already does, never a smaller universe.
 ## Terminal glyphs
 
 Box-drawing chars are all vector-drawn except the three diagonals
-(`src/terminal/boxart.rs`, pinned by
+(`crates/ddu-terminal/src/boxart.rs`, pinned by
 `the_whole_box_drawing_block_is_vector`): a char left to the font glyph renders
 at the font's own weight and bounding box, so anything missed — `┼` was —
 disagrees with the vector strokes it meets and a table's crossings come out
@@ -483,7 +483,7 @@ re-enter gpui effects while `App` is borrowed → `RefCell already borrowed`
 crash.
 
 Confirm dialogs: never hand-roll `DialogFooter` button pairs — use
-`ui::dialog_footer(label, id, on_confirm)` (`src/ui/mod.rs`: Cancel-outline +
+`ui::dialog_footer(label, id, on_confirm)` (`crates/ddu-app/src/ui/mod.rs`: Cancel-outline +
 danger-small shared recipe). Set `.on_ok(...)` alongside the footer when Enter
 should confirm. One-off informational dialogs (no footer) are fine inline.
 
@@ -520,7 +520,7 @@ the wrapped line can be *prose*, not just code (a list item's last fragment
 wraps the same way). Fixed upstream in longbridge/gpui-kit#3046
 (`bfd72443`, `crates/base/src/text/inline_flow.rs`: `whitespace_nowrap()` on
 the fragment container, landed 2026-09-11), and the crate is **pinned to that
-commit** in `Cargo.toml` — 0.6.1, the newest release, still carries the bug —
+commit** in the workspace `Cargo.toml` — 0.6.1, the newest release, still carries the bug —
 which is what the pane renders with (`docs/RUNNING.md`). Verify a future
 release's fix the same way the pin was checked: render a document with inline
 code inside a wrapped paragraph (this repository's own `AGENTS.md` does) and

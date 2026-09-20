@@ -6,7 +6,7 @@
 
 ## The gpui stack is pinned to one commit
 
-`Cargo.toml` carries a `[patch.crates-io]` entry pinning `gpui-kit` — and with
+the workspace `Cargo.toml` carries a `[patch.crates-io]` entry pinning `gpui-kit` — and with
 it the four crates that then resolve from that checkout (`gpui-base`,
 `gpui-component`, `gpui-kit-assets`, `gpui-component-macros`) — to `bfd72443`
 on `longbridge/gpui-kit`: the commit that stops a rendered document's inline
@@ -27,6 +27,16 @@ lands, delete the section and `cargo update -p gpui-kit`.
   into the hicolor theme and writes `~/.local/share/applications/ddu.desktop`
   with `Path=` set to the launch directory (a desktop launch would otherwise
   start in `$HOME`).
+- **The build is CPU-capped**: both paths build inside a systemd user scope
+  carrying a `CPUQuota`, because a release build otherwise pins every core for
+  the whole compile and the desktop stops answering. The cap is a cgroup
+  property, so it covers the per-crate LLVM thread pools that `cargo -j` (a
+  count of rustc *processes*) cannot, and it ends with the build — the app
+  `run` execs afterwards is outside it. Default: every core but two, which
+  scales with the machine and measured 5.96 of 8 cores against 7.62 uncapped
+  on a rebuilt crate. `DDU_BUILD_CPU_QUOTA` overrides it with a systemd
+  percentage (`400%`, the suffix is required) or `off`; a host with no
+  systemd user session falls back to an uncapped build and says so.
 - **Window identity**: every `WindowOptions` opens with
   `config::window_app_id()` — on Linux the Wayland `app_id` / X11 `WM_CLASS`
   `ddu`, which must equal the desktop entry's basename (`ddu.desktop`) for the

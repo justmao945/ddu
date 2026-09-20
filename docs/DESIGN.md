@@ -23,80 +23,95 @@
 
 ## 3. Architecture
 
-Start as a single crate, split by capability into modules (per the gpui-kit Coding Guides; split into workspace crates once it grows):
+One Cargo workspace, five crates, layered bottom-up: a crate names the ones
+below it and never the ones above, and `ddu-diff` is a leaf beside the chain
+(§7 owns the diff, §6 the terminal).
 
 ```text
 ddu/
-  Cargo.toml
-  docs/
-    DESIGN.md         # this document
-    AGENT_CORE.md     # in-process agent core (design, not implemented)
-    FILE_TREE.md      # full file tree + view panel (design, not implemented)
-    SIGNING.md        # macOS code identity and the TCC grants it keys
-    RUNNING.md        # build/run/install per platform + macOS launch rules
-    VERIFICATION.md   # how to prove a change, per platform
-    UI.md             # GPUI/panel invariants and their measurements
-    omarchy/          # desktop tweak notes (host config, not this app)
-  assets/
-    icon.svg          # app icon (installed into hicolor by linux.sh)
-    icons/            # brand + file-kind SVGs (claude/openai from simple-icons,
-                      # CC0; omp.svg hand-drawn π) layered over the gpui-kit icon
-                      # set; monochrome, tinted via text_color
-    screenshots/      # README screenshot
-  src/
-    main.rs           # app shell: init + open_window + Root + menus, composition only
-    app/              # AppView: three-pane assembly + global state ownership
-      mod.rs          # state (AppView), the actions macro, accessors, panel geometry
-      keys.rs         # the binding table + the accel labels menus print
-      render.rs       # AppView::render: shell layout, action handlers, splitter healing
-      sessions.rs     # spawn / kill / restart / select + PTY subscriptions
-      shutdown.rs     # the confirmed window-close / ⌘Q path
-      diff.rs         # diff poll, snapshot apply, selection, tree index
-      pane.rs         # the right pane's surface/mode + file-view/preview caches + scroll memory
-      search.rs       # the pane's find bar and the tree's quick open
-      persist.rs      # state.json read/write, restore-on-launch
-      panels.rs       # panel toggles + remembered last-dragged widths (+ panel-cache tests)
-      workspace.rs    # projects, folder picker
-    session.rs        # Project / AgentSession / AgentCmd model + resume recipes
-    terminal/         # ddu-terminal (only complex module; own directory)
-      mod.rs          # TermSession entity + TermEvent (concerns split below)
-      session.rs      # spawn/kill/resize/write, resume id, PTY IO
-      stream.rs       # stream repaint pacing (interval EWMA)
-      search.rs       # ⌘F over the grid: hits, rescan timer, reveal
-      mouse.rs        # xterm mouse reporting to the child
-      selection.rs    # grid text selection + clipboard copy
-      scrollbar.rs    # overlay scrollbar geometry + drags
-      ime.rs          # input-method commits / marked text
-      harness.rs      # test-only: window root, `cat` session, grid text
-      pty.rs          # portable-pty wrapper: spawn, writer, resize, killer
-      grid.rs         # alacritty Term behind FairMutex + pump threads
-      input.rs        # keystroke → escape-sequence encoding (+ tests)
-      element.rs      # custom GPUI Element painting the grid
-      palette.rs      # the ANSI ramp + the theme's default fg/bg
-      boxart.rs       # vector box-drawing glyphs
-    diff/             # git diff model + the pane's row stream
-      mod.rs          # DiffFile / DiffHunk / DiffLine / GitDiff, Snapshot, PaneRow, RowStream
-      git.rs          # git2 HEAD→workdir query + the index union (+ tests)
-      listing.rs      # the working-tree listing: every file, diff folded in
-      file_view.rs    # whole-file view: file lines with the diff merged in
-      read.rs         # the one read policy both text surfaces obey
-    ui/               # surface regions, thin composition over the models
-      mod.rs          # scaled(), dialog_footer(), panel_view!, shared metrics + figures
-      terminal_panel.rs  # center pane: focus, keys, scroll, exit banner
-      session_panel.rs / status_bar.rs / title_bar.rs
-      diff_panel/     # the changes pane: mod.rs frame + rows.rs + overview.rs
-                      # + body.rs + find_bar.rs
-      file_tree/      # the sidebar's file layer: mod.rs rows + index.rs the tree model
-      settings/       # settings window: mod.rs (pages) + theme/shell/notify
-  scripts/            # dev.sh / install.sh / make-bundle.sh + make-signing-identity.sh
-                      # (macOS bundle + signing), linux.sh, lib.sh
-  contrib/usage/      # UsageTray (MIT; not a cargo member, no Rust build)
+  Cargo.toml            # [workspace]: resolver 3, [workspace.dependencies], the
+                        # gpui-kit `[patch.crates-io]` pin
+  crates/
+    ddu-terminal/       # PTY + alacritty grid + the paint element (leaf)
+      src/lib.rs        # TermSession + TermEvent + the public surface the pane uses
+      src/session.rs    # spawn/kill/resize/write, resume id, PTY IO
+      src/stream.rs     # stream repaint pacing (interval EWMA)
+      src/search.rs     # ⌘F over the grid: hits, rescan timer, reveal
+      src/mouse.rs      # xterm mouse reporting to the child
+      src/selection.rs  # grid text selection + clipboard copy
+      src/scrollbar.rs  # overlay scrollbar geometry + drags
+      src/ime.rs        # input-method commits / marked text
+      src/harness.rs    # test-only: window root, `cat` session, grid text
+      src/pty.rs        # portable-pty wrapper: spawn, writer, resize, killer
+      src/grid.rs       # alacritty Term behind FairMutex + pump threads
+      src/input.rs      # keystroke → escape-sequence encoding
+      src/element.rs    # custom GPUI Element painting the grid
+      src/palette.rs    # the ANSI ramp + the theme's default fg/bg
+      src/boxart.rs     # vector box-drawing glyphs
+    ddu-diff/           # git diff model + the pane's row stream (leaf)
+      src/lib.rs        # DiffFile / DiffHunk / DiffLine / GitDiff, Snapshot,
+                        # PaneRow, RowStream; re-exports the `git2` it speaks
+      src/git.rs        # git2 HEAD→workdir query + the index union
+      src/listing.rs    # the working-tree listing: every file, diff folded in
+      src/file_view.rs  # whole-file view: file lines with the diff merged in
+      src/read.rs       # the one read policy both text surfaces obey
+    ddu-core/           # domain model + persistence
+      src/lib.rs
+      src/session.rs    # Project / AgentSession / AgentCmd model + resume recipes
+      src/config.rs     # settings.json + state.json (paths, load/save, backup)
+    ddu-app/            # the shell: AppView + every panel
+      src/lib.rs        # mounts `app` + `ui`
+      src/app/
+        mod.rs          # state (AppView), the actions macro, accessors, panel geometry
+        keys.rs         # the binding table + the accel labels menus print
+        render.rs       # AppView::render: shell layout, action handlers, splitter healing
+        sessions.rs     # spawn / kill / restart / select + PTY subscriptions
+        shutdown.rs     # the confirmed window-close / ⌘Q path
+        diff.rs         # diff poll, snapshot apply, selection, tree index
+        pane.rs         # the right pane's surface/mode + file-view/preview caches + scroll memory
+        search.rs       # the pane's find bar and the tree's quick open
+        persist.rs      # state.json read/write, restore-on-launch
+        panels.rs       # panel toggles + remembered last-dragged widths (+ panel-cache tests)
+        workspace.rs    # projects, folder picker
+      src/ui/
+        mod.rs          # scaled(), dialog_footer(), panel_view!, shared metrics + figures
+        terminal_panel.rs   # center pane: focus, keys, scroll, exit banner
+        session_panel.rs / status_bar.rs / title_bar.rs
+        diff_panel/     # the changes pane: mod.rs frame + rows.rs + overview.rs
+                        # + body.rs + find_bar.rs
+        file_tree/      # the sidebar's file layer: mod.rs rows + index.rs the tree model
+        settings/       # settings window: mod.rs (pages) + keys.rs (shortcut recorder)
+        code_text.rs    # SelectableText (caller-supplied runs)
+        markdown.rs     # the image block plugin for a rendered document
+        palette.rs      # the quick open's floating overlay
+    ddu/                # the binary: composition only
+      src/main.rs       # init + open_window + Root + menus + AppAssets
+  docs/                 # DESIGN / RUNNING / VERIFICATION / UI / SIGNING / FILE_TREE / AGENT_CORE
+  assets/               # icon.svg, icons/ (brand + file-kind SVGs), screenshots/
+  scripts/              # dev.sh / install.sh / make-bundle.sh + make-signing-identity.sh,
+                        # linux.sh, lib.sh
+  contrib/usage/        # UsageTray (MIT; not a cargo member, no Rust build)
 ```
 
-Dependency direction: `session`, `terminal` and `diff` are leaves — they never name the app. `app` owns every piece of state; each `ui/` panel is a child view that renders `&mut AppView` (cached unless it holds selectable text), so `app` and `ui` reference each other by design, while cross-module traffic inside `app` is `cx.emit / subscribe` (terminal wakeups, resize events) or small shared types. Don't touch `gpui-base` (unless building new behavior).
+Dependency direction: `ddu-terminal` and `ddu-diff` are leaves — they never
+name the app, and neither reads app config (the terminal takes its scrollback
+cap as a `TermSession::spawn` argument). `ddu-core` sits on `ddu-terminal`
+(session rows hold an `Entity<TermSession>`) and owns the model + the two JSON
+files. `ddu-app` owns every piece of state; each `ui/` panel is a child view
+that renders `&mut AppView` (cached unless it holds selectable text), so `app`
+and `ui` reference each other by design and share one crate, while cross-module
+traffic inside `app` is `cx.emit / subscribe` (terminal wakeups, resize events)
+or small shared types. `ddu` is the bin: `main.rs` wires the window, the keys
+and the assets and holds no app logic. Don't touch `gpui-base` (unless building
+new behavior).
 
 ```toml
+# crates/ddu-diff/Cargo.toml — this crate alone turns on the grammars
 [dependencies]
+gpui-kit = { workspace = true, features = ["tree-sitter-rust", …] }
+
+# Cargo.toml (workspace root)
+[workspace.dependencies]
 gpui-kit = "0.6"                    # the only GPUI source; never pull gpui directly
 alacritty_terminal = "0.24"         # crates.io build, Apache; never the zed fork git rev
 portable-pty = "0.9"                # MIT, PTY allocation
@@ -258,7 +273,7 @@ struct AgentCmd { program: String, args: Vec<String> }
 
 * Session start = spawn from the preset, cwd = the session's `cwd` (the project
   path today; a per-session worktree later: one branch + one directory each).
-* The command line is built in `src/session.rs`: `spec(cwd)` for a fresh start,
+* The command line is built in `crates/ddu-core/src/session.rs`: `spec(cwd)` for a fresh start,
   `resume_spec(cwd, id)` for Resume — codex takes the bare `resume <id>`
   subcommand, the others `--resume <id>`. Restart always uses `spec`, ignoring
   the row's `resume_id`.

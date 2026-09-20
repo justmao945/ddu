@@ -25,55 +25,64 @@ editing, and where the long form lives.
 
 ## Source map
 
-- `src/main.rs` — entry, window creation, `AppAssets` (brand SVGs layered over
-  the gpui-kit icon set).
-- `src/app/` — `mod.rs` `AppView` (the shared state + the actions macro + the
-  app's own accessors), `keys.rs` (the binding table + accel labels + the
-  `Command` table the settings window rebinds), `render.rs`
-  (the Render impl: shell layout, action handlers, splitter healing),
-  `pane.rs` (the right pane's surface/mode, its file-view + preview caches and
-  the per-file scroll memory),
-  `search.rs` (both bars — the pane's find and the tree's quick open),
-  `diff.rs` (poll, snapshot apply, selection re-pin, tree index),
-  `sessions.rs` (spawn/kill/restore/resume), `shutdown.rs` (the confirmed
-  close/⌘Q path), `persist.rs` (state.json round-trip), `panels.rs` (dock
-  toggles + the panel-cache contract tests),
-  `workspace.rs` (projects, folder picker).
-- `src/session.rs` — domain model (`Project`, `AgentSession`, `AgentStatus`),
-  launch presets, `spec`/`resume_spec`, `initial_projects()` (= cwd).
-- `src/config.rs` — `settings.json` + `state.json` under
+One Cargo workspace, five crates, layered bottom-up: a crate names the ones
+below it and never the ones above (`ddu-diff` is a leaf beside the chain).
+
+- `crates/ddu-terminal` — the terminal stack. `lib.rs` is the root: the
+  `TermSession` entity + `TermEvent`, and the public surface the pane uses
+  (`PtySpawn`, `TermMatch`, `MouseTracking`, `STREAM_FRAME_MIN`). Each concern
+  is its own module: `session.rs` PTY lifecycle + IO, `stream.rs` repaint
+  pacing, `search.rs` ⌘F over the grid, `mouse.rs` reporting to the child,
+  `selection.rs`, `scrollbar.rs` geometry + drags, `ime.rs`, and the test-only
+  `harness.rs`; `pty.rs` process + master handles, `grid.rs` alacritty grid +
+  pump threads, `element.rs` custom paint element, `palette.rs` the ANSI ramp +
+  theme defaults, `input.rs` keystroke → escapes, `boxart.rs`. Owns no app
+  config: the scrollback cap arrives as a `TermSession::spawn` argument.
+- `crates/ddu-diff` — `lib.rs` the data model (the pane's `RowStream`, and
+  `marks()` — the overview's change runs) plus the re-exported `git2` it
+  speaks; `git.rs` git2 working-tree diff (5000 lines/file cap, polled with a
+  seq guard against stale results); `listing.rs` the lazy working-tree listing
+  (case-insensitive name order) and the quick open's path ranking;
+  `file_view.rs` the whole-file surface: file lines + byte offsets + the parsed
+  `SyntaxHighlighter`, built on the background pass; `read.rs` the one read
+  policy both text surfaces obey (binary, size caps, gone-from-disk). The one
+  crate that turns on the `tree-sitter-*` `gpui-kit` features.
+- `crates/ddu-core` — `lib.rs` is the root; `session.rs` the domain model
+  (`Project`, `AgentSession`, `AgentStatus`), launch presets,
+  `spec`/`resume_spec`, `initial_projects()` (= cwd); `config.rs`
+  `settings.json` + `state.json` under
   `~/Library/Application Support/ddu/` (macOS) or `$XDG_CONFIG_HOME/ddu/`
   (Linux); `DDU_STATE_PATH` / `DDU_SETTINGS_PATH` override. Loads check errors;
   a corrupt file is backed up as `<name>.corrupt-<ts>` and defaults are used.
-- `src/diff/` — `git.rs` git2 working-tree diff (5000 lines/file cap, polled
-  with a seq guard against stale results); `mod.rs` data model (the pane's
-  `RowStream`, and `marks()` — the overview's change runs); `listing.rs` the
-  lazy working-tree listing (case-insensitive name order) and the quick open's
-  path ranking; `file_view.rs` the whole-file surface: file lines + byte
-  offsets + the parsed `SyntaxHighlighter`, built on the background pass;
-  `read.rs` the one read policy both text surfaces obey (binary, size caps,
-  gone-from-disk).
-- `src/terminal/` — `mod.rs` the `TermSession` entity + its events (each concern
-  its own module: `session.rs` PTY lifecycle + IO, `stream.rs` repaint pacing,
-  `search.rs` ⌘F over the grid, `mouse.rs` reporting to the child,
-  `selection.rs`, `scrollbar.rs` geometry + drags, `ime.rs`, and the test-only
-  `harness.rs`), `pty.rs` process + master handles, `grid.rs` alacritty grid +
-  pump threads, `element.rs` custom paint element, `palette.rs` the ANSI ramp +
-  theme defaults, `input.rs` keystroke → escapes, `boxart.rs`.
-- `src/ui/code_text.rs` — `SelectableText` with caller-supplied `TextRun`s
-  (gpui-base's lays out the runs it built from its own text, so a highlighted
-  row cannot ride it); one selection participant per row, same contract.
-- `src/ui/` — panels (`session_panel`, `terminal_panel` (the center pane),
-  `diff_panel/` (the changes pane: `mod.rs` frame + `rows.rs` + `overview.rs` +
-  `body.rs` + `find_bar.rs`), `file_tree/` (`mod.rs` rows + `index.rs` the tree
-  model), `status_bar`, `title_bar`), `palette.rs` (the quick open's floating overlay —
-  scrim + card over the workspace, never inside a panel), `settings/`
-  (standalone window: `mod.rs` the shipped pages + `update_config`, `keys.rs` the
-  shortcut recorder), `markdown.rs`
-  (the image plugin a rendered document goes through: gpui's own text view sends
-  every `![]()`/`<img>` to the *http* client, which cannot read a path, so the
-  block holding an image is rendered here through `img(Resource::Path)`), and
-  `mod.rs` with the shared metrics + `scaled()`.
+- `crates/ddu-app` — `lib.rs` mounts `app` + `ui`.
+  - `app/` — `mod.rs` `AppView` (the shared state + the actions macro + the
+    app's own accessors), `keys.rs` (the binding table + accel labels + the
+    `Command` table the settings window rebinds), `render.rs`
+    (the Render impl: shell layout, action handlers, splitter healing),
+    `pane.rs` (the right pane's surface/mode, its file-view + preview caches and
+    the per-file scroll memory),
+    `search.rs` (both bars — the pane's find and the tree's quick open),
+    `diff.rs` (poll, snapshot apply, selection re-pin, tree index),
+    `sessions.rs` (spawn/kill/restore/resume), `shutdown.rs` (the confirmed
+    close/⌘Q path), `persist.rs` (state.json round-trip), `panels.rs` (dock
+    toggles + the panel-cache contract tests),
+    `workspace.rs` (projects, folder picker).
+  - `ui/` — panels (`session_panel`, `terminal_panel` (the center pane),
+    `diff_panel/` (the changes pane: `mod.rs` frame + `rows.rs` + `overview.rs`
+    + `body.rs` + `find_bar.rs`), `file_tree/` (`mod.rs` rows + `index.rs` the
+    tree model), `status_bar`, `title_bar`), `palette.rs` (the quick open's
+    floating overlay — scrim + card over the workspace, never inside a panel),
+    `settings/` (standalone window: `mod.rs` the shipped pages +
+    `update_config`, `keys.rs` the shortcut recorder), `markdown.rs`
+    (the image plugin a rendered document goes through: gpui's own text view
+    sends every `![]()`/`<img>` to the *http* client, which cannot read a path,
+    so the block holding an image is rendered here through
+    `img(Resource::Path)`), `code_text.rs` — `SelectableText` with
+    caller-supplied `TextRun`s (gpui-base's lays out the runs it built from its
+    own text, so a highlighted row cannot ride it); one selection participant
+    per row, same contract — and `mod.rs` with the shared metrics + `scaled()`.
+- `crates/ddu` — `main.rs` — entry, window creation, `AppAssets` (brand SVGs
+  layered over the gpui-kit icon set), the panic log, and the icon-asset test.
 - `contrib/usage/` — UsageTray (MIT; not a cargo member, the Rust build never
   touches it).
 - `.omp/agents/AGENTS.md` — the global agent-rules payload deployed to
@@ -82,14 +91,26 @@ editing, and where the long form lives.
 ## Build / run
 
 - Linux: `scripts/linux.sh run` (build `--release` + run, workspace = `$DDU_DIR`
-  or this repo) and `scripts/linux.sh install`. Details: `docs/RUNNING.md`.
+  or this repo; the build is CPU-capped through `DDU_BUILD_CPU_QUOTA`) and
+  `scripts/linux.sh install`. Details: `docs/RUNNING.md`.
 - macOS: `scripts/dev.sh` / `scripts/install.sh` — the only launch paths.
-- `cargo test`.
+- `cargo test` — the whole workspace; `-p ddu-app` (or `ddu-core`, `ddu-diff`,
+  `ddu-terminal`, `ddu`) restricts it to one crate's suite, which is also the
+  quickest way to compile just that layer.
 
 ## Rules
 
 - **GPL-free throughout.** Zed's `terminal*`/`mappings` are GPL-3.0: understand
   and rewrite, never paste. Only crates.io artifacts (MIT/Apache) are allowed.
+- **The workspace is layered** (`ddu-terminal`/`ddu-diff` → `ddu-core` →
+  `ddu-app` → the `ddu` bin): a crate names the ones below it and never the ones
+  above, so a setting read goes *up* the stack as an argument — the terminal
+  takes its scrollback cap as a `TermSession::spawn` parameter instead of
+  reading `Config` — and a capability lives with its owner: only `ddu-diff`
+  turns on the `tree-sitter-*` `gpui-kit` features, and the terminal's test-only
+  surface (`inject_bytes`, `kill_and_join`, the spawn-time `allow_parking`) sits
+  behind its `test-support` feature, which `ddu-app`'s dev-dependencies enable
+  for the tests that drive a PTY from another crate.
 - **Never hardcode a shell.** `config::default_shell()` resolves it; a missing
   hardcoded path kills every restored session (`docs/RUNNING.md`).
 - **macOS**: never launch the binary as a background child or via `cargo run` —
@@ -149,8 +170,9 @@ editing, and where the long form lives.
   deletion, which is never colored), and `RowStream::row_styles` clips a
   whole-file style range down to that row. The parse rides `FileView::build`'s
   background thread; a render never parses. Grammars come from the
-  `tree-sitter-*` features in `Cargo.toml` (all MIT — the GPL-free rule), one
-  per language, and only the **File** surface highlights: Diff mode's hunks
+  `tree-sitter-*` features on `ddu-diff`'s `gpui-kit` dependency
+  (`crates/ddu-diff/Cargo.toml`, all MIT — the GPL-free rule), one per
+  language, and only the **File** surface highlights: Diff mode's hunks
   are fragments with no offsets into the file.
 - **The overview strip** lives in the pane's scrollbar column (its own rect,
   two halves: added left, removed right), is built from `RowStream::marks()`,
@@ -216,7 +238,7 @@ editing, and where the long form lives.
 - **`h_flex()` centers on the cross axis**: `flex_row` + `items_center`, so a
   row that must hand a child the full height states `items_stretch()`
   (`docs/UI.md`).
-- **Never `use super::*` in a `src/app/*` test module**: the parent globs
+- **Never `use super::*` in a `crates/ddu-app/src/app/*` test module**: the parent globs
   gpui-kit, and globbing *it* brings gpui's `#[test]` attribute into scope,
   which expands into itself ("recursion limit reached while expanding
   `#[test]`"). Name the imports the test needs.
@@ -249,7 +271,7 @@ editing, and where the long form lives.
   the same file
   (`docs/UI.md`).
 - **Shortcuts are one table, and overrides are appended**: every rebindable
-  shortcut is a `Command` in `src/app/keys.rs` (id = the `settings.json` `keys`
+  shortcut is a `Command` in `crates/ddu-app/src/app/keys.rs` (id = the `settings.json` `keys`
   key, the settings row, the builtin chords); the Keys page records a chord into
   that map, and `keys::apply_overrides` adds the new chord plus an `Unbind` on
   every chord it retires. Never `clear_key_bindings` — gpui-component's own
@@ -276,7 +298,9 @@ editing, and where the long form lives.
 - **A test that spawns a PTY owns its pumps**: end it with
   `harness::shutdown` (kill the child, cancel the forwarder, join both
   threads); `TermSession::spawn` additionally calls the executor's per-test
-  `allow_parking()`. A pump thread's wake reaches a `!Send` task from its own
+  `allow_parking()` — both live behind `ddu-terminal`'s `test-support` feature,
+  which `ddu-app`'s dev-dependencies enable, so a PTY test in a *dependent*
+  crate still gets them. A pump thread's wake reaches a `!Send` task from its own
   thread, which gpui's test scheduler reports as non-determinism in whichever
   test is running then — and one executor serves the whole test process, so
   the binary aborts (SIGABRT) rather than failing one test. Measured ~10% of

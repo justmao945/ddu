@@ -1,0 +1,33 @@
+[package]
+name = "ddu-diff"
+description = "git2 working-tree diff: model, lazy listing and the whole-file view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+git2.workspace = true
+# Grammars for the pane's syntax highlighting (`tree-sitter-*` features are
+# forwarded through gpui-kit). One feature per language keeps the build to
+# the grammars the pane can actually meet: c/c++, java, html, css,
+# javascript (+ jsx), typescript/tsx, rust, go, python, swift, bash (+ sh).
+# JSON rides along with the base `tree-sitter` feature. There is no QML
+# grammar in the ecosystem gpui-component wraps. Only this crate parses —
+# no other layer needs a grammar.
+gpui-kit = { workspace = true, features = [
+    "tree-sitter-bash",
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-css",
+    "tree-sitter-go",
+    "tree-sitter-html",
+    "tree-sitter-java",
+    "tree-sitter-javascript",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-swift",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+] }

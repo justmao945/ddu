@@ -1,0 +1,28 @@
+[package]
+name = "ddu-terminal"
+description = "PTY process, alacritty grid and the terminal paint element"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+alacritty_terminal.workspace = true
+anyhow.workspace = true
+async-channel.workspace = true
+gpui-kit.workspace = true
+parking_lot.workspace = true
+portable-pty.workspace = true
+rustix.workspace = true
+
+[dev-dependencies]
+# Enables gpui's TestAppContext/run_test_once for the PTY harness.
+gpui-kit = { workspace = true, features = ["test-support"] }
+
+[features]
+# Compiles the test-only surface (`TermSession::inject_bytes`,
+# `kill_and_join`, and the executor `allow_parking` a test spawn needs)
+# into the crate for a *dependency's* test build, where this crate is
+# not itself compiled with `cfg(test)`. ddu-app's dev-dependencies turn
+# it on; the shipping build never does.
+test-support = []

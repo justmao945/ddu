@@ -1,46 +1,41 @@
-[package]
-name = "ddu"
+# ddu — a Cargo workspace. Every source file lives in a crate under
+# `crates/`; the layers are, bottom up:
+#
+#   ddu-terminal   PTY + alacritty grid + the custom paint element
+#   ddu-diff       git2 working-tree diff model, listing and the file view
+#   ddu-core       domain model (projects/sessions) + settings/state persistence
+#   ddu-app        the shell: AppView and every panel (app/ + ui/)
+#   ddu            the binary: window creation, assets, the panic log
+#
+# Each layer only depends on the ones below it (docs/DESIGN.md §3).
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
+publish = false
 
-[dependencies]
-rfd = "0.15"
+[workspace.dependencies]
 alacritty_terminal = "0.24"
 anyhow = "1.0.104"
 async-channel = "2"
 git2 = "0.19"
-# Grammars for the pane's syntax highlighting (`tree-sitter-*` features are
-# forwarded through gpui-kit). One feature per language keeps the build to
-# the grammars the pane can actually meet: c/c++, java, html, css,
-# javascript (+ jsx), typescript/tsx, rust, go, python, swift, bash (+ sh).
-# JSON rides along with the base `tree-sitter` feature. There is no QML
-# grammar in the ecosystem gpui-component wraps.
-gpui-kit = { version = "0.6", features = [
-    "tree-sitter-bash",
-    "tree-sitter-c",
-    "tree-sitter-cpp",
-    "tree-sitter-css",
-    "tree-sitter-go",
-    "tree-sitter-html",
-    "tree-sitter-java",
-    "tree-sitter-javascript",
-    "tree-sitter-python",
-    "tree-sitter-rust",
-    "tree-sitter-swift",
-    "tree-sitter-tsx",
-    "tree-sitter-typescript",
-] }
+gpui-kit = "0.6"
 parking_lot = "0.12"
 portable-pty = "0.9"
+rfd = "0.15"
 rustix = { version = "0.38", features = ["std", "event"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 shlex = "1.3"
 
-[dev-dependencies]
-# Enables gpui's TestAppContext/run_test_once for headless app tests
-# (terminal IME regression); feature-unifies only into test builds.
-gpui-kit = { version = "0.6", features = ["test-support"] }
+ddu-app = { path = "crates/ddu-app" }
+ddu-core = { path = "crates/ddu-core" }
+ddu-diff = { path = "crates/ddu-diff" }
+ddu-terminal = { path = "crates/ddu-terminal" }
 
 # The gpui stack is pinned to the commit that fixes the rendered document's
 # double wrap, which 0.6.1 (the newest release) still carries: `InlineFlow`

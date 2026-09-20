@@ -1419,18 +1419,55 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 name = "ddu"
 version = "0.1.0"
 dependencies = [
- "alacritty_terminal",
- "anyhow",
- "async-channel",
- "git2",
+ "ddu-app",
+ "ddu-core",
  "gpui-kit",
- "parking_lot",
- "portable-pty",
+]
+
+[[package]]
+name = "ddu-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ddu-core",
+ "ddu-diff",
+ "ddu-terminal",
+ "gpui-kit",
  "rfd",
- "rustix 0.38.44",
+]
+
+[[package]]
+name = "ddu-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ddu-terminal",
+ "gpui-kit",
  "serde",
  "serde_json",
  "shlex 1.3.0",
+]
+
+[[package]]
+name = "ddu-diff"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "git2",
+ "gpui-kit",
+]
+
+[[package]]
+name = "ddu-terminal"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "async-channel",
+ "gpui-kit",
+ "parking_lot",
+ "portable-pty",
+ "rustix 0.38.44",
 ]
 
 [[package]]
