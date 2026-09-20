@@ -42,10 +42,10 @@ impl AppView {
         {
             return;
         }
-        let (Some(root), Some(path)) = (self.current_session_cwd(), self.current_diff_path()) else {
+        let Some(path) = self.current_diff_path().map(str::to_owned) else {
             return;
         };
-        let key = (root, path.to_owned(), self.view_mode);
+        let key = (self.diff_root(), path, self.view_mode);
         let offset = self.diff_hunks_scroll.offset();
         // The top is the default anyway: keeping it would only grow the
         // map.
@@ -62,11 +62,8 @@ impl AppView {
     /// borrowable key; nothing here runs per frame.
     pub(super) fn saved_scroll(&self, path: &str) -> Point<Pixels> {
         let top = point(px(0.), px(0.));
-        let Some(root) = self.current_session_cwd() else {
-            return top;
-        };
         self.file_positions
-            .get(&(root, path.to_owned(), self.view_mode))
+            .get(&(self.diff_root(), path.to_owned(), self.view_mode))
             .copied()
             .unwrap_or(top)
     }
@@ -146,8 +143,23 @@ impl AppView {
     }
 
     /// The working tree the diff's paths are relative to.
+    ///
+    /// **The repository's workdir — not the project's path.** A project may
+    /// sit in a subdirectory of its repository (the tree, the poll and the
+    /// palette all carry workdir-relative paths, `diff_root` aside), so
+    /// resolving one of those paths against the project's own directory
+    /// lands somewhere the file is not: the pane then bands a refusal for
+    /// a file the tree just listed. The handle discovered by the poll
+    /// names it; a project with no repository (or one discovered for
+    /// another path) falls back to the session's cwd.
     pub(crate) fn diff_root(&self) -> std::path::PathBuf {
-        self.current_session_cwd().unwrap_or_default()
+        let cwd = self.current_session_cwd();
+        let workdir = self
+            .repo
+            .as_ref()
+            .filter(|entry| cwd.as_deref() == Some(entry.0.as_path()))
+            .and_then(|entry| entry.1.workdir().map(std::path::Path::to_path_buf));
+        workdir.or(cwd).unwrap_or_default()
     }
 
     /// Whether a cached build (or in-flight refusal) is still about the
@@ -269,12 +281,18 @@ impl AppView {
     /// pane shows the previous content (or a "Reading the file…" band)
     /// until it lands.
     pub(crate) fn ensure_file_content(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.current_session_cwd() else {
+        let Some(cwd) = self.current_session_cwd() else {
             return;
         };
         let Some(path) = self.current_diff_path().map(str::to_owned) else {
             return;
         };
+        // Discovered here as well as by the poll: a selection restored from
+        // the state file asks for its file before the first snapshot lands,
+        // and the repository is what names the read root (`diff_root`) —
+        // the working tree, which a nested project does not equal.
+        let _ = self.repo_for(&cwd);
+        let root = self.diff_root();
         // A clean file has no diff record: the merged view degrades to
         // its own lines untinted, which is exactly what File mode should
         // show for a file nobody changed.

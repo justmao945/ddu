@@ -147,9 +147,12 @@ pub struct AppView {
     pub(crate) tree_index: Option<crate::ui::file_tree::TreeIndex>,
     /// The project's repository, opened once and kept for the session: its
     /// workdir names the root both listings read (the tree's, the quick
-    /// open's walk), its index is the quick open's instant answer, and no
-    /// repository at all means no tree. Keyed by the directory it was
-    /// discovered from: a session switch to another project re-discovers.
+    /// open's walk) **and every path they hand back is read against**
+    /// (`diff_root` — the project's own directory is not that root when it
+    /// sits inside the repository), its index is the quick open's instant
+    /// answer, and no repository at all means no tree. Keyed by the
+    /// directory it was discovered from: a session switch to another
+    /// project re-discovers.
     pub(crate) repo: Option<(std::path::PathBuf, Rc<ddu_diff::git2::Repository>)>,
     pub(crate) hovered_project: Option<usize>,
     /// Project whose `...` menu is open: keeps the row's buttons mounted

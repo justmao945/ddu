@@ -83,6 +83,17 @@ impl AppView {
         result: anyhow::Result<ddu_diff::Snapshot>,
         cx: &mut Context<Self>,
     ) -> bool {
+        // The repository is discovered before any path is judged below:
+        // its workdir is the root the tree's, the poll's and the
+        // palette's paths are relative to (`diff_root`), and the seed a
+        // launch restores is passed through `lives_in_tree` against it.
+        // A project nested inside its repository has a project path that
+        // is *not* that root, so the order matters — discovering here,
+        // not in the tree rebuild below, is what keeps a restored
+        // selection.
+        if let Some(cwd) = self.current_session_cwd() {
+            let _ = self.repo_for(&cwd);
+        }
         // The live selection's path: `None` stays `None` (no click =
         // empty pane — the poll never auto-selects a file). A session
         // switch seeds it with the row's own file, which the poll then
@@ -100,11 +111,13 @@ impl AppView {
                 // or one the diff still knows (a file deleted in the
                 // workdir stays readable through its hunks). A clean file
                 // therefore keeps its selection across polls, and only a
-                // path that left the working tree clears the pane.
-                let root = self.current_session_cwd();
+                // path that left the working tree clears the pane. Both
+                // the path and the root come from the working tree — see
+                // `diff_root`.
+                let root = self.diff_root();
                 let next = wanted
                     .as_ref()
-                    .filter(|path| lives_in_tree(root.as_deref(), &snapshot.diff.files, path))
+                    .filter(|path| lives_in_tree(Some(&root), &snapshot.diff.files, path))
                     .map(|path| crate::app::Selection {
                         path: path.clone(),
                         changed: snapshot.diff.files.iter().position(|f| &f.path == path),
@@ -537,6 +550,143 @@ mod tests {
                 cx.run_until_parked();
             }),
         );
+    }
+
+    /// A project that is a *subdirectory* of its repository — the shape a
+    /// workspace takes once the sources live in `crates/`. Every path the
+    /// tree, the poll and the palette carry is relative to the
+    /// repository's **working tree**, so the pane has to read them from
+    /// that root: with the project's own directory as the root, a click on
+    /// a listed file resolves to a path that is not on disk and the pane
+    /// bands a refusal for a file the tree just listed.
+    #[test]
+    fn a_project_inside_a_repository_reads_files_from_the_workdir() {
+        let (root, changed) = workspace("nested-project");
+        let project = root.join("src");
+        // Make the working tree agree with the poll's record: the file the
+        // tree lists carries the diff's added line, so the text the pane
+        // shows names the file it read.
+        std::fs::write(root.join("src/app.rs"), "fn main() {}\n// changed\n").expect("write");
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                // Both the project's path and the session's cwd are the
+                // subdirectory: the repository is discovered from there,
+                // and its workdir is what the read has to use.
+                let (mut cx0, view, mut vcx) =
+                    app(dispatcher, "nested_project", project, changed);
+                let cx = &mut cx0;
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        // `src/app.rs` is the path the tree lists: the
+                        // workdir-relative one.
+                        v.select_path("src/app.rs".to_owned());
+                        v.ensure_file_content(cx);
+                    });
+                    let _ = window.draw(cx);
+                });
+                cx.run_until_parked();
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, _| {
+                        let Some(ddu_diff::file_view::FileView::Text(view)) =
+                            v.cached_file_view()
+                        else {
+                            panic!(
+                                "the pane did not read `src/app.rs` from the \
+                                 repository's working tree"
+                            );
+                        };
+                        let text = view
+                            .rows
+                            .iter()
+                            .map(|row| row.line.text.clone())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        assert_eq!(text, "fn main() {}\n// changed");
+                    });
+                    let _ = window.draw(cx);
+                });
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The launch-restore shape of the same rule: the row's remembered
+    /// file arrives as a *seed* (a cold tree has no snapshot yet) and the
+    /// first poll has to keep it. That poll judges the seed against the
+    /// working tree, so the working tree has to be known *before* the
+    /// seed is judged — discovering the repository later (while rebuilding
+    /// the tree the poll just invalidated) drops the file and the pane
+    /// opens empty.
+    #[test]
+    fn a_seeded_selection_survives_the_first_poll_of_a_nested_project() {
+        let (root, changed) = workspace("nested-seed");
+        std::fs::write(root.join("src/app.rs"), "fn main() {}\n// changed\n").expect("write");
+        let project = root.join("src");
+        let files = changed.clone();
+        gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let (mut cx0, view, mut vcx) =
+                    app(dispatcher, "nested_seed", project, changed);
+                let cx = &mut cx0;
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, cx| {
+                        // What a launch looks like before its first poll:
+                        // nothing discovered, no snapshot, and the row's
+                        // file waiting to be seeded.
+                        v.repo = None;
+                        v.snapshot = None;
+                        v.selection = None;
+                        // A clean file: the poll's own records cannot
+                        // vouch for it, so the seed is judged against the
+                        // working tree alone — which is the whole point.
+                        v.diff_seed_path = Some("src/other.rs".to_owned());
+                        let polled = v.apply_snapshot(
+                            Ok(Snapshot {
+                                diff: GitDiff {
+                                    branch: None,
+                                    files: files.clone(),
+                                },
+                            }),
+                            cx,
+                        );
+                        assert!(polled, "the first poll moves the pane");
+                        assert_eq!(
+                            v.current_diff_path(),
+                            Some("src/other.rs"),
+                            "the seeded file survives the poll that lands it"
+                        );
+                        v.ensure_file_content(cx);
+                    });
+                    let _ = window.draw(cx);
+                });
+                cx.run_until_parked();
+                vcx.update(|window, cx| {
+                    view.update(cx, |v, _| {
+                        assert!(
+                            matches!(
+                                v.cached_file_view(),
+                                Some(ddu_diff::file_view::FileView::Text(_))
+                            ),
+                            "and the pane read it from the working tree"
+                        );
+                    });
+                    let _ = window.draw(cx);
+                });
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The quick open answers on its first frame from the paths git knows

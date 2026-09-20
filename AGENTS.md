@@ -203,6 +203,18 @@ binary is a target of `ddu-app`, not a layer of its own).
 - **The pane's default surface is File** (`ViewMode::default`): the whole file
   with the diff tinted in place, and no `@@` bands there — the merged stream is
   the file in order.
+- **Every path the tree, the poll and the palette hand back is
+  workdir-relative** (`AppView::diff_root`): a project may sit in a
+  subdirectory of its repository — the shape `crates/` gives a workspace — so
+  the pane reads, resolves (a document's relative images) and keys (the
+  per-file scroll, a rendered document's state) those paths against the
+  **repository's working tree**, never the project's own directory. With the
+  project path as the root, `root.join(path)` names a file that is not there
+  and the pane bands a refusal for a file the tree just listed; the same root
+  also judges a poll's restored seed, and the repository is discovered *before*
+  that judgement, not while rebuilding the tree the poll just invalidated
+  (pinned by `a_project_inside_a_repository_reads_files_from_the_workdir` and
+  `a_seeded_selection_survives_the_first_poll_of_a_nested_project`).
 - **The tree lists the working tree lazily** (`diff/listing.rs`): only the root and
   the directories the user has expanded are read (`list_dir`), merged with the
   poll's diff, so a 40k-file repository draws a few hundred rows. Clean files are

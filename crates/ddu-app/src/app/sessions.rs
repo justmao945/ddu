@@ -234,13 +234,13 @@ impl AppView {
         // a move to another project) has nothing to pin the path against,
         // and waits for the first poll to seed it (see `apply_snapshot`).
         if let Some(path) = seed {
-            let root = self.current_session_cwd();
+            let root = self.diff_root();
             match self.diff() {
                 // The path lands now, or it left the working tree and the
                 // pane stays empty — which is what the poll's own filter
                 // does with a path it cannot find.
                 Some(diff) => {
-                    if lives_in_tree(root.as_deref(), &diff.files, &path) {
+                    if lives_in_tree(Some(&root), &diff.files, &path) {
                         self.select_path(path);
                     }
                 }
