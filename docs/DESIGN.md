@@ -23,9 +23,10 @@
 
 ## 3. Architecture
 
-One Cargo workspace, five crates, layered bottom-up: a crate names the ones
+One Cargo workspace, four crates, layered bottom-up: a crate names the ones
 below it and never the ones above, and `ddu-diff` is a leaf beside the chain
-(§7 owns the diff, §6 the terminal).
+(§7 owns the diff, §6 the terminal). The binary is not a crate of its own — it
+is `ddu-app`'s `[[bin]]`, so the shell ships itself.
 
 ```text
 ddu/
@@ -59,8 +60,9 @@ ddu/
       src/lib.rs
       src/session.rs    # Project / AgentSession / AgentCmd model + resume recipes
       src/config.rs     # settings.json + state.json (paths, load/save, backup)
-    ddu-app/            # the shell: AppView + every panel
+    ddu-app/            # the shell: AppView + every panel + the `ddu` binary
       src/lib.rs        # mounts `app` + `ui`
+      src/main.rs       # the `ddu` bin: init + open_window + Root + menus + AppAssets
       src/app/
         mod.rs          # state (AppView), the actions macro, accessors, panel geometry
         keys.rs         # the binding table + the accel labels menus print
@@ -84,8 +86,6 @@ ddu/
         code_text.rs    # SelectableText (caller-supplied runs)
         markdown.rs     # the image block plugin for a rendered document
         palette.rs      # the quick open's floating overlay
-    ddu/                # the binary: composition only
-      src/main.rs       # init + open_window + Root + menus + AppAssets
   docs/                 # DESIGN / RUNNING / VERIFICATION / UI / SIGNING / FILE_TREE / AGENT_CORE
   assets/               # icon.svg, icons/ (brand + file-kind SVGs), screenshots/
   scripts/              # dev.sh / install.sh / make-bundle.sh + make-signing-identity.sh,
@@ -101,8 +101,9 @@ files. `ddu-app` owns every piece of state; each `ui/` panel is a child view
 that renders `&mut AppView` (cached unless it holds selectable text), so `app`
 and `ui` reference each other by design and share one crate, while cross-module
 traffic inside `app` is `cx.emit / subscribe` (terminal wakeups, resize events)
-or small shared types. `ddu` is the bin: `main.rs` wires the window, the keys
-and the assets and holds no app logic. Don't touch `gpui-base` (unless building
+or small shared types. `ddu-app` also carries the binary: `main.rs` wires the
+window, the keys and the assets and holds no app logic, so the crate that owns
+the shell is the one that ships it. Don't touch `gpui-base` (unless building
 new behavior).
 
 ```toml

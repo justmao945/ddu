@@ -1,10 +1,19 @@
 [package]
 name = "ddu-app"
-description = "The shell: AppView state, the frame and every panel"
+description = "The shell: AppView, every panel, and the ddu executable"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+
+# The binary is named for the app, not the crate: the artifact
+# (`target/release/ddu`), the desktop entry and the window's `app_id`
+# all key off `ddu`. It lives in this package so the shell is one crate
+# that ships itself — `main.rs` only wires the window, the menus and the
+# assets to the library beside it.
+[[bin]]
+name = "ddu"
+path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true

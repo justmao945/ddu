@@ -25,8 +25,9 @@ editing, and where the long form lives.
 
 ## Source map
 
-One Cargo workspace, five crates, layered bottom-up: a crate names the ones
-below it and never the ones above (`ddu-diff` is a leaf beside the chain).
+One Cargo workspace, four crates, layered bottom-up: a crate names the ones
+below it and never the ones above (`ddu-diff` is a leaf beside the chain; the
+binary is a target of `ddu-app`, not a layer of its own).
 
 - `crates/ddu-terminal` — the terminal stack. `lib.rs` is the root: the
   `TermSession` entity + `TermEvent`, and the public surface the pane uses
@@ -54,7 +55,12 @@ below it and never the ones above (`ddu-diff` is a leaf beside the chain).
   `~/Library/Application Support/ddu/` (macOS) or `$XDG_CONFIG_HOME/ddu/`
   (Linux); `DDU_STATE_PATH` / `DDU_SETTINGS_PATH` override. Loads check errors;
   a corrupt file is backed up as `<name>.corrupt-<ts>` and defaults are used.
-- `crates/ddu-app` — `lib.rs` mounts `app` + `ui`.
+- `crates/ddu-app` — the shell, one crate that ships itself: `lib.rs` mounts
+  `app` + `ui`, and `main.rs` is the `ddu` binary (`[[bin]] name = "ddu"` —
+  the artifact, the desktop entry and the window's `app_id` all key off
+  `ddu`, not off the crate name).
+  - `main.rs` — entry, window creation, `AppAssets` (brand SVGs layered over
+    the gpui-kit icon set), the panic log, and the icon-asset test.
   - `app/` — `mod.rs` `AppView` (the shared state + the actions macro + the
     app's own accessors), `keys.rs` (the binding table + accel labels + the
     `Command` table the settings window rebinds), `render.rs`
@@ -81,8 +87,6 @@ below it and never the ones above (`ddu-diff` is a leaf beside the chain).
     caller-supplied `TextRun`s (gpui-base's lays out the runs it built from its
     own text, so a highlighted row cannot ride it); one selection participant
     per row, same contract — and `mod.rs` with the shared metrics + `scaled()`.
-- `crates/ddu` — `main.rs` — entry, window creation, `AppAssets` (brand SVGs
-  layered over the gpui-kit icon set), the panic log, and the icon-asset test.
 - `contrib/usage/` — UsageTray (MIT; not a cargo member, the Rust build never
   touches it).
 - `.omp/agents/AGENTS.md` — the global agent-rules payload deployed to
@@ -108,8 +112,9 @@ below it and never the ones above (`ddu-diff` is a leaf beside the chain).
   outside them); a host with no systemd user session (macOS, a container)
   runs uncapped.
 - `cargo test` — the whole workspace; `-p ddu-app` (or `ddu-core`, `ddu-diff`,
-  `ddu-terminal`, `ddu`) restricts it to one crate's suite, which is also the
-  quickest way to compile just that layer. On Linux wrap it as above:
+  `ddu-terminal`) restricts it to one crate's suite, which is also the quickest
+  way to compile just that layer. `-p ddu-app` runs the library's tests and the
+  binary's. On Linux wrap it as above:
   `scripts/capped.sh cargo test -p ddu-app`.
 
 ## Rules
@@ -117,14 +122,14 @@ below it and never the ones above (`ddu-diff` is a leaf beside the chain).
 - **GPL-free throughout.** Zed's `terminal*`/`mappings` are GPL-3.0: understand
   and rewrite, never paste. Only crates.io artifacts (MIT/Apache) are allowed.
 - **The workspace is layered** (`ddu-terminal`/`ddu-diff` → `ddu-core` →
-  `ddu-app` → the `ddu` bin): a crate names the ones below it and never the ones
-  above, so a setting read goes *up* the stack as an argument — the terminal
-  takes its scrollback cap as a `TermSession::spawn` parameter instead of
-  reading `Config` — and a capability lives with its owner: only `ddu-diff`
-  turns on the `tree-sitter-*` `gpui-kit` features, and the terminal's test-only
-  surface (`inject_bytes`, `kill_and_join`, the spawn-time `allow_parking`) sits
-  behind its `test-support` feature, which `ddu-app`'s dev-dependencies enable
-  for the tests that drive a PTY from another crate.
+  `ddu-app`, whose `main.rs` is the `ddu` binary): a crate names the ones below
+  it and never the ones above, so a setting read goes *up* the stack as an
+  argument — the terminal takes its scrollback cap as a `TermSession::spawn`
+  parameter instead of reading `Config` — and a capability lives with its owner:
+  only `ddu-diff` turns on the `tree-sitter-*` `gpui-kit` features, and the
+  terminal's test-only surface (`inject_bytes`, `kill_and_join`, the spawn-time
+  `allow_parking`) sits behind its `test-support` feature, which `ddu-app`'s
+  dev-dependencies enable for the tests that drive a PTY from another crate.
 - **Never hardcode a shell.** `config::default_shell()` resolves it; a missing
   hardcoded path kills every restored session (`docs/RUNNING.md`).
 - **macOS**: never launch the binary as a background child or via `cargo run` —
