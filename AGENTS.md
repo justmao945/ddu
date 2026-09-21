@@ -20,7 +20,9 @@ editing, and where the long form lives.
 - `docs/UI.md` — GPUI/panel invariants and the measurements behind them.
 - `docs/SIGNING.md` — codesign identity and TCC grants (macOS).
 - `docs/FILE_TREE.md` — the file tree + view panel design, **landed** except
-  per-session worktrees; `docs/AGENT_CORE.md` — design, **not implemented**.
+  per-session worktrees; `docs/AGENT_CORE.md` — the peer-agent runtime, design,
+  **not implemented**; `docs/AGENT_CHIEF.md` — the orchestrator layer on top of
+  it (one chief, a durable task board, a code dispatcher), same status.
 - `docs/omarchy/` — Omarchy desktop tweak notes (host config, not this app).
 
 ## Source map

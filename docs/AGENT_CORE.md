@@ -59,7 +59,9 @@ Goals:
 
 Non-goals (v1):
 
-- No agent hierarchy, no roster tree, no lineage-based context inheritance.
+- No agent hierarchy, no roster tree, no lineage-based context inheritance. A
+  hierarchy over **tasks** (a chief's board) is not a hierarchy over agents and
+  does not violate this: see `AGENT_CHIEF.md` §12.
 - No PTY scraping for native agents. The PTY backend stays for shells and for
   external CLIs (`claude`, `codex`) — see `DESIGN.md` §6.
 - No LSP / browser / MCP / computer-use in the core. These are precisely the
@@ -448,6 +450,10 @@ Two takeaways. The mailbox-per-agent file is a proven, dead-simple
 implementation of the addressing layer (§4.1) — worth copying outright. And the
 hierarchy is deliberate on their side: the unit is a **task**, not a reusable
 conversation, and each teammate is a separate Claude session in its own process.
+`AGENT_CHIEF.md` adopts the first half of that outright (a durable task graph,
+not a manager's memory) and rejects the second: the task's work still happens in
+a reusable conversation, in this process, and the manager holds no context of
+it (§3.2 there).
 
 ### 12.4 Same memory split: Letta
 
@@ -503,7 +509,7 @@ these instead of a fourth thing to maintain.
 | conversation memory vs agent memory split | Letta |
 | event protocol for the front end | AG-UI / ACP |
 | **local-first, single process, desktop** | **—** |
-| **flat — no hierarchy anywhere** | **—** (the two closest multi-agent systems are both hierarchical) |
+| **flat agents — the hierarchy is over tasks** | **—** (the two closest multi-agent systems are both hierarchical over *agents*; `AGENT_CHIEF.md` §12 keeps the flat part and adds a task graph the others lack) |
 | **conversation list as the primary surface, bound to a repo / worktree / diff** | **—** |
 
 Multi-agent chat is no longer a novel idea. The differentiator is the three

@@ -87,6 +87,7 @@ ddu/
         markdown.rs     # the image block plugin for a rendered document
         palette.rs      # the quick open's floating overlay
   docs/                 # DESIGN / RUNNING / VERIFICATION / UI / SIGNING / FILE_TREE / AGENT_CORE
+                        # + AGENT_CHIEF (the orchestrator layer over AGENT_CORE)
   assets/               # icon.svg, icons/ (brand + file-kind SVGs), screenshots/
   scripts/              # dev.sh / install.sh / make-bundle.sh + make-signing-identity.sh,
                         # linux.sh, lib.sh
@@ -293,7 +294,7 @@ struct AgentCmd { program: String, args: Vec<String> }
 * Output parsing: the byte stream is not interpreted as agent events. The one
   exception is the resume id, extracted from the tail of the output (see §6.2)
   and from the persisted `resume_id` on restore.
-* **Native agents (designed, not implemented):** `AGENT_CORE.md` specifies a second backend that runs **in one process** — conversations between equal peers instead of PTY-spawned CLIs. It supersedes this section for native agents; the PTY path here stays for shells and external CLIs (`claude`, `codex`).
+* **Native agents (designed, not implemented):** `AGENT_CORE.md` specifies a second backend that runs **in one process** — conversations between equal peers instead of PTY-spawned CLIs. It supersedes this section for native agents; the PTY path here stays for shells and external CLIs (`claude`, `codex`). `AGENT_CHIEF.md` adds the layer above those peers — one non-working chief per project, a durable task board, and a dispatcher that is code — and is the reconciliation with §2/§12.7's flat claim.
 
 ## 10. Config / Persistence / Shortcuts / Theme
 
