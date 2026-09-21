@@ -243,10 +243,17 @@ fn surface(
             div()
                 .h_full()
                 // Mouse text selection: down starts (double-click = semantic
-                // word), move grows while the button is held, up settles — a
-                // plain click collapses to nothing and clears the wash. The
-                // right-edge scrollbar strip intercepts first: thumb drag or
-                // track paging instead of selecting.
+                // word), up settles — a plain click collapses to nothing and
+                // clears the wash. The right-edge scrollbar strip intercepts
+                // first: thumb drag or track paging instead of selecting.
+                //
+                // Motion is *not* handled here: gpui runs an element's
+                // listeners only while the pointer hovers it, and motion has
+                // to keep arriving after the pointer leaves — off the strip
+                // (so the overlay's hover clears) and off the pane (so a drag
+                // past the top edge gathers scrollback). The terminal element
+                // registers that listener itself, as a raw window-level one
+                // (`ddu_terminal::element`).
                 .on_mouse_down(
                     gpui_kit::MouseButton::Left,
                     cx.listener({
@@ -279,27 +286,6 @@ fn surface(
                         }
                     }),
                 )
-                .on_mouse_move(cx.listener({
-                    let weak = weak.clone();
-                    move |_, event: &MouseMoveEvent, window, cx| {
-                        if let Some(term) = weak.upgrade() {
-                            term.update(cx, |s, cx| {
-                                if s.mouse_motion(event.position, &event.modifiers, window, cx) {
-                                    return;
-                                }
-                                // Hovering the right-edge strip keeps
-                                // the overlay thumb up.
-                                s.scrollbar_hover_at(event.position, cx);
-                                if s.scrollbar_mouse_drag(event.position, cx) {
-                                    return;
-                                }
-                                if let Some((cell, side)) = s.cell_at(event.position, window, cx) {
-                                    s.grow_selection(cell, side, cx);
-                                }
-                            });
-                        }
-                    }
-                }))
                 .on_mouse_up(
                     gpui_kit::MouseButton::Left,
                     cx.listener({

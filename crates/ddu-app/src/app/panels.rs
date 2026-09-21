@@ -1024,4 +1024,150 @@ mod panel_cache_tests {
             }),
         );
     }
+
+    /// The terminal pane's pointer motion has to keep arriving on the
+    /// frames the cached pane only *replays*.
+    ///
+    /// gpui runs an element's own `on_mouse_move` only while the pointer
+    /// hovers that element, so the terminal's motion comes from a raw
+    /// window-level listener the grid element registers in its own paint
+    /// (`ddu_terminal::element`). A cached subtree replays the listeners
+    /// it recorded along with the rest of its paint range
+    /// (`Window::reuse_paint`), which is what lets the overlay's hover
+    /// clear and a drag past the pane's edge keep going on a frame that
+    /// only replayed — the shell notifies the terminal pane for a stream,
+    /// not for a mouse move. Were that replay to stop covering listeners,
+    /// both would work only on the frames that happened to re-render the
+    /// pane.
+    #[test]
+    fn the_terminal_panes_motion_listener_survives_a_replayed_frame() {
+        use crate::app::AppView;
+        use ddu_core::config::{Config, LoadWarnings, ProjectConfig, ShellConfig, State};
+
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 =
+                    TestAppContext::build(dispatcher, Some("pane_motion_survives_a_replay"));
+                let cx = &mut cx0;
+                cx.update(gpui_kit::init);
+                cx.update(|cx| {
+                    cx.set_app_identity("dev.just.ddu", "Day Day Up");
+                    // A silent shell: `cat` never prints, so no reader-thread
+                    // wakeup races the test scheduler.
+                    cx.set_global(Config {
+                        shell: ShellConfig {
+                            program: "/bin/cat".into(),
+                        },
+                        ..Default::default()
+                    });
+                    cx.set_global(LoadWarnings(vec![]));
+                    cx.set_global(State {
+                        projects: Some(vec![ProjectConfig {
+                            name: "proj".into(),
+                            path: std::env::temp_dir(),
+                            expanded: true,
+                            tree_open: vec![],
+                            tree_height: None,
+                            tree_scroll: None,
+                            sessions: vec![],
+                        }]),
+                        ..Default::default()
+                    });
+                });
+                let (view, mut vcx) = cx.add_window_view(|window, cx| AppView::new(window, cx));
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                    view.update(cx, |v, cx| v.spawn_session_of("terminal", window, cx));
+                });
+                // The *visible* session: spawning selects the new row, and
+                // the pane renders that one.
+                let term = vcx.update(|_, cx| {
+                    let v = view.read(cx);
+                    v.projects[0].sessions[v.current_session]
+                        .term
+                        .clone()
+                        .expect("the session spawned")
+                });
+                // Scrollback behind the grid — no history, no scrollbar.
+                // The oldest line carries a marker: the drag has to reach
+                // it to prove the sweep went past the first screen (the
+                // run's first line is cut at its start column, so the mark
+                // sits at the end of that line).
+                vcx.update(|_, cx| {
+                    term.update(cx, |s, _| {
+                        for i in 0..120 {
+                            let mark = if i == 0 { "-OLDEST" } else { "" };
+                            s.inject_bytes(format!("line{i:03}{mark}\r\n").as_bytes());
+                        }
+                    });
+                });
+                vcx.run_until_parked();
+
+                let draw = |vcx: &mut VisualTestContext| {
+                    vcx.update(|window, cx| {
+                        let _ = window.draw(cx);
+                    });
+                };
+                draw(&mut vcx);
+                let pane = vcx.debug_bounds("pane-center").expect("the center pane");
+                let w = pane.size.width;
+                let h = pane.size.height;
+                // The strip is the last few pixels of the pane's right edge
+                // (the element fills the pane), the grid's content sits
+                // PAD inside it, and the title bar is above all of it.
+                let strip = gpui_kit::point(pane.origin.x + w - gpui_kit::px(2.), pane.origin.y + h / 2.);
+                let grid = gpui_kit::point(pane.origin.x + gpui_kit::px(30.), pane.origin.y + gpui_kit::px(40.));
+                let above = gpui_kit::point(grid.x, pane.origin.y - gpui_kit::px(10.));
+
+                // A frame the pane only replays: a *sibling* panel is
+                // notified, so the window draws (and carries the pane's
+                // recorded listeners over) without re-rendering the pane.
+                vcx.update(|_, cx| view.read(cx).sidebar.clone().update(cx, |_, cx| cx.notify()));
+                draw(&mut vcx);
+
+                // Hovering the strip reaches the session from that replayed
+                // frame: the overlay's thumb goes up.
+                vcx.simulate_mouse_move(strip, None, gpui_kit::Modifiers::default());
+                assert!(
+                    vcx.update(|_, cx| term.read(cx).scrollbar_visible()),
+                    "the replayed frame still delivers motion to the session"
+                );
+
+                // And a drag that leaves the pane upward keeps scrolling:
+                // the pointer is above the pane from the first move on.
+                vcx.simulate_mouse_down(grid, gpui_kit::MouseButton::Left, gpui_kit::Modifiers::default());
+                vcx.simulate_mouse_move(above, Some(gpui_kit::MouseButton::Left), gpui_kit::Modifiers::default());
+                // Long enough to run out of scrollback: the swept run then
+                // starts at the oldest line, which was never on screen at
+                // the drag's first move.
+                for _ in 0..200 {
+                    vcx.executor().advance_clock(std::time::Duration::from_millis(40));
+                    vcx.run_until_parked();
+                }
+                vcx.simulate_mouse_up(above, gpui_kit::MouseButton::Left, gpui_kit::Modifiers::default());
+                let copied = vcx.update(|_, cx| {
+                    term.update(cx, |s, cx| {
+                        assert!(s.copy_selection(cx), "the drag left a selection");
+                    });
+                    cx.read_from_clipboard().and_then(|item| item.text())
+                });
+                let copied = copied.expect("the selection is on the clipboard");
+                assert!(
+                    copied.contains("-OLDEST"),
+                    "the drag swept back to the oldest line, {} lines: {:?}",
+                    copied.lines().count(),
+                    copied
+                );
+
+                vcx.update(|_, cx| term.update(cx, |s, _| s.kill_and_join()));
+                vcx.run_until_parked();
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
 }

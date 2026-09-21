@@ -101,10 +101,19 @@ mod tests {
                     TestAppContext::build(dispatcher, Some("stream_repaints_are_throttled"));
                 let cx = &mut cx0;
                 let session = cx.update(spawn_cat);
+                // Repaints are counted as `Wakeup`s, which is the signal
+                // the shell repaints the pane on (`AppView::subscribe_term`):
+                // a `cx.notify()` on the session marks no view dirty, so
+                // observing *that* counted a call that painted nothing.
                 let paints = Rc::new(Cell::new(0usize));
                 cx.update(|cx| {
                     let paints = paints.clone();
-                    cx.observe(&session, move |_, _| paints.set(paints.get() + 1)).detach();
+                    cx.subscribe(&session, move |_, event: &crate::TermEvent, _| {
+                        if *event == crate::TermEvent::Wakeup {
+                            paints.set(paints.get() + 1);
+                        }
+                    })
+                    .detach();
                 });
                 cx.run_until_parked();
                 paints.set(0);
@@ -190,10 +199,19 @@ mod tests {
                 );
                 let cx = &mut cx0;
                 let session = cx.update(spawn_cat);
+                // Repaints are counted as `Wakeup`s, which is the signal
+                // the shell repaints the pane on (`AppView::subscribe_term`):
+                // a `cx.notify()` on the session marks no view dirty, so
+                // observing *that* counted a call that painted nothing.
                 let paints = Rc::new(Cell::new(0usize));
                 cx.update(|cx| {
                     let paints = paints.clone();
-                    cx.observe(&session, move |_, _| paints.set(paints.get() + 1)).detach();
+                    cx.subscribe(&session, move |_, event: &crate::TermEvent, _| {
+                        if *event == crate::TermEvent::Wakeup {
+                            paints.set(paints.get() + 1);
+                        }
+                    })
+                    .detach();
                 });
                 cx.run_until_parked();
                 paints.set(0);

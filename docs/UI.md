@@ -239,6 +239,26 @@ states `root_style()` once so the mount and the panel's root element agree.
 Wakeups never poll-render: the reader thread pushes `PumpMsg` events through a
 subscriber channel.
 
+**A terminal session repaints its pane through `TermEvent::Wakeup`, never
+`cx.notify()`.** A notify on an entity invalidates the windows that *render*
+it, and gpui then walks that entity's ancestors in the view tree
+(`Window::mark_view_dirty`) — a session is not a view, so it has no node there,
+nothing is marked dirty, and the cached pane replays the frame it recorded.
+Every interactive path that looked finished in `ddu-terminal` was still a
+no-op frame: the overlay scrollbar's hover reveal and idle fade, the find bar's
+⌘G/Enter step (the viewport moved, invisibly, while the counter stayed on the
+previous hit) and the output-driven rescan. They emit a wakeup now, and a
+`Wakeup` a *visible* session raises is the whole invalidation (the app's
+subscriber notifies the pane). Measured on the running app, the overlay before
+vs after: hovering the strip for four seconds drew no thumb at all; after,
+~0.3 s to the hovered thumb, the resting thumb for the idle hold, gone at the
+deadline.
+
+The session's own `cx.notify()` in the pump path is gone with it: on a
+*background* row the window does not track the session at all, so the notify
+bought nothing where a wakeup already does the work (and, tracked, it only
+duplicated the invalidation the pane's notify makes).
+
 `AppView::subscribe_term` is the single subscription point for every spawn
 path (new/restart/restore). It repaints the center pane only for the session it
 renders (`is_visible_term`): a background row keeps parsing — selecting it
@@ -280,6 +300,36 @@ p90 3.6 ms, so the original 2.5 ms first step pinned every agent turn at
 15 fps — under the floor, and the stutter was plainly visible. 20 fps in the
 pane is fine to watch; the *session list* stutter was a different bug (the
 cached row missing the title notify, above).
+
+## The terminal's mouse
+
+An element's own listeners (`on_mouse_move`, `on_mouse_up`) run only while the
+pointer hovers that element — gpui gates them on the hitbox
+(`Hitbox::is_hovered`). That is wrong for two things the pane does with the pointer, so
+the pane's motion goes through a **raw window-level listener the grid element
+registers from its own paint** (`TerminalElement::paint` calling
+`Window::on_mouse_event`, dispatched to `TermSession::pointer_moved`): a cached pane
+replays its listeners along with the rest of its subtree, so it costs no frame
+of its own.
+
+* **The overlay scrollbar's hover clears when the pointer leaves the pane.**
+  Gated on the pane, a pointer that moved from the strip into the sidebar or
+  the changes pane never ran the handler again: the hover flag stayed set and
+  the thumb stayed up — widened — until some later reveal re-armed the
+  deadline (measured: still drawn after the pointer had left the pane).
+* **A drag is not bounded by one screen.** Held past the content's top edge the
+  viewport crawls one line per `DRAG_SCROLL_TICK` (40 ms) and the selection
+  grows with it, which needs the *clamped* cell `cell_at` already returns: once
+  the viewport has moved, the same window point addresses the row that scrolled
+  into view. A per-event scroll cannot serve the case that matters — a pointer
+  *held* still at the edge — so the tick is a repeating timer
+  (`arm_drag_scroll`, one in flight, re-armed by the tick itself, stopped by
+  `end_selection`). The pointer leaving the pane upward is exactly what the
+  raw listener is for: the drag keeps going.
+
+The mouse-tracking child (xterm 1002/1003) still only hears motion over its own
+grid, and the pane's own `on_mouse_down`/`on_mouse_up`/`on_mouse_up_out` still
+start and settle a drag from inside the pane.
 
 ## Keyboard
 

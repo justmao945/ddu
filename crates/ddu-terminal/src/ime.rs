@@ -56,7 +56,6 @@ impl EntityInputHandler for TermSession {
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if self.marked_text.take().is_some() {
             cx.emit(TermEvent::Wakeup);
-            cx.notify();
         }
     }
 
@@ -74,7 +73,6 @@ impl EntityInputHandler for TermSession {
             self.scroll_to_bottom();
         }
         cx.emit(TermEvent::Wakeup);
-        cx.notify();
     }
 
     /// IME preedit: remember for the underlined overlay at the cursor.
@@ -88,7 +86,6 @@ impl EntityInputHandler for TermSession {
     ) {
         self.marked_text = (!new_text.is_empty()).then(|| new_text.to_string());
         cx.emit(TermEvent::Wakeup);
-        cx.notify();
     }
 
     /// Anchor the IME candidate popup at the terminal cursor.

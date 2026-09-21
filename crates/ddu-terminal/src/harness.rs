@@ -7,6 +7,7 @@
 //! `use super::*` would pull gpui's `test` proc-macro re-export into
 //! scope, shadowing the built-in `#[test]` and recursing at expansion.
 
+use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use gpui_kit::component::theme::Theme;
 use gpui_kit::{
     App, Context, Entity, IntoElement, Render, Styled as _,
@@ -60,6 +61,20 @@ const TEST_SCROLLBACK: usize = 3000;
 pub(super) fn shutdown(session: &Entity<TermSession>, cx: &mut TestAppContext) {
     cx.update(|cx| session.update(cx, |s, _| s.kill_and_join()));
     cx.run_until_parked();
+}
+
+/// Plant `count` numbered lines (`line000`, `line001`, …) through the
+/// escape parser — the same path PTY output takes, and (unlike
+/// [`TermSession::inject_bytes`]) silent: no pump wakeup lands in the
+/// events a test counts.
+pub(super) fn plant_lines(session: &Entity<TermSession>, cx: &mut App, count: usize) {
+    let mut parser = Processor::<StdSyncHandler>::new();
+    let mut term = session.read(cx).grid.term.lock();
+    for i in 0..count {
+        for &byte in format!("line{i:03}\r\n").as_bytes() {
+            parser.advance(&mut *term, byte);
+        }
+    }
 }
 
 /// The grid's visible text, one line per displayed row. Wide chars

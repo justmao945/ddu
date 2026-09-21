@@ -88,8 +88,10 @@ impl TermSession {
                             this.search.current = 0;
                             this.search_reveal(cx);
                         } else {
+                            // No hits: the counter reads "No results" and
+                            // the old wash goes out — both on the pane.
                             this.search.current = 0;
-                            cx.notify();
+                            cx.emit(TermEvent::Wakeup);
                         }
                     }
                 },
@@ -104,20 +106,22 @@ impl TermSession {
                 input.select_all(window, cx);
             });
         }
+        // Mounts the bar in the pane and scans the query that is already
+        // there: `refresh_search` wakes the pane, no separate notify.
         self.refresh_search(cx);
-        cx.notify();
     }
 
     /// Close the bar and hand focus back to the terminal surface (the
     /// session's own handle, so the cursor goes solid again and PTY
-    /// keystrokes flow).
+    /// keystrokes flow). The wakeup unmounts the bar: the pane holds the
+    /// cached frame that still contains it.
     pub fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.open = false;
         self.search.matches = Rc::new(Vec::new());
         self.search.current = 0;
         self.search_dirty = false;
         self.focus.focus(window, cx);
-        cx.notify();
+        cx.emit(TermEvent::Wakeup);
     }
 
     /// Step through matches, wrapping at both ends (Enter/Shift-Enter,
@@ -159,7 +163,10 @@ impl TermSession {
             .search
             .current
             .min(self.search.matches.len().saturating_sub(1));
-        cx.notify();
+        // The match wash is painted by the element and the counter by the
+        // pane: both need a frame, and a session's `cx.notify()` reaches
+        // neither (see the crate docs).
+        cx.emit(TermEvent::Wakeup);
     }
 
     /// Output landed while the bar is up: mark the match set stale and
@@ -194,9 +201,14 @@ impl TermSession {
     /// Scroll the viewport to the current hit. Already-visible hits
     /// keep the viewport put; hits above park two rows below the top
     /// (context reads downward), hits below land on the last row.
+    ///
+    /// A wakeup is what shows the move: stepping with ⌘G/⌃G and the
+    /// bar's chevrons arrives here with no other repaint in flight, so
+    /// the viewport (and the counter) would sit on the previous hit
+    /// until some unrelated frame.
     pub(crate) fn search_reveal(&mut self, cx: &mut Context<Self>) {
         let Some(&hit) = self.search.matches.get(self.search.current) else {
-            cx.notify();
+            cx.emit(TermEvent::Wakeup);
             return;
         };
         let mut term = self.grid.term.lock();
@@ -214,6 +226,94 @@ impl TermSession {
         if target != offset {
             term.scroll_display(GridScroll::Delta(target - offset));
         }
-        cx.notify();
+        drop(term);
+        // A moved viewport is scroll activity like any other: the overlay
+        // shows where the viewport went.
+        self.reveal_scrollbar(cx);
+        cx.emit(TermEvent::Wakeup);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Selective imports only: `use super::*` would pull gpui's `test`
+    // proc-macro re-export into scope, shadowing the built-in `#[test]`
+    // and recursing forever at expansion.
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use alacritty_terminal::grid::Dimensions as _;
+
+    use crate::harness::{plant_lines, shutdown, spawn_cat};
+    use crate::{TermEvent, TermMatch};
+    use gpui_kit::{TestAppContext, gpui};
+
+    /// ⌘G/⌃G and the bar's chevrons reach `search_reveal` with nothing
+    /// else in flight — no keystroke, no stream frame — so the move it
+    /// makes has to carry its own repaint. It used to ask for one with
+    /// `cx.notify()`, which marks no view dirty on a session that is not
+    /// a view: stepping to an off-screen hit moved the viewport invisibly
+    /// and left the bar's counter on the previous hit (measured on the
+    /// running app: three steps, no repaint).
+    #[test]
+    fn stepping_to_a_hit_moves_the_viewport_and_wakes_the_pane() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 = TestAppContext::build(
+                    dispatcher,
+                    Some("stepping_to_a_hit_moves_the_viewport_and_wakes_the_pane"),
+                );
+                let cx = &mut cx0;
+                let session = cx.update(spawn_cat);
+                cx.update(|cx| plant_lines(&session, cx, 100));
+
+                let wakeups = Rc::new(Cell::new(0usize));
+                cx.update(|cx| {
+                    let wakeups = wakeups.clone();
+                    cx.subscribe(&session, move |_, event: &TermEvent, _| {
+                        if *event == TermEvent::Wakeup {
+                            wakeups.set(wakeups.get() + 1);
+                        }
+                    })
+                    .detach();
+                });
+
+                cx.update(|cx| {
+                    session.update(cx, |s, cx| {
+                        s.search.open = true;
+                        // The head of the first visible line, 60 rows up.
+                        s.search.matches = Rc::new(vec![TermMatch {
+                            line: -60,
+                            start: 0,
+                            end: 4,
+                        }]);
+                        s.search.current = 0;
+                        s.search_reveal(cx);
+                    });
+                });
+
+                let (offset, history) = cx.update(|cx| {
+                    let term = session.read(cx).grid.term.lock();
+                    (term.grid().display_offset(), term.grid().history_size())
+                });
+                assert!(history >= 60, "the planted lines are in the scrollback");
+                assert!(
+                    offset >= 50 && offset <= history,
+                    "the viewport lands on the hit, not on the live bottom (offset {offset})"
+                );
+                assert!(
+                    wakeups.get() >= 1,
+                    "the moved viewport needs a frame of its own"
+                );
+
+                shutdown(&session, cx);
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
     }
 }

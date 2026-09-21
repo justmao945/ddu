@@ -7,6 +7,11 @@ use gpui_kit::*;
 
 use super::*;
 
+/// How fast a drag held past the pane's edge crawls through the
+/// scrollback: one line per tick, so a held pointer reads as a steady
+/// ~25 lines/s.
+const DRAG_SCROLL_TICK: Duration = Duration::from_millis(40);
+
 impl TermSession {
     /// Map a window-coordinate point to a grid cell, clamped into the
     /// visible area (a drag outside the grid pins to its edge). The
@@ -70,12 +75,66 @@ impl TermSession {
         }
     }
 
+    /// Pointer motion of a live drag: extend the selection to the cell
+    /// under the pointer and keep the drag alive once the pointer is
+    /// past the content's top or bottom edge.
+    ///
+    /// The clamped cell is what makes the edge case work: after the
+    /// viewport has moved, the same window point maps to the row that
+    /// scrolled into view, so a drag that runs off the top of the pane
+    /// gathers scrollback instead of stopping at the last visible row
+    /// (a selection is otherwise bounded by one screen, since a drag
+    /// can only address the visible rows).
+    pub fn drag_motion(&mut self, pos: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        if let Some((cell, side)) = self.cell_at(pos, window, cx) {
+            self.grow_selection(cell, side, cx);
+        }
+        self.drag_scroll = self
+            .content_bounds
+            .get()
+            .and_then(|area| match pos.y {
+                y if y < area.origin.y => Some(1),
+                y if y > area.origin.y + area.size.height => Some(-1),
+                _ => None,
+            })
+            .map(|dir| (dir, pos));
+        if self.drag_scroll.is_some() {
+            self.arm_drag_scroll(window, cx);
+        }
+    }
+
+    /// Start the repeating drag autoscroll when it is not already
+    /// running — one tick in flight, re-armed by the tick itself while
+    /// the pointer stays past the edge (the same single-timer shape
+    /// [`TermSession::arm_scrollbar_hide`] uses). A pointer *held* past
+    /// the edge keeps scrolling: motion events alone would stop the
+    /// moment the hand does.
+    fn arm_drag_scroll(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.drag_scroll_armed {
+            return;
+        }
+        self.drag_scroll_armed = true;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(DRAG_SCROLL_TICK).await;
+            let _ = this.update_in(cx, |term, window, cx| {
+                term.drag_scroll_armed = false;
+                let Some((dir, pos)) = term.drag_scroll else {
+                    return;
+                };
+                term.scroll_by(dir as f32, cx);
+                term.drag_motion(pos, window, cx);
+            });
+        })
+        .detach();
+    }
+
     /// End the drag; a plain click (empty selection) clears the wash.
     pub fn end_selection(&mut self, cx: &mut Context<Self>) {
         if !self.selecting {
             return;
         }
         self.selecting = false;
+        self.drag_scroll = None;
         let mut term = self.grid.term.lock();
         if term.selection.as_ref().is_some_and(|s| s.is_empty()) {
             term.selection = None;
@@ -109,17 +168,16 @@ mod tests {
     // Selective imports only: `use super::*` would pull gpui's `test`
     // proc-macro re-export into scope, shadowing the built-in `#[test]`
     // and recursing forever at expansion.
-    use crate::harness::{TestRoot, shutdown, spawn_cat};
+    use crate::harness::{TestRoot, plant_lines, shutdown, spawn_cat};
     use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
     use alacritty_terminal::selection::{Selection, SelectionType};
     use gpui_kit::{
-        AnyWindowHandle, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-        ParentElement as _, Render, Styled as _, TestAppContext, Window, div, gpui,
+        AnyWindowHandle, AppContext as _, Context, Entity, FocusHandle,
+        InteractiveElement as _, IntoElement, Modifiers, MouseButton, ParentElement as _,
+        Render, Styled as _, TestAppContext, Window, div, gpui, point, px,
     };
 
-    use super::TermSession;
-
-
+    use super::{DRAG_SCROLL_TICK, TermSession};
 
     /// ⌃⇧C's terminal half: the chord reaches `copy_selection` (bound in
     /// `keys.rs`), and that puts the grid's selection on the clipboard —
@@ -392,6 +450,192 @@ mod tests {
                 let copied =
                     vcx.update(|_, cx| session.read(cx).grid.term.lock().selection_to_string());
                 assert_eq!(copied.as_deref(), Some("-abcde"));
+
+                shutdown(&session, cx);
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    /// A drag is not bounded by one screen. Held past the top edge the
+    /// viewport crawls through the scrollback — one line per tick with no
+    /// further pointer motion, because a *held* pointer is the case a
+    /// per-event scroll cannot serve — and the selection grows with it.
+    ///
+    /// The last leg is the one no element listener can do: the pointer
+    /// leaves the pane entirely (upward, still inside the window) and the
+    /// drag keeps going. gpui gates an element's own `on_mouse_move` on
+    /// the pointer hovering that element, so before the element's raw
+    /// window-level listener existed, both the crawl and this leg simply
+    /// froze where the pane ended — that was "cannot select more than one
+    /// screen of text".
+    #[test]
+    fn a_drag_past_the_panes_edge_selects_more_than_a_screen() {
+        struct PaneRoot {
+            term: Entity<TermSession>,
+            focus: FocusHandle,
+        }
+        impl Render for PaneRoot {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let weak = self.term.downgrade();
+                div()
+                    .size_full()
+                    // Room above the pane, so a drag can leave it upward
+                    // while staying inside the window.
+                    .child(div().h(px(120.)))
+                    .child(
+                        div()
+                            .h(px(300.))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener({
+                                    let weak = weak.clone();
+                                    move |_, event: &gpui_kit::MouseDownEvent, window, cx| {
+                                        if let Some(term) = weak.upgrade() {
+                                            term.update(cx, |s, cx| {
+                                                if let Some((cell, side)) =
+                                                    s.cell_at(event.position, window, cx)
+                                                {
+                                                    s.begin_selection(cell, side, 1, cx);
+                                                }
+                                            });
+                                        }
+                                    }
+                                }),
+                            )
+                            // Both halves of the app pane's release wiring:
+                            // inside the pane, and the outside one that
+                            // catches a drag released past its edge.
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener({
+                                    let weak = weak.clone();
+                                    move |_, _, _, cx| {
+                                        if let Some(term) = weak.upgrade() {
+                                            term.update(cx, |s, cx| s.end_selection(cx));
+                                        }
+                                    }
+                                }),
+                            )
+                            .on_mouse_up_out(
+                                MouseButton::Left,
+                                cx.listener({
+                                    let weak = weak.clone();
+                                    move |_, _, _, cx| {
+                                        if let Some(term) = weak.upgrade() {
+                                            term.update(cx, |s, cx| s.end_selection(cx));
+                                        }
+                                    }
+                                }),
+                            )
+                        .child(TermSession::element(weak, self.focus.clone())),
+                    )
+            }
+        }
+
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 = TestAppContext::build(
+                    dispatcher,
+                    Some("a_drag_past_the_panes_edge_selects_more_than_a_screen"),
+                );
+                let cx = &mut cx0;
+                let session = cx.update(spawn_cat);
+                // 120 numbered lines: the grid shows the tail (line09x+)
+                // and the rest is scrollback.
+                cx.update(|cx| plant_lines(&session, cx, 120));
+
+                let session2 = session.clone();
+                let (_view, mut vcx) = cx.add_window_view(move |_, cx| PaneRoot {
+                    term: session2,
+                    focus: cx.focus_handle(),
+                });
+
+                // A rendered frame stashed the element's bounds. Anchor on
+                // a visible row, well inside the grid; `above` is still
+                // inside the pane (its padding), `away` is outside the
+                // pane's own box.
+                let (anchor, above, away) = vcx.update(|window, cx| {
+                    let bounds = session
+                        .read(cx)
+                        .content_bounds
+                        .get()
+                        .expect("painted bounds");
+                    let m = super::element::Metrics::new(window, cx);
+                    let (w, h) = (f32::from(m.cell_width), f32::from(m.line_height));
+                    let x = bounds.origin.x + px(3.5 * w);
+                    (
+                        point(x, bounds.origin.y + px(8.5 * h)),
+                        point(x, bounds.origin.y - px(4.)),
+                        point(x, px(40.)),
+                    )
+                });
+
+                let offset = |vcx: &mut gpui_kit::VisualTestContext| {
+                    vcx.update(|_, cx| {
+                        session.read(cx).grid.term.lock().grid().display_offset()
+                    })
+                };
+                let copied = |vcx: &mut gpui_kit::VisualTestContext| {
+                    vcx.update(|_, cx| {
+                        session.read(cx).grid.term.lock().selection_to_string()
+                    })
+                };
+                let tick = |vcx: &mut gpui_kit::VisualTestContext, ticks: usize| {
+                    for _ in 0..ticks {
+                        vcx.executor().advance_clock(DRAG_SCROLL_TICK);
+                        vcx.run_until_parked();
+                    }
+                };
+                let double = |s: &str| s.lines().count() * 2;
+
+                vcx.simulate_mouse_down(anchor, MouseButton::Left, Modifiers::none());
+                // A drag inside the content scrolls nothing, however long
+                // the pointer is held there.
+                tick(&mut vcx, 5);
+                assert_eq!(offset(&mut vcx), 0, "a drag inside the grid scrolls nothing");
+
+                // Past the top edge — still over the pane — the viewport
+                // crawls and the selection follows it into the scrollback.
+                vcx.simulate_mouse_move(above, MouseButton::Left, Modifiers::none());
+                tick(&mut vcx, 40);
+                let rows = vcx.update(|_, cx| {
+                    let s = session.read(cx);
+                    let (_, rows) = s.grid.size();
+                    rows as usize
+                });
+                let end = offset(&mut vcx);
+                assert!(
+                    end >= 35,
+                    "a held drag keeps crawling through the scrollback (offset {end})"
+                );
+                let text = copied(&mut vcx).expect("a live selection copies");
+                assert!(
+                    double(&text) > rows,
+                    "the swept run is more than one screen wide ({rows} rows): {:?}",
+                    text
+                );
+
+                // The pointer leaves the pane: only the raw window-level
+                // listener sees this, and the drag must keep going.
+                vcx.simulate_mouse_move(away, MouseButton::Left, Modifiers::none());
+                tick(&mut vcx, 20);
+                assert!(
+                    offset(&mut vcx) > end,
+                    "a drag beyond the pane keeps scrolling"
+                );
+
+                // Releasing ends the drag *and* the ticker: a stray timer
+                // would keep the viewport drifting under the user.
+                let end = offset(&mut vcx);
+                vcx.simulate_mouse_up(away, MouseButton::Left, Modifiers::none());
+                tick(&mut vcx, 10);
+                assert_eq!(offset(&mut vcx), end, "the ticker stops with the drag");
 
                 shutdown(&session, cx);
                 cx.update(|cx| {

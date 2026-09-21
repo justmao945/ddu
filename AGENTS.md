@@ -277,7 +277,12 @@ binary is a target of `ddu-app`, not a layer of its own).
   is the single subscription point, and a wakeup repaints the pane only for the
   visible session while an OSC-title change notifies the sidebar row from a
   *background* session too (its spinner is on screen even when its grid is not;
-  a row left to the duration tick reads as jerky). The adaptive
+  a row left to the duration tick reads as jerky). A session-side change the
+  user can see goes through `TermEvent::Wakeup` and **never** `cx.notify()`:
+  the session is not a view, so a notify marks no view dirty and the cached
+  pane replays its recorded frame — that is how the overlay scrollbar's reveal
+  and fade, the find bar's step and the rescan came to draw nothing
+  (`docs/UI.md`). The adaptive
   `stream_interval` steps must sit above a real frame's paint cost. The one
   wall-clock repaint — the sidebar's `m`/`h`/`d` duration reading — sleeps to
   that reading's own turn-over (`AgentSession::label_change_in`, capped by

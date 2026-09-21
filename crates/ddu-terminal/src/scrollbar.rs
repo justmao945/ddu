@@ -98,8 +98,10 @@ impl TermSession {
     /// Scroll activity happened: keep the thumb up for another idle
     /// window.
     pub(super) fn reveal_scrollbar(&mut self, cx: &mut Context<Self>) {
+        let was = self.scrollbar_look();
         self.scrollbar_until = Some(Instant::now() + SCROLLBAR_IDLE);
         self.arm_scrollbar_hide(cx);
+        self.wake_overlay_change(was, cx);
     }
 
     /// One-shot repaint at the end of the idle window — without it
@@ -124,15 +126,26 @@ impl TermSession {
                 term.scrollbar_hide_armed = false;
                 if term.scrollbar_activity() {
                     term.arm_scrollbar_hide(cx);
+                    // Still up (hover or a live drag): the deadline
+                    // moved, the frame did not.
+                    return;
                 }
-                cx.notify();
+                // The idle window closed with the pointer away and no
+                // drag: this frame is where the thumb goes out, and no
+                // later one asks for it.
+                cx.emit(TermEvent::Wakeup);
             });
         })
         .detach();
     }
 
-    /// Mouse over the right-edge strip (hover keeps the thumb up).
+    /// Mouse over the right-edge strip (hover keeps the thumb up). The
+    /// pointer is *anywhere* in the window here — the element's raw
+    /// motion listener is the caller, so leaving the strip — or the
+    /// whole pane — clears the hover instead of leaving the thumb up
+    /// for good (an element-gated `on_mouse_move` never sees the exit).
     pub fn scrollbar_hover_at(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let was = self.scrollbar_look();
         let hovered = self
             .scrollbar_geometry()
             .map(|(track, _)| {
@@ -142,13 +155,30 @@ impl TermSession {
                 hit.contains(&pos)
             })
             .unwrap_or(false);
-        let changed = self.scrollbar_hover != hovered;
         self.scrollbar_hover = hovered;
         if hovered {
-            self.reveal_scrollbar(cx);
+            self.scrollbar_until = Some(Instant::now() + SCROLLBAR_IDLE);
+            self.arm_scrollbar_hide(cx);
         }
-        if changed {
-            cx.notify();
+        self.wake_overlay_change(was, cx);
+    }
+
+    /// What the overlay looks like this frame: up or not, and widened
+    /// (hovered/dragged) or not. Anything that moves this needs a frame
+    /// of its own.
+    fn scrollbar_look(&self) -> (bool, bool) {
+        (self.scrollbar_visible(), self.scrollbar_engaged())
+    }
+
+    /// Repaint the pane when the overlay's look changed. A visibility
+    /// flip is invisible to `cx.notify()` (see the crate docs: a
+    /// session is not a view, so no view is marked dirty and the cached
+    /// pane replays its old frame) — `Wakeup` is the shell's repaint
+    /// signal, and the two callers above are the reveal, the hover
+    /// change and the idle fade.
+    fn wake_overlay_change(&mut self, was: (bool, bool), cx: &mut Context<Self>) {
+        if was != self.scrollbar_look() {
+            cx.emit(TermEvent::Wakeup);
         }
     }
 
@@ -224,17 +254,34 @@ impl TermSession {
         true
     }
 
-    /// End any scrollbar drag (mouse up anywhere).
+    /// End any scrollbar drag (mouse up anywhere). Only a real drag
+    /// keeps the thumb up afterwards: the app wires this to both the
+    /// pane's mouse up and its mouse-up-outside, and a click that had
+    /// nothing to do with the strip (anywhere in the window) must not
+    /// reveal the overlay.
     pub fn scrollbar_mouse_up(&mut self, cx: &mut Context<Self>) {
-        self.scrollbar_drag = None;
-        self.reveal_scrollbar(cx);
+        if self.scrollbar_drag.take().is_some() {
+            self.reveal_scrollbar(cx);
+        }
     }
 }
 
 #[cfg(test)]
 mod scrollbar_tests {
+    // Selective imports only, for the reason every terminal test module
+    // states: a glob of the gpui prelude would bring gpui's `test`
+    // attribute into scope, which expands into itself.
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::time::{Duration, Instant};
+
     use super::{SCROLLBAR_W, scrollbar_geometry};
-    use gpui_kit::{Bounds, point, px, size};
+    use crate::harness::{TestRoot, plant_lines, shutdown, spawn_cat};
+    use crate::TermSession;
+    use gpui_kit::{
+        AnyWindowHandle, App, AppContext as _, Bounds, Entity, Modifiers, Pixels, Point,
+        TestAppContext, gpui, point, px, size,
+    };
 
     fn area() -> Bounds<gpui_kit::Pixels> {
         Bounds {
@@ -278,5 +325,180 @@ mod scrollbar_tests {
     fn huge_scrollback_keeps_grabbable_thumb() {
         let (_, thumb) = scrollbar_geometry(area(), 24, 100_000, 50_000, false).unwrap();
         assert_eq!(f32::from(thumb.size.height), 48.);
+    }
+
+    // ── the overlay's repaint contract ────────────────────────────────
+    //
+    // The pane is mounted `Entity::cached`, and the session is not a
+    // view: `cx.notify()` on it marks no view dirty, so the pane replays
+    // its recorded frame and the thumb neither appears nor goes away.
+    // `TermEvent::Wakeup` is what the shell turns into that repaint
+    // (`AppView::subscribe_term`), and these two tests pin every flip of
+    // the overlay's look to it.
+
+    /// Bounds a paint would have stashed, with scrollback behind them
+    /// (no history, no scrollbar).
+    fn painted(session: &Entity<TermSession>, cx: &mut App) -> (Point<Pixels>, Point<Pixels>) {
+        session.update(cx, |s, _| {
+            s.grid_bounds.set(Some(Bounds {
+                origin: point(px(100.), px(50.)),
+                size: size(px(800.), px(500.)),
+            }));
+        });
+        plant_lines(session, cx, 100);
+        // The strip (`SCROLLBAR_W` at the right edge, hit-tested ±4px),
+        // and a point well inside the pane.
+        (
+            point(px(100. + 800. - SCROLLBAR_W / 2.), px(300.)),
+            point(px(400.), px(300.)),
+        )
+    }
+
+    /// The panes' cached-frame rule reaches the overlay too: hovering the
+    /// strip is a *render* change with no stream behind it, so without
+    /// the wakeup the thumb simply never appears (measured on the running
+    /// app before this: four seconds of hovering the strip drew nothing).
+    #[test]
+    fn the_overlay_wakes_the_pane_when_its_look_changes() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 = TestAppContext::build(
+                    dispatcher,
+                    Some("the_overlay_wakes_the_pane_when_its_look_changes"),
+                );
+                let cx = &mut cx0;
+                let window = cx.add_window(|_, _| TestRoot);
+                let window = AnyWindowHandle::from(window);
+                let session = cx.update(spawn_cat);
+                let (strip, inside) = cx.update(|cx| painted(&session, cx));
+
+                let wakeups = Rc::new(Cell::new(0usize));
+                cx.update(|cx| {
+                    let wakeups = wakeups.clone();
+                    cx.subscribe(&session, move |_, event: &crate::TermEvent, _| {
+                        if *event == crate::TermEvent::Wakeup {
+                            wakeups.set(wakeups.get() + 1);
+                        }
+                    })
+                    .detach();
+                });
+                let hover = |cx: &mut TestAppContext, pos| {
+                    cx.update_window(window, |_, _, cx| {
+                        session.update(cx, |s, cx| s.scrollbar_hover_at(pos, cx));
+                    })
+                    .unwrap();
+                };
+                // (visible, engaged, hovered)
+                let look = |cx: &mut TestAppContext| {
+                    cx.update(|cx| {
+                        let s = session.read(cx);
+                        (
+                            s.scrollbar_visible(),
+                            s.scrollbar_engaged(),
+                            s.scrollbar_hover,
+                        )
+                    })
+                };
+
+                // On the strip: up *and* widened, on one frame.
+                hover(cx, strip);
+                assert_eq!(wakeups.get(), 1, "the reveal needs a frame of its own");
+                assert_eq!(look(cx), (true, true, true));
+
+                // Same hover again (the pointer keeps moving over the
+                // strip): the look did not change, so no frame is owed.
+                hover(cx, strip);
+                assert_eq!(wakeups.get(), 1, "a re-hover repaints nothing");
+
+                // Off the strip but still inside the pane: the thumb drops
+                // back to its resting width, and only a *drag* would hold
+                // it up.
+                hover(cx, inside);
+                assert_eq!(wakeups.get(), 2, "the un-widen needs a frame");
+                assert_eq!(
+                    look(cx),
+                    (true, false, false),
+                    "recent scroll activity holds it up, back at rest, for the idle window"
+                );
+
+                // The idle window closes with the pointer away: the frame
+                // this one-shot timer asks for is the only one that takes
+                // the thumb out, so it must be a wakeup.
+                cx.update(|cx| {
+                    session.update(cx, |s, _| s.scrollbar_until = Some(Instant::now()));
+                });
+                cx.executor().advance_clock(Duration::from_secs(3));
+                cx.run_until_parked();
+                assert_eq!(wakeups.get(), 3, "the fade-out needs a frame");
+                assert_eq!(look(cx).0, false, "the idle window closed: the thumb is out");
+
+                shutdown(&session, cx);
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
+    }
+
+    /// The hover follows the pointer *outside* the pane. The pane's own
+    /// element listener only sees motion while the pointer hovers it, so
+    /// the flag used to stay set the moment the pointer left the pane —
+    /// and the thumb stayed up, widened, until some later reveal reset
+    /// the deadline (that is what the element's raw window-level listener
+    /// is for).
+    #[test]
+    fn the_hover_clears_when_the_pointer_leaves_the_pane() {
+        gpui::run_test_once(
+            0,
+            Box::new(|dispatcher| {
+                let mut cx0 = TestAppContext::build(
+                    dispatcher,
+                    Some("the_hover_clears_when_the_pointer_leaves_the_pane"),
+                );
+                let cx = &mut cx0;
+                let window = cx.add_window(|_, _| TestRoot);
+                let window = AnyWindowHandle::from(window);
+                let session = cx.update(spawn_cat);
+                let (strip, _) = cx.update(|cx| painted(&session, cx));
+                // The pointer left the pane: over the sidebar, say.
+                let away = point(px(20.), px(300.));
+
+                let moved = |cx: &mut TestAppContext, pos| {
+                    cx.update_window(window, |_, window, cx| {
+                        session.update(cx, |s, cx| {
+                            s.pointer_moved(pos, &Modifiers::none(), window, cx);
+                        });
+                    })
+                    .unwrap();
+                };
+
+                let look = |cx: &mut TestAppContext| {
+                    cx.update(|cx| {
+                        let s = session.read(cx);
+                        (s.scrollbar_hover, s.scrollbar_engaged())
+                    })
+                };
+
+                moved(cx, strip);
+                assert_eq!(look(cx), (true, true));
+
+                moved(cx, away);
+                assert_eq!(
+                    look(cx),
+                    (false, false),
+                    "the pointer is not on the strip any more"
+                );
+
+                shutdown(&session, cx);
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+            }),
+        );
     }
 }

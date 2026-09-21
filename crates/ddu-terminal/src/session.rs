@@ -73,6 +73,8 @@ impl TermSession {
                 scrollbar_hover: false,
                 scrollbar_until: None,
                 scrollbar_hide_armed: false,
+                drag_scroll: None,
+                drag_scroll_armed: false,
                 mouse_held: None,
                 mouse_cell: (u32::MAX, u32::MAX),
                 wheel_remainder: 0.,
@@ -118,8 +120,12 @@ impl TermSession {
                         let prev = last_frame.get();
                         if prev.map_or(true, |t| now.duration_since(t) >= interval) {
                             last_frame.set(Some(now));
+                            // The wakeup alone: `cx.notify()` on the
+                            // session would mark the window dirty for a
+                            // frame that a *background* row (no pane
+                            // notify) has nothing to show for — see the
+                            // crate docs.
                             let _ = weak.update(cx, |_, cx| {
-                                cx.notify();
                                 cx.emit(TermEvent::Wakeup);
                             });
                         } else if !flush_armed.replace(true) {
@@ -136,7 +142,6 @@ impl TermSession {
                                 flush_armed.set(false);
                                 last_frame.set(Some(cx.background_executor().now()));
                                 let _ = weak.update(cx, |_, cx| {
-                                    cx.notify();
                                     cx.emit(TermEvent::Wakeup);
                                 });
                             }));
@@ -153,7 +158,6 @@ impl TermSession {
                                 s.resume_id = grid::extract_resume_id(&s.grid.recent.tail());
                             }
                             cx.emit(TermEvent::Exit(code));
-                            cx.notify();
                         });
                         break;
                     }

@@ -16,6 +16,18 @@
 //! `selection` (text selection), `scrollbar` (the overlay bar) and
 //! `ime` (input-method entry).
 //!
+//! **A session change the user can see repaints through
+//! [`TermEvent::Wakeup`], never `cx.notify()`.** The session is not a
+//! view: `App::notify` invalidates the windows that *render* the
+//! entity, and `Window::mark_view_dirty` then walks the entity's
+//! ancestors in the view tree — a plain entity has no node there, so
+//! nothing is marked dirty, the pane (mounted with `Entity::cached`)
+//! replays its recorded frame, and the change never appears. The
+//! shell's subscriber turns a wakeup into exactly that repaint
+//! (`AppView::subscribe_term`), so every interactive mutation —
+//! keystrokes, scroll, selection, the overlay's reveal/fade, find-bar
+//! step and rescan — goes through it.
+//!
 //! Only the types the shell names are public — the entity, its events,
 //! and the spawn/match/mouse enums — plus the test-only surface behind
 //! the `test-support` feature; every module above is an implementation
@@ -112,6 +124,14 @@ pub struct TermSession {
     /// The one-shot repaint that makes the fade-out actually fire is in
     /// flight (see [`TermSession::arm_scrollbar_hide`]).
     scrollbar_hide_armed: bool,
+    /// Live drag autoscroll: the `scroll_by` sign (+1 = towards history)
+    /// plus the last pointer position, so each tick can extend the
+    /// selection after the viewport moved. `None` while the pointer is
+    /// inside the content rect.
+    drag_scroll: Option<(i32, Point<Pixels>)>,
+    /// The one repeating autoscroll tick is in flight (the single-timer
+    /// shape [`TermSession::arm_scrollbar_hide`] uses).
+    drag_scroll_armed: bool,
     /// Button code held while the child tracks the mouse (xterm 1002
     /// drag reports); None when no button is down.
     mouse_held: Option<u8>,

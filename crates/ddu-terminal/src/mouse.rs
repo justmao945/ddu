@@ -164,6 +164,38 @@ impl TermSession {
         true
     }
 
+    /// The pane's pointer motion, called from the element's raw
+    /// window-level listener (`element.rs`, where the listener is
+    /// registered).
+    ///
+    /// It is the *element's* listener and not the pane div's
+    /// `on_mouse_move` because gpui gates an element's listeners on the
+    /// pointer hovering that element, and two of the three things a
+    /// motion has to do here happen *outside* the pane: the overlay's
+    /// hover must clear when the pointer leaves the strip, and a drag
+    /// past the top edge keeps extending the selection into the
+    /// scrollback. A child that tracks the mouse still only hears
+    /// motion over its own grid.
+    pub fn pointer_moved(
+        &mut self,
+        pos: Point<Pixels>,
+        modifiers: &Modifiers,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let over_grid = self.grid_bounds.get().is_some_and(|b| b.contains(&pos));
+        if over_grid && self.mouse_motion(pos, modifiers, window, cx) {
+            return;
+        }
+        self.scrollbar_hover_at(pos, cx);
+        if self.scrollbar_mouse_drag(pos, cx) {
+            return;
+        }
+        if self.selecting {
+            self.drag_motion(pos, window, cx);
+        }
+    }
+
     /// Map a window point to 1-based screen (col, row) — the coordinate
     /// space mouse reports use. Unlike `cell_at`, no scrollback offset.
     fn screen_cell_at(

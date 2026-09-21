@@ -223,6 +223,25 @@ impl Element for TerminalElement {
             ElementInputHandler::new(bounds, session.clone()),
             cx,
         );
+        // The pane's pointer motion, as a *raw* window listener: gpui
+        // gates an element's own `on_mouse_move` on the pointer hovering
+        // the element, and the overlay's hover has to clear when the
+        // pointer leaves the strip (or the pane), while a drag past the
+        // pane's edge has to keep extending the selection. Registered
+        // from the paint like every other listener, so a cached pane
+        // replays it with the rest of its subtree and no frame is owed
+        // to it.
+        let motion = session.downgrade();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase != DispatchPhase::Bubble {
+                return;
+            }
+            let Some(term) = motion.upgrade() else {
+                return;
+            };
+            let (pos, modifiers) = (event.position, event.modifiers);
+            term.update(cx, |term, cx| term.pointer_moved(pos, &modifiers, window, cx));
+        });
         let m = Metrics::new(window, cx);
         // Same thumb tokens the Base scrollbar styles resolve to (the
         // diff panes): resting/hover colors + the theme corner radius.
