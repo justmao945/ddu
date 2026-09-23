@@ -15,11 +15,13 @@
 //! the unit here and why its formatting is re-rendered as a nested view
 //! rather than edited in place.
 //!
-//! A picture's box is the *fitted* picture and not the pane's width —
-//! gpui sizes a relative-width `img` from the picture's intrinsic height
-//! and then paints it fitted to the box's width, so the two rectangles
-//! disagree and the document's prose lands inside the picture. [`image`]
-//! carries the reasoning; the test below pins it.
+//! A picture is painted inside the `img`'s own box, and gpui sizes a
+//! relative-width `img` from the picture's intrinsic height — so a box
+//! that is not capped is the pane's width by the picture's pixels, and
+//! the picture painted in it is whatever fits *that* rectangle: a
+//! document's screenshot came out upscaled as wide as the pane (blurry)
+//! and a tall one reached past the block that reserved it, over the
+//! prose below. [`image`] caps both axes; the test below pins it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -168,23 +170,33 @@ fn image_run(text: &str, ix: usize) -> AnyElement {
 /// [`img`] here takes a path. A local path that is not there renders its
 /// alt text, so a broken reference is visible instead of silent.
 ///
-/// The box is the **picture's own fitted size**, and that is load-bearing:
-/// `img` takes the height of a relative-width picture from the picture's
-/// *intrinsic* height, so a `w_full` box is only as tall as the picture's
-/// pixels, while the picture it paints is fitted to the box's *width*.
-/// The two rectangles then disagree and the picture is drawn out of its
-/// own box, over the block that box placed below it. Measured on the pane
-/// that rendered `contrib/usage/README.md` (812px of room for the
-/// 250×52 `menubar.png`): box 812×52, picture 812×169 — 117px past its own
-/// box — and the paragraph the block put 8px under that box drew from
-/// 60px, inside the picture.
+/// The caps are on the `img` itself, and that is load-bearing: the `img` is
+/// what paints, so the box taffy sizes for it is the rectangle
+/// `ObjectFit::Contain` fits the picture into, and the block holding it
+/// reserves exactly that rectangle. An *uncapped* `w_full` box is the pane's
+/// width by the picture's own pixels — gpui gives a relative-width picture
+/// its intrinsic height — while the picture is fitted to that box: measured
+/// on the pane that rendered `contrib/usage/README.md` (812px of room, a
+/// 250×52 `menubar.png`), an 812×169 blur out of a 812×52 box, 117px over
+/// the paragraph the block placed 8px below.
 ///
-/// So the ratio comes from the loaded picture (`use_asset` — the cache
-/// [`img`] loads it through) and both axes are capped from its own size:
-/// the box *is* the fitted picture, a picture narrower than the pane is
-/// drawn at the size it was made at (never blown up; the same rectangle
-/// GitHub gives it) and one taller than the pane's cap is the cap, with
-/// the picture inside it.
+/// A wrapper must not carry the caps instead. A `100%`-height child of the
+/// box resolves against the ratio height *before* the caps are applied, so a
+/// wrapper that capped its own width reserved 688×480 while the picture
+/// inside it painted its natural 688×652 — 172px over the prose below, on
+/// the 977px pane this was reported from (the width cap is the trigger: at a
+/// pane narrower than the picture the two agree).
+///
+/// The size itself comes from the loaded asset (`use_asset` — the cache
+/// [`img`] loads through; a `Resource::Path` decodes at scale factor 1, so
+/// its pixel size is the size gpui paints it at): the width is capped at the
+/// picture's own, so a picture narrower than the pane is drawn at the size
+/// it was made at (never blown up), and the height is capped at
+/// [`image_max_h`], so a tall picture is as tall as the pane allows with the
+/// picture letterboxed inside the box. Both caps are needed — taffy clamps
+/// each axis on its own, and one cap alone leaves the other axis free
+/// (measured: a 250×52 picture in a 500px pane boxed 250×104 with only the
+/// width cap).
 fn image(
     url: &str,
     alt: &str,
@@ -208,36 +220,28 @@ fn image(
     let Some(natural) = natural_size(&src, window, cx) else {
         // Not measured yet — `use_asset` has already arranged for this view
         // to be drawn again when the picture lands, so this is one frame:
-        // size it by its own, never upscaled, so the box cannot reach past
-        // the picture even then.
-        return div()
-            .w_full()
-            .child(
-                img(src)
-                    .max_w_full()
-                    .max_h(px(image_max_h()))
-                    .object_fit(ObjectFit::ScaleDown),
-            )
+        // sized by the picture's own, never upscaled, so the box cannot
+        // reach past the picture even then. The `img` alone, like the
+        // measured case: a wrapper is what this function exists to avoid.
+        return img(src)
+            .max_w_full()
+            .max_h(px(image_max_h()))
+            .object_fit(ObjectFit::ScaleDown)
             .into_any_element();
     };
     // A picture is never blown up past the size it was made at, and never
-    // taller than the pane shows. The height has to be capped as well as
-    // the width: taffy resolves the ratio against the *requested* width
-    // and then clamps each axis on its own, so a picture that fits the
-    // pane would otherwise come out as tall as the pane-wide one.
+    // taller than the pane shows. The element that carries those caps is
+    // the `img` itself: it is what paints, so the box that is sized here
+    // is the box it fits the picture into, and the block that holds it
+    // reserves exactly the rectangle the picture can reach.
     let tall = image_max_h().min(f32::from(natural.height));
-    div()
+    img(src)
         .w_full()
         .max_w(natural.width)
         .max_h(px(tall))
-        // The height the picture takes at whatever width the pane gives
-        // it: the ratio is applied to the width the style asked for, which
-        // the caps above then hold to the fitted picture.
-        .aspect_ratio(f32::from(natural.width) / f32::from(natural.height))
-        // The test hook: the box this block hands the picture, which must
-        // be the size the picture is painted at (see the plugin's test).
+        .object_fit(ObjectFit::Contain)
+        // The test hook: the box the picture is painted in.
         .debug_selector(move || format!("md-image-{ix}"))
-        .child(img(src).size_full().object_fit(ObjectFit::Contain))
         .into_any_element()
 }
 
@@ -415,7 +419,9 @@ mod tests {
     // Explicit, not `use super::*`: the parent's glob imports would drag
     // in every component item, and `#[test]` must stay the test harness's.
     use super::{ImageBlock, Part, image_max_h, local_path, mdast, parse_block};
-    use gpui_kit::{Bounds, Entity, Pixels, Render, SharedString, px, size};
+    use gpui_kit::{
+        Bounds, DevicePixels, Entity, ObjectFit, Pixels, Render, SharedString, px, size,
+    };
     use std::path::{Path, PathBuf};
     // Aliased: the component's own `Text` is in scope through its glob
     // import, and the two are not interchangeable.
@@ -544,20 +550,26 @@ mod tests {
         assert_eq!(local_path(base, ""), None);
     }
 
-    /// A picture is boxed at the size it is painted at, so the prose the
-    /// block places below it clears it.
+    /// The box a document's picture is painted in holds the picture: the
+    /// pane's width or the picture's own, whichever is narrower, and the
+    /// picture's height or the pane's cap, whichever is shorter — and the
+    /// picture inside is fitted to that box, its own ratio kept. The prose
+    /// the block places below the box therefore clears the picture.
     ///
-    /// The bug this pins: `img` took the height of a *relative*-width
-    /// picture from the picture's intrinsic height while `Contain` fitted
-    /// the picture to the box's width — two different rectangles. In the
-    /// pane that rendered `contrib/usage/README.md` the 250x52
-    /// `menubar.png` got a box as wide as the pane and 52 tall and was
-    /// painted as wide as the pane and 169 tall, so the paragraph the box
-    /// placed 8px below itself drew across the picture. The box must be the
-    /// *fitted* picture: the natural size when the pane has room (a
-    /// picture is never blown up), the pane's width with the picture's own
-    /// ratio when it has not — either way box and picture are the same
-    /// rectangle and nothing can be laid out inside it.
+    /// The bug this pins is the painted picture leaving the reserved box.
+    /// `img` takes the height of a *relative*-width picture from the
+    /// picture's intrinsic height while `Contain` fits the picture to the
+    /// box's *width*: an uncapped 250x52 `menubar.png` in the 812px pane
+    /// that rendered `contrib/usage/README.md` was boxed 812x52 and
+    /// painted 812x169, 117px over the paragraph the block placed 8px
+    /// below. Capping only the width leaves the mirror image — a 250x52
+    /// picture in a 500px pane boxed 250x104 — and capping only the height
+    /// leaves a tall picture's box at the pane's width, 100s of px of
+    /// blank under a narrow picture. The cases below are those rectangles
+    /// — including the 977px pane `panel.png` (688x652, cap 360) was
+    /// reported from, where the picture is *wider* than the pane: that is
+    /// the width cap's case, and where a box that caps itself reserves less
+    /// than the picture inside it paints.
     #[gpui_kit::gpui::test]
     async fn a_picture_is_boxed_at_the_size_it_is_painted(cx: &mut gpui_kit::TestAppContext) {
         use super::{LocalImages, TextView};
@@ -589,13 +601,14 @@ mod tests {
         }
 
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contrib/usage/docs");
-        // The pictures this repository ships are the two shapes that showed
+        // The pictures this repository ships are the two shapes that show
         // the bug: a 250x52 menu-bar strip, narrower than any pane, and a
         // 688x652 panel shot, wider than the pane and taller than its cap.
         for (file, pane) in [
             ("menubar.png", px(500.)),
             ("menubar.png", px(200.)),
             ("panel.png", px(500.)),
+            ("panel.png", px(977.)),
         ] {
             let source = format!("![shot]({file})\n\nProse under the picture.\n");
             let (view, vcx) = cx.add_window_view(|_, _| Doc {
@@ -611,18 +624,39 @@ mod tests {
             });
             let box_ = load_picture(vcx, &view, "md-image-0");
             let natural = png_size(&dir.join(file));
-            let fitted = natural.width.min(pane);
             let expected = size(
-                fitted,
-                (fitted * (f32::from(natural.height) / f32::from(natural.width)))
-                    .min(natural.height)
-                    .min(px(image_max_h())),
+                natural.width.min(pane),
+                natural.height.min(px(image_max_h())),
             );
             assert!(
                 (box_.size.width - expected.width).abs() < px(0.5)
                     && (box_.size.height - expected.height).abs() < px(0.5),
                 "{file} ({natural:?}) in a {pane:?} pane is boxed {box_:?}, \
-                 not the {expected:?} it is painted at"
+                 not the {expected:?} the pane's room and the caps allow"
+            );
+
+            // What `img` paints inside that box: gpui's own fit, so the
+            // assertion is about the box the picture is given, not about a
+            // second copy of the ratio math.
+            let painted = ObjectFit::Contain.get_bounds(
+                box_,
+                size(
+                    DevicePixels::from(u32::from(natural.width)),
+                    DevicePixels::from(u32::from(natural.height)),
+                ),
+            );
+            let ratio = f32::from(natural.width) / f32::from(natural.height);
+            assert!(
+                painted.size.width <= box_.size.width + px(0.5)
+                    && painted.size.height <= box_.size.height + px(0.5),
+                "{file} ({natural:?}) is painted {painted:?} out of its {box_:?} box"
+            );
+            assert!(
+                painted.size.width <= natural.width + px(0.5)
+                    && painted.size.height <= natural.height + px(0.5)
+                    && (painted.size.width / painted.size.height - ratio).abs() < 0.001,
+                "{file} ({natural:?}) is painted {painted:?}: stretched, or blown \
+                 up past the size it was made at"
             );
         }
     }

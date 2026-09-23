@@ -268,15 +268,19 @@ binary is a target of `ddu-app`, not a layer of its own).
   `remember_scroll`) and applied through `pending_tree_scroll` when the incoming
   project's rows exist (`rebuild_tree_index` — a switch drops the snapshot, and
   with it the index). Neither is a `file_positions` entry; see `docs/UI.md`.
-- **A picture's box is the fitted picture** (`ui/markdown.rs::image`): gpui
-  takes a relative-width `img`'s height from the picture's *intrinsic* height
-  and paints it fitted to the box's *width*, so a `w_full` box and the picture
-  in it are two rectangles — the picture draws out of its own box, over the
-  block that box placed below it (an 812-wide pane left a 250×52 strip an
-  812×52 box and painted the strip 812×169, the prose after it landing inside
-  it). The box therefore takes its ratio from the loaded picture (`use_asset`)
-  with both axes capped from that size: never blown up, never overflowing;
-  pinned by
+- **A picture's box is the fitted picture, and the caps ride the `img`**
+  (`ui/markdown.rs::image`): gpui takes a relative-width `img`'s height from
+  the picture's *intrinsic* height and paints it fitted to the box's *width*,
+  so an uncapped `w_full` box and the picture in it are two rectangles — the
+  picture draws out of its own box, over the block that box placed below it
+  (an 812-wide pane left a 250×52 strip an 812×52 box and painted the strip
+  812×169, the prose after it landing inside it). The caps go on the `img`
+  itself — the element that paints — with the picture's own size from
+  `use_asset`: `w_full` + `max_w(width)` + `max_h(min(cap, height))`, never a
+  wrapper (a `100%`-height child of the box resolves against the ratio height
+  *before* the caps, so a wrapper that capped its own width reserved 688×480
+  while the picture inside painted its natural 688×652 over the prose below,
+  on the 977px pane that reported it); pinned by
   `ui::markdown::tests::a_picture_is_boxed_at_the_size_it_is_painted`.
 - **`h_flex()` centers on the cross axis**: `flex_row` + `items_center`, so a
   row that must hand a child the full height states `items_stretch()`
