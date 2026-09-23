@@ -14,6 +14,12 @@
 //! nodes are explicitly unsupported — which is why one *paragraph* is
 //! the unit here and why its formatting is re-rendered as a nested view
 //! rather than edited in place.
+//!
+//! A picture's box is the *fitted* picture and not the pane's width —
+//! gpui sizes a relative-width `img` from the picture's intrinsic height
+//! and then paints it fitted to the box's width, so the two rectangles
+//! disagree and the document's prose lands inside the picture. [`image`]
+//! carries the reasoning; the test below pins it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -93,7 +99,7 @@ impl MarkdownPlugin for LocalImages {
         )
     }
 
-    fn render(&self, node: &MarkdownNode, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(&self, node: &MarkdownNode, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Some(block) = node.data::<ImageBlock>() else {
             return div().into_any_element();
         };
@@ -102,7 +108,7 @@ impl MarkdownPlugin for LocalImages {
             .gap_2()
             .children(block.parts.iter().enumerate().map(|(ix, part)| match part {
                 Part::Text(text) => image_run(text, ix),
-                Part::Image { url, alt } => image(url, alt, &self.base, cx),
+                Part::Image { url, alt } => image(url, alt, &self.base, ix, window, cx),
             }))
             .into_any_element()
     }
@@ -156,10 +162,37 @@ fn image_run(text: &str, ix: usize) -> AnyElement {
 }
 
 /// One image: a filesystem path when the URL names one next to the
-/// document, otherwise the URL itself (http(s) goes to gpui's own
-/// loader). A local path that is not there renders its alt text, so a
-/// broken reference is visible instead of silent.
-fn image(url: &str, alt: &str, base: &Path, cx: &App) -> AnyElement {
+/// document, otherwise the URL taken as a path — a remote `http(s)` image
+/// is read as a file with that name and renders nothing, since the loader
+/// the text view would have handed it to is the app's http client and
+/// [`img`] here takes a path. A local path that is not there renders its
+/// alt text, so a broken reference is visible instead of silent.
+///
+/// The box is the **picture's own fitted size**, and that is load-bearing:
+/// `img` takes the height of a relative-width picture from the picture's
+/// *intrinsic* height, so a `w_full` box is only as tall as the picture's
+/// pixels, while the picture it paints is fitted to the box's *width*.
+/// The two rectangles then disagree and the picture is drawn out of its
+/// own box, over the block that box placed below it. Measured on the pane
+/// that rendered `contrib/usage/README.md` (812px of room for the
+/// 250×52 `menubar.png`): box 812×52, picture 812×169 — 117px past its own
+/// box — and the paragraph the block put 8px under that box drew from
+/// 60px, inside the picture.
+///
+/// So the ratio comes from the loaded picture (`use_asset` — the cache
+/// [`img`] loads it through) and both axes are capped from its own size:
+/// the box *is* the fitted picture, a picture narrower than the pane is
+/// drawn at the size it was made at (never blown up; the same rectangle
+/// GitHub gives it) and one taller than the pane's cap is the cap, with
+/// the picture inside it.
+fn image(
+    url: &str,
+    alt: &str,
+    base: &Path,
+    ix: usize,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let local = local_path(base, url);
     let src = match &local {
         Some(path) => path.clone(),
@@ -172,15 +205,56 @@ fn image(url: &str, alt: &str, base: &Path, cx: &App) -> AnyElement {
         }
         return crate::ui::meta_text(alt.to_owned(), cx).into_any_element();
     }
+    let Some(natural) = natural_size(&src, window, cx) else {
+        // Not measured yet — `use_asset` has already arranged for this view
+        // to be drawn again when the picture lands, so this is one frame:
+        // size it by its own, never upscaled, so the box cannot reach past
+        // the picture even then.
+        return div()
+            .w_full()
+            .child(
+                img(src)
+                    .max_w_full()
+                    .max_h(px(image_max_h()))
+                    .object_fit(ObjectFit::ScaleDown),
+            )
+            .into_any_element();
+    };
+    // A picture is never blown up past the size it was made at, and never
+    // taller than the pane shows. The height has to be capped as well as
+    // the width: taffy resolves the ratio against the *requested* width
+    // and then clamps each axis on its own, so a picture that fits the
+    // pane would otherwise come out as tall as the pane-wide one.
+    let tall = image_max_h().min(f32::from(natural.height));
     div()
         .w_full()
-        .child(
-            img(src)
-                .w_full()
-                .max_h(px(image_max_h()))
-                .object_fit(ObjectFit::Contain),
-        )
+        .max_w(natural.width)
+        .max_h(px(tall))
+        // The height the picture takes at whatever width the pane gives
+        // it: the ratio is applied to the width the style asked for, which
+        // the caps above then hold to the fitted picture.
+        .aspect_ratio(f32::from(natural.width) / f32::from(natural.height))
+        // The test hook: the box this block hands the picture, which must
+        // be the size the picture is painted at (see the plugin's test).
+        .debug_selector(move || format!("md-image-{ix}"))
+        .child(img(src).size_full().object_fit(ObjectFit::Contain))
         .into_any_element()
+}
+
+/// The picture's own size, straight from the asset cache [`img`] loads it
+/// through — `None` until that load lands, and for a file gpui cannot
+/// decode at all (a broken picture, an unreadable path). A path resource
+/// decodes at scale factor 1, so its pixel size is the size gpui paints
+/// it at.
+fn natural_size(
+    src: &Path,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<gpui_kit::Size<Pixels>> {
+    let resource = Resource::from(src.to_path_buf());
+    let data = window.use_asset::<ImgResourceLoader>(&resource, cx)?.ok()?;
+    let size = data.size(0).map(|d| px(u32::from(d) as f32));
+    (size.width > px(0.) && size.height > px(0.)).then_some(size)
 }
 
 /// The filesystem path a URL names, when it names one: a scheme
@@ -340,7 +414,8 @@ fn markdown_of(block: &ImageBlock) -> String {
 mod tests {
     // Explicit, not `use super::*`: the parent's glob imports would drag
     // in every component item, and `#[test]` must stay the test harness's.
-    use super::{ImageBlock, Part, local_path, mdast, parse_block};
+    use super::{ImageBlock, Part, image_max_h, local_path, mdast, parse_block};
+    use gpui_kit::{Bounds, Entity, Pixels, Render, SharedString, px, size};
     use std::path::{Path, PathBuf};
     // Aliased: the component's own `Text` is in scope through its glob
     // import, and the two are not interchangeable.
@@ -467,5 +542,116 @@ mod tests {
         assert_eq!(local_path(base, "https://example.com/a.png"), None);
         assert_eq!(local_path(base, "data:image/png;base64,AAAA"), None);
         assert_eq!(local_path(base, ""), None);
+    }
+
+    /// A picture is boxed at the size it is painted at, so the prose the
+    /// block places below it clears it.
+    ///
+    /// The bug this pins: `img` took the height of a *relative*-width
+    /// picture from the picture's intrinsic height while `Contain` fitted
+    /// the picture to the box's width — two different rectangles. In the
+    /// pane that rendered `contrib/usage/README.md` the 250x52
+    /// `menubar.png` got a box as wide as the pane and 52 tall and was
+    /// painted as wide as the pane and 169 tall, so the paragraph the box
+    /// placed 8px below itself drew across the picture. The box must be the
+    /// *fitted* picture: the natural size when the pane has room (a
+    /// picture is never blown up), the pane's width with the picture's own
+    /// ratio when it has not — either way box and picture are the same
+    /// rectangle and nothing can be laid out inside it.
+    #[gpui_kit::gpui::test]
+    async fn a_picture_is_boxed_at_the_size_it_is_painted(cx: &mut gpui_kit::TestAppContext) {
+        use super::{LocalImages, TextView};
+        use gpui_kit::prelude::*;
+        use gpui_kit::{Context, Render, Window, div};
+        cx.update(gpui_kit::init);
+
+        struct Doc {
+            width: Pixels,
+            source: String,
+            dir: PathBuf,
+        }
+        impl Render for Doc {
+            fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .w(self.width)
+                    .child(
+                        TextView::markdown(
+                            SharedString::from(format!("md-box-{}", self.width)),
+                            self.source.clone(),
+                        )
+                        .scrollable(false)
+                        .selectable(false)
+                        .style(crate::ui::document_text_style())
+                        .plugin(LocalImages::new(self.dir.clone())),
+                    )
+                    .into_any_element()
+            }
+        }
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contrib/usage/docs");
+        // The pictures this repository ships are the two shapes that showed
+        // the bug: a 250x52 menu-bar strip, narrower than any pane, and a
+        // 688x652 panel shot, wider than the pane and taller than its cap.
+        for (file, pane) in [
+            ("menubar.png", px(500.)),
+            ("menubar.png", px(200.)),
+            ("panel.png", px(500.)),
+        ] {
+            let source = format!("![shot]({file})\n\nProse under the picture.\n");
+            let (view, vcx) = cx.add_window_view(|_, _| Doc {
+                width: pane,
+                source: String::new(),
+                dir: dir.clone(),
+            });
+            vcx.update(|_, cx| {
+                view.update(cx, |doc, cx| {
+                    doc.source = source.clone();
+                    cx.notify();
+                })
+            });
+            let box_ = load_picture(vcx, &view, "md-image-0");
+            let natural = png_size(&dir.join(file));
+            let fitted = natural.width.min(pane);
+            let expected = size(
+                fitted,
+                (fitted * (f32::from(natural.height) / f32::from(natural.width)))
+                    .min(natural.height)
+                    .min(px(image_max_h())),
+            );
+            assert!(
+                (box_.size.width - expected.width).abs() < px(0.5)
+                    && (box_.size.height - expected.height).abs() < px(0.5),
+                "{file} ({natural:?}) in a {pane:?} pane is boxed {box_:?}, \
+                 not the {expected:?} it is painted at"
+            );
+        }
+    }
+
+    /// The size a PNG's own header reports, so the test's expectation is
+    /// the file's and not a number retyped here.
+    fn png_size(path: &Path) -> gpui_kit::Size<Pixels> {
+        let bytes = std::fs::read(path).expect("the picture this test boxes");
+        let width = u32::from_be_bytes(bytes[16..20].try_into().expect("a PNG header"));
+        let height = u32::from_be_bytes(bytes[20..24].try_into().expect("a PNG header"));
+        size(px(width as f32), px(height as f32))
+    }
+
+    /// Draw until the picture's box is measured: the asset cache reads and
+    /// decodes the file off the executor and redraws the view when it lands,
+    /// so the first frames carry an unmeasured block.
+    fn load_picture<V: Render>(
+        vcx: &mut gpui_kit::VisualTestContext,
+        view: &Entity<V>,
+        selector: &'static str,
+    ) -> Bounds<Pixels> {
+        for _ in 0..200 {
+            vcx.update(|_, cx| view.update(cx, |_, cx| cx.notify()));
+            vcx.run_until_parked();
+            if let Some(bounds) = vcx.debug_bounds(selector) {
+                return bounds;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the picture's box was never measured");
     }
 }

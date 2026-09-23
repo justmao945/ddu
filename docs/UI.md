@@ -591,3 +591,29 @@ image plugin's prose runs in `markdown.rs` — a run rendered beside an image
 must not drift from the document around it). Verify at
 `DDU_TEXT_SCALE=1.33`: `h1` is 2× the body, `h4` 1.125×, `h5`/`h6` level with
 it (they used to sit below it).
+
+**A picture's box is the picture, not the pane.** `img`'s auto height comes
+from the picture's *intrinsic* height whenever its width is relative
+(`gpui-pre/src/elements/img.rs`: an `Auto` height falls back to
+`image_size.height` unless the resolved width is an absolute `Length`), while
+the picture is painted through `ObjectFit::Contain` fitted to the box's
+**width**. A `w_full` box and the picture drawn in it are therefore different
+rectangles, and the smaller one is the box: measured on the pane that rendered
+`contrib/usage/README.md` (812px of room), the 250×52 `menubar.png` got an
+812×52 box and was painted 812×169 — so the paragraph the block placed 8px
+under its box drew at 60px, *inside* the picture (the layout was
+self-consistent; only the picture's own rectangle was not).
+`ui/markdown.rs::image` takes the ratio from the picture through the asset
+cache `use_asset` serves (`img` loads through the same one, and a
+`Resource::Path` decodes at scale factor 1, so the pixel size is the painted
+size) and caps **both** axes from it: `w_full` + `max_w(natural.width)` +
+`max_h(min(cap, natural.height))` + `aspect_ratio`. The height cap is not
+redundant — taffy applies the ratio to the *requested* width and then clamps
+each axis on its own, so without it a picture that fits the pane comes out as
+tall as the pane-wide one (measured: a 250×52 picture in a 500-wide pane boxed
+250×104 with only the width cap). A picture narrower than the pane is drawn at
+the size it was made at — never upscaled, the size GitHub gives it — and one
+taller than `image_max_h()` gets that height with the picture letterboxed
+inside the box, which is what the cap was always for. Pinned by
+`ui::markdown::tests::a_picture_is_boxed_at_the_size_it_is_painted` (a
+narrower pane, a wider one, and the cap).
