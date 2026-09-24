@@ -4,17 +4,17 @@
 > the macOS launch constraints, and why they exist. Signing and TCC grants are
 > in `SIGNING.md`.
 
-## The gpui stack is pinned to one commit
+## The gpui stack ships from a release, not a pin
 
-the workspace `Cargo.toml` carries a `[patch.crates-io]` entry pinning `gpui-kit` — and with
-it the four crates that then resolve from that checkout (`gpui-base`,
-`gpui-component`, `gpui-kit-assets`, `gpui-component-macros`) — to `bfd72443`
-on `longbridge/gpui-kit`: the commit that stops a rendered document's inline
-code from wrapping twice (`docs/UI.md`, "The rendered document's text").
-crates.io's newest release, 0.6.1, predates it, so the first build fetches the
-rev from GitHub and needs the network; `Cargo.lock` records the rev, so every
-build after that is offline and byte-reproducible. When a release past 0.6.1
-lands, delete the section and `cargo update -p gpui-kit`.
+Nothing in the workspace patches `gpui-kit`: the stack resolves from crates.io
+(`gpui-kit` 0.6.6, and with it `gpui-base`/`gpui-component` 0.6.6 on
+`gpui-pre` 0.3.6), so a build needs the network only to fetch crates the first
+time. A `[patch.crates-io]` pin to `longbridge/gpui-kit`'s `bfd72443` was
+there while 0.6.1 was the newest release and still carried the rendered
+document's double wrap; the fix shipped in 0.6.2 (`docs/UI.md`, "Inline code
+can wrap twice"), and the pin was dropped for 0.6.6. If a future bump ever
+lands below 0.6.2 — a downgrade, or a fork — that document bug comes back
+with it.
 
 ## Linux (X11 / Wayland)
 
@@ -109,6 +109,6 @@ first frame and no click/activation path recovers it deterministically.
 The bundle launcher cds to `DDU_DIR` (default `~/Code/ddu`) because
 LaunchServices starts apps with cwd `/`; `initial_projects()` uses cwd.
 
-**Do not vendor-patch gpui-pre-macos.** The registry crate (0.3.3, latest) is
-kept pristine; the launch convention above is the chosen fix. (A
+**Do not vendor-patch gpui-pre-macos.** The registry crate is kept pristine;
+the launch convention above is the chosen fix. (A
 `schedule_frame` bypass and an occlusion-guard patch were tried and reverted.)

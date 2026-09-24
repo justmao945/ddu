@@ -30,8 +30,7 @@ is `ddu-app`'s `[[bin]]`, so the shell ships itself.
 
 ```text
 ddu/
-  Cargo.toml            # [workspace]: resolver 3, [workspace.dependencies], the
-                        # gpui-kit `[patch.crates-io]` pin
+  Cargo.toml            # [workspace]: resolver 3, [workspace.dependencies]
   crates/
     ddu-terminal/       # PTY + alacritty grid + the paint element (leaf)
       src/lib.rs        # TermSession + TermEvent + the public surface the pane uses
@@ -115,20 +114,20 @@ gpui-kit = { workspace = true, features = ["tree-sitter-rust", …] }
 # Cargo.toml (workspace root)
 [workspace.dependencies]
 gpui-kit = "0.6"                    # the only GPUI source; never pull gpui directly
-alacritty_terminal = "0.24"         # crates.io build, Apache; never the zed fork git rev
+alacritty_terminal = "0.26"         # crates.io build, Apache; never the zed fork git rev
 portable-pty = "0.9"                # MIT, PTY allocation
-git2 = "0.19"                       # MIT, diff data layer
-rustix = { version = "0.38", features = ["std", "event"] }  # poll(2) timeout on the PTY reader
+git2 = "0.21"                       # MIT, diff data layer
+rustix = { version = "1.1", features = ["std", "event"] }   # poll(2) timeout on the PTY reader
 anyhow = "1"                        # spawn/IO error context
 async-channel = "2"                 # pump → UI wakeup channel (bounded(1) = coalescing)
 parking_lot = "0.12"                # unwrappable locks (TermMeta etc.)
-rfd = "0.15"                        # folder picker, deferred through `window.spawn`
+rfd = "0.17"                        # folder picker, deferred through `window.spawn`
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"                  # settings.json / state.json
-shlex = "1.3"                       # splitting a custom launcher's argument string
+shlex = "2.0"                       # splitting a custom launcher's argument string
 ```
 
-Note: `alacritty_terminal` is pinned at the `0.24` minor line — bump it only after checking docs.rs. Direct GitHub access from China is extremely slow, so **no git dependencies** — crates.io plus a domestic mirror only.
+Note: `alacritty_terminal` moves by minor line (`0.26` now) — its API breaks between them, so read the changelog/docs.rs and let the compiler drive the bump. Direct GitHub access from China is extremely slow, so **no git dependencies** — crates.io plus a domestic mirror only.
 
 ## 4. UI Layout
 
@@ -414,7 +413,7 @@ struct AgentCmd { program: String, args: Vec<String> }
   bounded by how many sessions a person keeps, not by a repo.
 * `render` stays declarative: read state, compose elements; parsing/mutation go in
   named methods. One `cx.notify()` per mutation.
-* Pin `gpui-kit 0.6` (i.e. `gpui-pre 0.3.3`); upgrade only by following gpui-kit.
+* Pin `gpui-kit 0.6` (i.e. `gpui-pre 0.3.6`); upgrade only by following gpui-kit.
 
 ## 12. Milestones
 

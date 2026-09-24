@@ -29,7 +29,7 @@ fn head_diff_in(
     let branch = repo
         .head()
         .ok()
-        .and_then(|head| head.shorthand().map(Into::into));
+        .and_then(|head| head.shorthand().ok().map(Into::into));
     let tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
 
     let mut opts = git2::DiffOptions::new();
@@ -140,7 +140,7 @@ mod tests {
         std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
 
         let diff = snapshot(&dir, &Default::default()).expect("snapshot").diff;
-        assert_eq!(diff.branch.as_deref(), repo.head().unwrap().shorthand());
+        assert_eq!(diff.branch.as_deref(), repo.head().unwrap().shorthand().ok());
 
         let hello = diff
             .files

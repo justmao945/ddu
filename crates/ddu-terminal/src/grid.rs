@@ -43,13 +43,19 @@ enum PollOutcome {
 
 #[cfg(unix)]
 fn poll_readable(fd: i32, timeout: Option<Duration>) -> PollOutcome {
-    use rustix::event::{PollFd, PollFlags, poll};
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
     use rustix::fd::BorrowedFd;
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
     let mut fds = [PollFd::new(&borrowed, PollFlags::IN)];
-    let millis = timeout.map_or(-1, |t| t.as_millis().min(i32::MAX as u128) as i32);
+    // rustix 1.x takes the deadline as a `Timespec`; `None` blocks forever,
+    // which is what the old `-1` millis meant. The one caller passes a
+    // sub-second cadence, so the seconds clamp never bites.
+    let deadline = timeout.map(|t| Timespec {
+        tv_sec: t.as_secs().min(i64::MAX as u64) as _,
+        tv_nsec: t.subsec_nanos() as _,
+    });
     loop {
-        match poll(&mut fds, millis) {
+        match poll(&mut fds, deadline.as_ref()) {
             Ok(0) => return PollOutcome::NotReady,
             Ok(_) => return PollOutcome::Readable,
             Err(rustix::io::Errno::INTR) => continue,
@@ -391,9 +397,7 @@ impl TermGrid {
     pub(crate) fn inject_bytes(&self, bytes: &[u8]) {
         let mut parser: Processor<StdSyncHandler> = Processor::new();
         let mut term = self.term.lock();
-        for &byte in bytes {
-            parser.advance(&mut *term, byte);
-        }
+        parser.advance(&mut *term, bytes);
         // The reader thread wakes the pump after each chunk; planted
         // content must do the same or the UI never learns about it.
         let _ = self.wake.try_send(PumpMsg::Wakeup);
@@ -579,10 +583,10 @@ pub fn spawn_pump(
                     Ok(n) => {
                         recent.push(&buf[..n]);
                         {
+                            // vte 0.15 takes a chunk: one call per read,
+                            // not one per byte (the lock is held either way).
                             let mut term = term.lock();
-                            for &byte in &buf[..n] {
-                                parser.advance(&mut *term, byte);
-                            }
+                            parser.advance(&mut *term, &buf[..n]);
                         }
                         dirty = true;
                         if poll_fd.is_none() || last_wake.elapsed() >= READER_WAKE_MIN {
@@ -922,7 +926,7 @@ mod color_query_tests {
             grid.set_default_colors(colors);
             capture.0.lock().unwrap().clear();
             for byte in b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\" {
-                parser.advance(&mut *grid.term.lock(), *byte);
+                parser.advance(&mut *grid.term.lock(), &[*byte]);
             }
             assert_eq!(&*capture.0.lock().unwrap(), expected.as_bytes());
         }

@@ -2,9 +2,9 @@
 
 Multi-agent workspace: left = projects + agent sessions, center = PTY terminal
 (runs `terminal` / `claude` / `codex` CLIs), right = live git diff. Rust +
-`gpui-kit = "0.6"` (re-exports `gpui-pre 0.3.3` + `gpui-component 0.6`),
-pinned to the upstream commit that fixes the rendered document's double wrap
-until a release carries it (`docs/RUNNING.md`, `docs/UI.md`).
+`gpui-kit = "0.6"` (0.6.6: re-exports `gpui-pre 0.3.6` + `gpui-component`
+0.6.6 — the release that carries the rendered document's double-wrap fix, so
+nothing is patched; `docs/RUNNING.md`, `docs/UI.md`).
 Targets macOS and Linux (X11/Wayland). Apache-2.0, GPL-free throughout
 (`contrib/usage/` is MIT). This file is the short form: the rules to obey while
 editing, and where the long form lives.

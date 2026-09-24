@@ -72,7 +72,7 @@ pub(super) fn plant_lines(session: &Entity<TermSession>, cx: &mut App, count: us
     let mut term = session.read(cx).grid.term.lock();
     for i in 0..count {
         for &byte in format!("line{i:03}\r\n").as_bytes() {
-            parser.advance(&mut *term, byte);
+            parser.advance(&mut *term, &[byte]);
         }
     }
 }

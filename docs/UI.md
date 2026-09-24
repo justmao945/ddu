@@ -8,7 +8,7 @@
 
 `use gpui_kit::*;` plus specific component modules — one GPUI surface, never a
 second one. Never invent gpui APIs: follow the `gpui-kit 0.6` /
-`gpui-component 0.6` / `gpui-pre 0.3.3` sources.
+`gpui-component 0.6` / `gpui-pre 0.3.6` sources.
 
 ## Metrics, selection, accent
 
@@ -568,13 +568,15 @@ document breaks different spans when the font changes, and a macOS window
 usually breaks none — so it reads as "some text overlaps on Linux only", and
 the wrapped line can be *prose*, not just code (a list item's last fragment
 wraps the same way). Fixed upstream in longbridge/gpui-kit#3046
-(`bfd72443`, `crates/base/src/text/inline_flow.rs`: `whitespace_nowrap()` on
-the fragment container, landed 2026-09-11), and the crate is **pinned to that
-commit** in the workspace `Cargo.toml` — 0.6.1, the newest release, still carries the bug —
-which is what the pane renders with (`docs/RUNNING.md`). Verify a future
-release's fix the same way the pin was checked: render a document with inline
-code inside a wrapped paragraph (this repository's own `AGENTS.md` does) and
-look for a span's tail sitting on the line below its box.
+(`crates/base/src/text/inline_flow.rs`: `whitespace_nowrap()` on the fragment
+container, landed 2026-09-11) and shipped in the **0.6.2** release, which is
+what the pane renders with — the workspace used to pin the commit because
+0.6.1, the newest release then, still carried the bug (`docs/RUNNING.md`).
+Check a stack bump the same way the fix was checked: the marker is
+`whitespace_nowrap()` in the resolved `gpui-base`'s `src/text/inline_flow.rs`,
+and the behaviour is a document with inline code inside a wrapped paragraph
+(this repository's own `AGENTS.md` does) drawn without a span's tail sitting
+on the line below its box.
 
 **A heading base is a bare px, so headings do not follow the desktop scale.**
 `TextViewStyle::heading_base_font_size` is `Pixels`, not `Rems` — gpui-base

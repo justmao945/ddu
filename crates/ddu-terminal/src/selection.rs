@@ -294,7 +294,7 @@ mod tests {
                         let mut term = s.grid.term.lock();
                         for i in 0..40 {
                             for &byte in format!("line{i}\r\n").as_bytes() {
-                                parser.advance(&mut *term, byte);
+                                parser.advance(&mut *term, &[byte]);
                             }
                         }
                         term.scroll_display(alacritty_terminal::grid::Scroll::Delta(5));
@@ -404,7 +404,7 @@ mod tests {
                         let mut term = session.read(cx).grid.term.lock();
                         for i in 0..10 {
                             for &byte in format!("row{i:02}-abcdefghij\r\n").as_bytes() {
-                                parser.advance(&mut *term, byte);
+                                parser.advance(&mut *term, &[byte]);
                             }
                         }
                     });
